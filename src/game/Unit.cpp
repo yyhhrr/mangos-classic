@@ -6199,6 +6199,21 @@ void Unit::ApplySpellDispelImmunity(const SpellEntry* spellProto, DispelType typ
 
     if (apply && spellProto->HasAttribute(SPELL_ATTR_EX_DISPEL_AURAS_ON_IMMUNITY))
         RemoveAurasWithDispelType(type);
+
+    // Ê¯ÏñÐÎÌ¬
+    if (apply && spellProto->Id == 20594)
+      {
+        RemoveAurasWithDispelType(DISPEL_DISEASE);
+        RemoveAurasWithDispelType(DISPEL_POISON);
+        RemoveAurasAtMechanicImmunity((1<<(MECHANIC_BLEED -1)), 20594);
+      }
+
+   if (spellProto->Id == 20594)
+      {
+        ApplySpellImmune(spellProto->Id, IMMUNITY_DISPEL, DISPEL_DISEASE, apply);
+        ApplySpellImmune(spellProto->Id, IMMUNITY_DISPEL, DISPEL_POISON, apply);
+        ApplySpellImmune(spellProto->Id, IMMUNITY_MECHANIC, MECHANIC_BLEED, apply);
+      }
 }
 
 float Unit::GetWeaponProcChance() const
