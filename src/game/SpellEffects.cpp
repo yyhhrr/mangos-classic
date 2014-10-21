@@ -3070,6 +3070,30 @@ void Spell::EffectWeaponDmg(SpellEffectIndex eff_idx)
     if (!unitTarget->isAlive())
         return;
 
+     //DIY ³èÎï
+     Player* pl = (Player*)m_caster->GetOwner();
+
+     if (m_caster->GetEntry() == 5433 && m_spellInfo->Id == 13737)
+     {
+            m_caster->CastSpell(unitTarget, 12097, true);
+            m_caster->CastSpell(unitTarget, 23605, true);
+            pl->ModifyHealth(m_caster->GetOwner()->GetMaxHealth() * 0.30f);
+            pl->ModifyPower(POWER_MANA, pl->GetMaxPower(POWER_MANA) * 0.10f);
+     }
+
+    // DIY ³èÎï
+    if (m_caster->GetEntry() == 5433 && m_spellInfo->Id == 15550)
+    {
+        if (pl->GetMoney() >= int32((pl->getLevel()) * COPPER))
+        {
+        m_caster->ModifyPower(POWER_MANA, m_caster->GetMaxPower(POWER_MANA));
+        m_caster->ModifyHealth(m_caster->GetMaxHealth());
+        pl->ModifyMoney(-int32((pl->getLevel()) * COPPER));
+        }
+        else
+            return;
+    }
+
     // multiple weapon dmg effect workaround
     // execute only the last weapon damage
     // and handle all effects at once
