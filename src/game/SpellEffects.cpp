@@ -1542,6 +1542,10 @@ void Spell::EffectApplyAura(SpellEffectIndex eff_idx)
         else
             return;
     }
+    // diy »ð¼ý
+    Player*pl = (Player*)caster;
+    if (this->m_spellInfo->Id == 18391)
+        pl->ModifyMoney(-int32((pl->GetMoney() * 0.10f)));
 
     DEBUG_FILTER_LOG(LOG_FILTER_SPELL_CAST, "Spell: Aura is: %u", m_spellInfo->EffectApplyAuraName[eff_idx]);
 
