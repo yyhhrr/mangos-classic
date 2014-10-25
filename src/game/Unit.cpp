@@ -3396,6 +3396,14 @@ bool Unit::AddSpellAuraHolder(SpellAuraHolder* holder)
                 break;
             }
 
+            if (aurSpellInfo->StackAmount && (aurSpellInfo->SpellIconID == 565 || aurSpellInfo->SpellIconID == 187 || aurSpellInfo->SpellIconID == 816))
+            {
+                // can be created with >1 stack by some spell mods
+                foundHolder->ModStackAmount(holder->GetStackAmount());
+                delete holder;
+                return false;
+            }
+
             bool stop = false;
 
             for (int32 i = 0; i < MAX_EFFECT_INDEX && !stop; ++i)
@@ -3733,6 +3741,53 @@ bool Unit::RemoveNoStackAurasDueToAuraHolder(SpellAuraHolder* holder)
                     break;
                 else
                     next =  m_spellAuraHolders.begin();
+            }
+        }
+
+        if (spellProto->SpellFamilyName == SPELLFAMILY_PALADIN && i_spellProto->SpellFamilyName == SPELLFAMILY_PALADIN)
+        {
+            if (IsNoStackAuraDueToAura(spellId, i_spellId))
+            {
+                if (CompareAuraRanks(spellId, i_spellId) < 0)
+                    return false;                       // cannot remove higher rank
+
+                // Its a parent aura (create this aura in ApplyModifier)
+                if ((*i).second->IsInUse())
+                {
+                    sLog.outError("SpellAuraHolder (Spell %u) is in process but attempt removed at SpellAuraHolder (Spell %u) adding, need add stack rule for Unit::RemoveNoStackAurasDueToAuraHolder", i->second->GetId(), holder->GetId());
+                    continue;
+                }
+                RemoveAurasDueToSpell(i_spellId);
+
+                if (m_spellAuraHolders.empty())
+                    break;
+                else
+                    next =  m_spellAuraHolders.begin();
+            }
+        }
+
+        if (spellProto->SpellFamilyName == SPELLFAMILY_WARRIOR && i_spellProto->SpellFamilyName == SPELLFAMILY_WARRIOR)
+        {
+            if (spellProto->SpellFamilyFlags & UI64LIT(0x10000) && i_spellProto->SpellFamilyFlags & UI64LIT(0x10000))
+            {
+                if (IsNoStackAuraDueToAura(spellId, i_spellId))
+                {
+                    if (CompareAuraRanks(spellId, i_spellId) < 0)
+                        return false;                       // cannot remove higher rank
+
+                    // Its a parent aura (create this aura in ApplyModifier)
+                    if ((*i).second->IsInUse())
+                    {
+                        sLog.outError("SpellAuraHolder (Spell %u) is in process but attempt removed at SpellAuraHolder (Spell %u) adding, need add stack rule for Unit::RemoveNoStackAurasDueToAuraHolder", i->second->GetId(), holder->GetId());
+                        continue;
+                    }
+                    RemoveAurasDueToSpell(i_spellId);
+
+                    if (m_spellAuraHolders.empty())
+                        break;
+                    else
+                        next =  m_spellAuraHolders.begin();
+                }
             }
         }
     }

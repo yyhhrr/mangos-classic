@@ -352,6 +352,14 @@ bool IsNoStackAuraDueToAura(uint32 spellId_1, uint32 spellId_2)
     if (!spellInfo_1 || !spellInfo_2) return false;
     if (spellInfo_1->Id == spellId_2) return false;
 
+    if (spellInfo_1->SpellFamilyName == SPELLFAMILY_PALADIN && spellInfo_2->SpellFamilyName == SPELLFAMILY_PALADIN)
+    {
+        if (IsSealSpell(spellInfo_1) && spellInfo_2->IsFitToFamilyMask(UI64LIT(0x0000000010000100)))
+            return false;
+        if (IsSealSpell(spellInfo_2) && spellInfo_1->IsFitToFamilyMask(UI64LIT(0x0000000010000100)))
+            return false;
+    }
+
     for (int32 i = 0; i < MAX_EFFECT_INDEX; ++i)
     {
         for (int32 j = 0; j < MAX_EFFECT_INDEX; ++j)
