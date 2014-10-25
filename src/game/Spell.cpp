@@ -3640,6 +3640,7 @@ void Spell::TakeCastItem()
 
 void Spell::TakePower()
 {
+
     if (m_CastItem || m_triggeredByAuraSpell)
         return;
 
@@ -3658,7 +3659,87 @@ void Spell::TakePower()
 
     Powers powerType = Powers(m_spellInfo->powerType);
 
-    m_caster->ModifyPower(powerType, -(int32)m_powerCost);
+    if (m_spellInfo->Id == 5209)
+    {
+        m_caster->ModifyPower(powerType, -(int32)m_powerCost);
+        return;
+    }
+     switch (m_spellInfo->SpellFamilyName)
+    {
+        case SPELLFAMILY_WARRIOR:
+        {
+            if (m_spellInfo->SpellFamilyFlags & UI64LIT(0x400000))
+            {
+                m_caster->ModifyPower(powerType, -(int32)m_powerCost);
+                return;
+            }
+            if (m_spellInfo->SpellFamilyFlags & UI64LIT(0x20000))
+            {
+                m_caster->ModifyPower(powerType, -(int32)m_powerCost);
+                return;
+            }
+            if (m_spellInfo->SpellFamilyFlags & UI64LIT(0x80))
+            {
+                m_caster->ModifyPower(powerType, -(int32)m_powerCost);
+                return;
+            }
+            if (m_spellInfo->Id == 1680)
+            {
+                m_caster->ModifyPower(powerType, -(int32)m_powerCost);
+                return;
+            }
+            if (m_spellInfo->Id == 12323)
+            {
+                m_caster->ModifyPower(powerType, -(int32)m_powerCost);
+                return;
+            }
+            if (m_spellInfo->Id == 1161)
+            {
+                m_caster->ModifyPower(powerType, -(int32)m_powerCost);
+                return;
+            }
+        }
+        break;
+
+    case SPELLFAMILY_DRUID:
+        {
+        if (m_spellInfo->SpellFamilyFlags & UI64LIT(0x800))
+            {
+                m_caster->ModifyPower(powerType, -(int32)m_powerCost);
+                return;
+            }
+        if (m_spellInfo->SpellFamilyFlags & UI64LIT(0x8))
+            {
+                m_caster->ModifyPower(powerType, -(int32)m_powerCost);
+                return;
+            }
+
+        }
+        break;
+     }
+    bool hit = true;
+    if (m_caster->GetTypeId() == TYPEID_PLAYER)
+    {
+        if (powerType == POWER_RAGE || powerType == POWER_ENERGY)
+            if (uint64 targetGUID = m_targets.getUnitTargetGuid())
+                for (std::list<TargetInfo>::iterator ihit= m_UniqueTargetInfo.begin(); ihit != m_UniqueTargetInfo.end(); ++ihit)
+                    if (ihit->targetGUID = targetGUID)
+                    {
+                        if (ihit->missCondition != SPELL_MISS_NONE)
+                        {
+                            hit = false;
+                            //lower spell cost on fail (by talent aura)
+                            if (Player* modOwner = m_caster->GetSpellModOwner())
+                                modOwner->ApplySpellMod(m_spellInfo->Id, SPELLMOD_SPELL_COST_REFUND_ON_FAIL, m_powerCost);
+                        }
+                        break;
+                    }
+    }
+
+    if (hit || m_spellInfo->AttributesEx & SPELL_ATTR_EX_REQ_TARGET_COMBO_POINTS || m_spellInfo->AttributesEx & SPELL_ATTR_EX_REQ_COMBO_POINTS)
+        m_caster->ModifyPower(powerType, -(int32)m_powerCost);
+    else
+        m_caster->ModifyPower(powerType, -(int32)m_powerCost/5);
 
     // Set the five second timer
     if (powerType == POWER_MANA && m_powerCost > 0)
