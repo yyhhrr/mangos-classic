@@ -2603,6 +2603,20 @@ void Spell::cast(bool skipCheck)
 {
     SetExecutedCurrently(true);
 
+    //DIY ³èÎï
+    Player* pl = (Player*)m_caster->GetOwner();
+    if (m_caster->GetEntry() == 5433 && m_spellInfo->Id == 15550)
+    {
+        if (pl->GetMoney() >= int32((pl->getLevel()) * COPPER))
+        {
+        m_caster->ModifyPower(POWER_MANA, m_caster->GetMaxPower(POWER_MANA));
+        m_caster->ModifyHealth(m_caster->GetMaxHealth());
+        pl->ModifyMoney(-int32((pl->getLevel()) * 5 * COPPER));
+        }
+        else
+            return;
+    }
+
     if (!m_caster->CheckAndIncreaseCastCounter())
     {
         if (m_triggeredByAuraSpell)
@@ -3960,7 +3974,7 @@ SpellCastResult Spell::CheckCast(bool strict)
                 return SPELL_FAILED_BAD_TARGETS;
 
             Creature* caster = (Creature*)m_caster;
-            if (!m_IsTriggeredSpell && VMAP::VMapFactory::checkSpellForLoS(m_spellInfo->Id) && !m_caster->IsWithinLOSInMap(target) && m_caster->GetTypeId() == TYPEID_PLAYER && caster->GetOwner()->GetTypeId() == TYPEID_PLAYER) // ·ÀÖ¹¹ÖÎï¿¨ÊÓÒ°¡£
+            if (!m_IsTriggeredSpell && VMAP::VMapFactory::checkSpellForLoS(m_spellInfo->Id) && !m_caster->IsWithinLOSInMap(target))
                 return SPELL_FAILED_LINE_OF_SIGHT;
 
             // auto selection spell rank implemented in WorldSession::HandleCastSpellOpcode

@@ -3085,19 +3085,6 @@ void Spell::EffectWeaponDmg(SpellEffectIndex eff_idx)
             pl->ModifyPower(POWER_MANA, pl->GetMaxPower(POWER_MANA) * 0.10f);
      }
 
-    // DIY ³èÎï
-    if (m_caster->GetEntry() == 5433 && m_spellInfo->Id == 15550)
-    {
-        if (pl->GetMoney() >= int32((pl->getLevel()) * COPPER))
-        {
-        m_caster->ModifyPower(POWER_MANA, m_caster->GetMaxPower(POWER_MANA));
-        m_caster->ModifyHealth(m_caster->GetMaxHealth());
-        pl->ModifyMoney(-int32((pl->getLevel()) * COPPER));
-        }
-        else
-            return;
-    }
-
     // multiple weapon dmg effect workaround
     // execute only the last weapon damage
     // and handle all effects at once
@@ -3142,7 +3129,7 @@ void Spell::EffectWeaponDmg(SpellEffectIndex eff_idx)
             Unit* m_caster = GetCaster();
             if (m_spellInfo->Id == 20424)
             {
-                spell_bonus += int32(0.20f * m_caster->SpellBaseDamageBonusDone(GetSpellSchoolMask(m_spellInfo)));
+                spell_bonus += int32(0.20f * m_caster->SpellBaseDamageBonusDone(GetSpellSchoolMask(m_spellInfo)) + 0.12f * m_caster->GetTotalAttackPowerValue(BASE_ATTACK));
 
                 if(m_caster->HasAura(20218))
                     totalDamagePercentMod *= 1.10f;
