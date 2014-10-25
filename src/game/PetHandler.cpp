@@ -85,7 +85,8 @@ void WorldSession::HandlePetAction(WorldPacket& recv_data)
             switch (spellid)
             {
                 case COMMAND_STAY:                          // flat=1792  // STAY
-                    pet->StopMoving();
+                    pet->clearUnitState(UNIT_STAT_MOVING);
+                    pet->InterruptMoving();
                     pet->GetMotionMaster()->Clear(false);
                     pet->GetMotionMaster()->MoveIdle();
                     charmInfo->SetCommandState(COMMAND_STAY);
