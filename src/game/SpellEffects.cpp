@@ -50,6 +50,9 @@
 #include "Util.h"
 #include "TemporarySummon.h"
 #include "ScriptMgr.h"
+#include "GridNotifiers.h"
+#include "GridNotifiersImpl.h"
+#include<iostream>
 
 pEffect SpellEffects[TOTAL_SPELL_EFFECTS] =
 {
@@ -3780,7 +3783,23 @@ void Spell::EffectSanctuary(SpellEffectIndex /*eff_idx*/)
 {
     if (!unitTarget)
         return;
-    // unitTarget->CombatStop();
+
+    std::list<Unit*> targets;
+    MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck u_check(unitTarget, m_caster->GetMap()->GetVisibilityDistance());
+    MaNGOS::UnitListSearcher<MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck> searcher(targets, u_check);
+    Cell::VisitAllObjects(unitTarget, searcher, m_caster->GetMap()->GetVisibilityDistance());
+    for (std::list<Unit*>::iterator iter = targets.begin(); iter != targets.end(); ++iter)
+    {
+        if (!(*iter)->IsNonMeleeSpellCasted(false))
+            continue;
+
+        for (uint32 i = CURRENT_FIRST_NON_MELEE_SPELL; i < CURRENT_MAX_SPELL; i++)
+        {
+            if ((*iter)->GetCurrentSpell(CurrentSpellTypes(i))
+                && (*iter)->GetCurrentSpell(CurrentSpellTypes(i))->m_targets.getUnitTargetGuid() == (unsigned long)unitTarget->GetGUIDLow())
+                (*iter)->InterruptSpell(CurrentSpellTypes(CurrentSpellTypes(i)), false);
+        }
+    }
 
     unitTarget->CombatStop();
     unitTarget->getHostileRefManager().deleteReferences();  // stop all fighting
