@@ -131,8 +131,8 @@ void FleeingMovementGenerator<T>::Initialize(T& owner)
 template<>
 void FleeingMovementGenerator<Player>::Finalize(Player& owner)
 {
+    unit.InterruptMoving();
     owner.clearUnitState(UNIT_STAT_FLEEING | UNIT_STAT_FLEEING_MOVE);
-    owner.StopMoving();
 }
 
 template<>
