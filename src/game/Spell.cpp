@@ -2524,6 +2524,10 @@ void Spell::prepare(SpellCastTargets const* targets, Aura* triggeredByAura)
     // skip triggered spell (item equip spell casting and other not explicit character casts/item uses)
     if (!m_IsTriggeredSpell && isSpellBreakStealth(m_spellInfo))
     {
+        // Sap - don't exit Stealth yet to prevent getting in combat and making Sap impossible to cast
+        // Removing Stealth depends on talent later
+        // Pick Pocket - don't exit Stealth at all
+    if (!(m_spellInfo->SpellFamilyName == SPELLFAMILY_ROGUE && (m_spellInfo->SpellFamilyFlags & UI64LIT(0x00000080) || m_spellInfo->SpellFamilyFlags & 2147483648)))
         m_caster->RemoveSpellsCausingAura(SPELL_AURA_MOD_STEALTH);
         m_caster->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
     }
@@ -2681,6 +2685,12 @@ void Spell::cast(bool skipCheck)
             else if (m_spellInfo->Mechanic == MECHANIC_INVULNERABILITY)
                 AddPrecastSpell(25771);                     // Forbearance
             break;
+        }
+        case SPELLFAMILY_ROGUE:
+        {
+           // exit stealth on sap when improved sap is not skilled
+           if (m_spellInfo->SpellFamilyFlags & UI64LIT(0x00000080) && m_caster->GetTypeId() == TYPEID_PLAYER &&(!m_caster->GetAura(14076,SpellEffectIndex(0)) && !m_caster->GetAura(14094,SpellEffectIndex(0)) && !m_caster->GetAura(14095,SpellEffectIndex(0))))
+               m_caster->RemoveSpellsCausingAura(SPELL_AURA_MOD_STEALTH);
         }
         case SPELLFAMILY_WARRIOR:
             break;
