@@ -52,14 +52,21 @@ void SpellStacker::LoadSpellGroups()
             group.rule = (SpellGroupRule)fields[1].GetUInt32();
             group.name = fields[2].GetCppString();
 
-            if (SpellGroupRule::MAX <= group.rule)
+            if (group.Id < 1 || group.Id > 64)
+            {
+                sLog.outErrorDb("spell_group (Id: %u) is outside supported range [1,64], skipped.", group.Id);
+                continue;
+            }
+
+            if (group.rule != SpellGroupRule::UNIQUE && group.rule != SpellGroupRule::UNIQUE_PER_CASTER && group.rule != SpellGroupRule::UNIQUE_STRONGEST)
             {
                 sLog.outErrorDb("spell_group (Id: %u) has invalid rule %u.", group.Id, static_cast<uint32>(group.rule));
 
                 continue;
             }
 
-            m_spellGroups.emplace(group.Id, group);
+            if (m_spellGroups.emplace(group.Id, group).second)
+                ++count;
         }
         while (queryResult->NextRow());
     }
@@ -98,6 +105,7 @@ void SpellStacker::LoadSpellGroups()
             }
 
             existingItr->second.spellIds.push_back(spellId);
+            ++count;
         }
         while (queryResult->NextRow());
     }
@@ -384,6 +392,11 @@ bool SpellStacker::IsSpellStackableWithSpell(const SpellEntry* entry1, const Spe
     if (entry1->HasAttribute(SPELL_ATTR_PASSIVE) != entry2->HasAttribute(SPELL_ATTR_PASSIVE))
         return true;
 
+    SpellGroupSpellData const* data1 = GetSpellGroupDataForSpell(entry1->Id);
+    SpellGroupSpellData const* data2 = GetSpellGroupDataForSpell(entry2->Id);
+    if (data1 && data2 && data1->rule == SpellGroupRule::UNIQUE_STRONGEST && data2->rule == SpellGroupRule::UNIQUE_STRONGEST && (data1->mask & data2->mask) != 0)
+        return false;
+
     return IsStackableSpell(entry1, entry2, target);
 }
 
@@ -406,6 +419,17 @@ bool SpellStacker::IsSpellStackableWithSpellForDifferentCasters(SpellEntry const
 
     // By default, check formal aura holder stacking rules
     return IsSpellStackableWithSpell(entry1, entry2, target);
+}
+
+bool SpellStacker::HasHigherSpellGroupPriority(SpellEntry const* incoming, SpellEntry const* existing, int32 incomingAmount, int32 existingAmount) const
+{
+    // Mongoose retains its additional critical strike bonus when agility amounts tie.
+    if (!incoming || !existing || incoming->Id != 11334 || existing->Id != 17538 || incomingAmount != existingAmount)
+        return false;
+
+    SpellGroupSpellData const* incomingData = GetSpellGroupDataForSpell(incoming->Id);
+    SpellGroupSpellData const* existingData = GetSpellGroupDataForSpell(existing->Id);
+    return incomingData && existingData && incomingData->rule == SpellGroupRule::UNIQUE_STRONGEST && existingData->rule == SpellGroupRule::UNIQUE_STRONGEST && (incomingData->mask & existingData->mask) != 0;
 }
 
 SpellGroupSpellData const* SpellStacker::GetSpellGroupDataForSpell(uint32 spellId) const

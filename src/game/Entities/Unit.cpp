@@ -4935,6 +4935,7 @@ bool Unit::RemoveNoStackAurasDueToAuraHolder(SpellAuraHolder* holder)
     }
 
     const uint32 spellId = holder->GetId();
+    const bool selfBuff = !IsPassiveSpell(spellProto) && IsPositiveSpell(spellProto) && IsSpellWithCasterSourceTargetsOnly(spellProto) && IsAuraApplyEffects(spellProto, EFFECT_MASK_ALL);
     SpellGroupSpellData const* data = sSpellStacker.GetSpellGroupDataForSpell(spellId);
     auto drGroup = holder->getDiminishGroup();
     SpellEntry const* triggeredBy = holder->GetTriggeredBy();
@@ -4978,6 +4979,7 @@ bool Unit::RemoveNoStackAurasDueToAuraHolder(SpellAuraHolder* holder)
 
         bool unique = false;
         bool personal = false;
+        bool strongest = false;
         if (spellId == existingSpellId)
         {
             personal = false;
@@ -4986,7 +4988,8 @@ bool Unit::RemoveNoStackAurasDueToAuraHolder(SpellAuraHolder* holder)
         if (data && existingData && (data->mask & existingData->mask) != 0)
         {
             personal = data->rule == SpellGroupRule::UNIQUE_PER_CASTER;
-            unique = (personal || data->rule == SpellGroupRule::UNIQUE);
+            strongest = data->rule == SpellGroupRule::UNIQUE_STRONGEST && existingData->rule == SpellGroupRule::UNIQUE_STRONGEST;
+            unique = (personal || data->rule == SpellGroupRule::UNIQUE || strongest);
         }
 
         bool diminished = false;
@@ -5022,11 +5025,25 @@ bool Unit::RemoveNoStackAurasDueToAuraHolder(SpellAuraHolder* holder)
             if (!own && personal && stackable)
                 continue;
 
-            if (!IsSpellWithCasterSourceTargetsOnly(spellProto) && !IsSpellWithCasterSourceTargetsOnly(existingSpellProto))
+            // Preserve higher ranks of self/party-source buffs without changing diminishing returns rules.
+            if (selfBuff && !diminished && sSpellMgr.IsSpellAnotherRankOfSpell(spellId, existingSpellId) && sSpellMgr.IsSpellHigherRankOfSpell(existingSpellId, spellId))
+                return false;
+
+            if (strongest || (!IsSpellWithCasterSourceTargetsOnly(spellProto) && !IsSpellWithCasterSourceTargetsOnly(existingSpellProto)))
             {
                 // holder cannot remove higher/stronger rank if it isn't from the same caster
                 if (IsSimilarExistingAuraStronger(holder, existing)) // TROLOLO
                     return false;
+
+                if (strongest)
+                {
+                    Aura* incomingAura = holder->GetAuraByEffectIndex(EFFECT_INDEX_0);
+                    Aura* existingAura = existing->GetAuraByEffectIndex(EFFECT_INDEX_0);
+                    if (incomingAura && existingAura && sSpellStacker.HasHigherSpellGroupPriority(spellProto, existingSpellProto,
+                        incomingAura->GetModifier()->m_amount / int32(incomingAura->GetStackAmount()),
+                        existingAura->GetModifier()->m_amount / int32(existingAura->GetStackAmount())))
+                        return false;
+                }
 
                 if (!diminished && sSpellMgr.IsSpellAnotherRankOfSpell(spellId, existingSpellId) && sSpellMgr.IsSpellHigherRankOfSpell(existingSpellId, spellId))
                     return false;

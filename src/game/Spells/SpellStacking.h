@@ -33,7 +33,8 @@ enum class SpellGroupRule
 {
     UNIQUE              = 1,
     UNIQUE_PER_CASTER   = 2,
-    MAX                 = 3
+    UNIQUE_STRONGEST    = 3,
+    MAX                 = 4
 };
 
 enum class SpellGroupId
@@ -81,6 +82,7 @@ class SpellStacker
         bool IsSpellStackableWithSpellForDifferentCasters(SpellEntry const* entry1, SpellEntry const* entry2, bool isSameChain, Unit* target) const;
 
         SpellGroupSpellData const* GetSpellGroupDataForSpell(uint32 spellId) const;
+        bool HasHigherSpellGroupPriority(SpellEntry const* incoming, SpellEntry const* existing, int32 incomingAmount, int32 existingAmount) const;
 
     private:
         std::map<uint32, SpellGroup> m_spellGroups;
