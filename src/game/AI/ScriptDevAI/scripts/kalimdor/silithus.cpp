@@ -331,5 +331,6 @@ void AddSC_silithus()
     newScript = new Script;
     newScript->Name = "at_southwind_tower";
     newScript->pAreaTrigger = &AreaTrigger_at_southwind_tower;
-    newScript->RegisterSelf();
+    // Legacy databases may still use at_hive_tower until the spawn group migration is complete.
+    newScript->RegisterSelf(sScriptDevAIMgr.GetScriptId("at_hive_tower") == 0);
 }
