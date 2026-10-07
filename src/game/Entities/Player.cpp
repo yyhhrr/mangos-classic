@@ -20230,6 +20230,12 @@ void Player::AddCooldown(SpellEntry const& spellEntry, ItemPrototype const* item
         auto& cdData = cdDataItr->second;
         if (!cdData->IsPermanent() && (!cdData->IsSpellCDExpired(GetMap()->GetCurrentClockTime()) || !cdData->IsCatCDExpired(GetMap()->GetCurrentClockTime())))
         {
+            // A bot may already have supplied the item cooldown before its zero-cooldown spell starts.
+            // Keep that cooldown intact when this call has no cooldown of its own to add.
+            if (!permanent && !forcedDuration && !recTime && !categoryRecTime &&
+                !(spellEntry.HasAttribute(SPELL_ATTR_USES_RANGED_SLOT) && !spellEntry.HasAttribute(SPELL_ATTR_EX2_DO_NOT_RESET_COMBAT_TIMERS)))
+                return;
+
             sLog.outError("Player::AddCooldown> Spell(%u) try to add and already existing cooldown %u?", spellEntry.Id, forcedDuration);
             return;
         }

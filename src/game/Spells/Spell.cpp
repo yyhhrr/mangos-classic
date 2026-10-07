@@ -1297,7 +1297,8 @@ void Spell::DoAllEffectOnTarget(TargetInfo* target)
             Unit::DealSpellDamage(affectiveCaster, &spellDamageInfo, true, m_resetLeash);
 
         // Bloodthirst
-        if (m_spellInfo->SpellFamilyName == SPELLFAMILY_WARRIOR && m_spellInfo->SpellFamilyFlags & uint64(0x0000000002000000))
+        // Mortal Strike and Shield Slam share the family flag; only the mapped ranks grant this aura.
+        if (m_spellInfo->SpellFamilyName == SPELLFAMILY_WARRIOR)
         {
             uint32 BTAura = 0;
             switch (m_spellInfo->Id)
@@ -1306,9 +1307,7 @@ void Spell::DoAllEffectOnTarget(TargetInfo* target)
                 case 23892: BTAura = 23886; break;
                 case 23893: BTAura = 23887; break;
                 case 23894: BTAura = 23888; break;
-                default:
-                    sLog.outError("Spell::EffectSchoolDMG: Spell %u not handled in BTAura", m_spellInfo->Id);
-                    break;
+                default: break;
             }
             if (BTAura)
                 m_caster->CastSpell(m_caster, BTAura, TRIGGERED_OLD_TRIGGERED);

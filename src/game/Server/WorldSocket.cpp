@@ -183,7 +183,8 @@ bool WorldSocket::ProcessIncomingData()
 
         if ((header->size < 4) || (header->size > 0x2800) || (header->cmd >= NUM_MSG_TYPES))
         {
-            sLog.outError("WorldSocket::ProcessIncomingData: client sent malformed packet size = %u , cmd = %u", header->size, header->cmd);
+            sLog.outError("WorldSocket::ProcessIncomingData: client %s sent malformed packet size = %u , cmd = %u", self->GetRemoteEndpoint().c_str(), header->size, header->cmd);
+            self->Close();
             return;
         }
 

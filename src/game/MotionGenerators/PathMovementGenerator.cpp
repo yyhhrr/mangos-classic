@@ -320,7 +320,11 @@ void FixedPathMovementGenerator::AddToPathPauseTime(int32 waitTimeDiff, bool for
 
 void TaxiMovementGenerator::Initialize(Unit& unit)
 {
-    AbstractPathMovementGenerator::Initialize(unit);
+    // Resume populates a fresh taxi spline after initialization; still stop any previous movement.
+    if (m_path.empty())
+        AbstractPathMovementGenerator::Finalize(unit);
+    else
+        AbstractPathMovementGenerator::Initialize(unit);
 
     // Client-controlled unit should have control removed
     if (const Player* controllingClientPlayer = unit.GetClientControlling())

@@ -39,6 +39,7 @@
 #include "Maps/ObjectPosSelector.h"
 #include "Entities/TemporarySpawn.h"
 #include "Movement/packet_builder.h"
+#include "Movement/MoveSpline.h"
 #include "Entities/CreatureLinkingMgr.h"
 #include "Chat/Chat.h"
 #include "Loot/LootMgr.h"
@@ -304,7 +305,8 @@ void Object::BuildMovementUpdate(ByteBuffer* data, uint8 updateFlags) const
     if (updateFlags & UPDATEFLAG_LIVING)
     {
         MANGOS_ASSERT(unit);
-        if (unit->IsStopped() && unit->m_movementInfo.HasMovementFlag(MOVEFLAG_SPLINE_ENABLED))
+        // Taxi and scripted splines can run without a movement-generator moving state.
+        if (unit->movespline->Finalized() && unit->m_movementInfo.HasMovementFlag(MOVEFLAG_SPLINE_ENABLED))
         {
             sLog.outError("%s is not moving but have spline movement enabled!", GetGuidStr().c_str());
             ((Unit*)this)->m_movementInfo.RemoveMovementFlag(MovementFlags(MOVEFLAG_SPLINE_ENABLED | MOVEFLAG_FORWARD));
