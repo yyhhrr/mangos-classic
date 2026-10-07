@@ -67,7 +67,9 @@ WorldSafeLocsEntry const* GraveyardManager::GetClosestGraveyardHelper(GraveYardM
         // find now nearest graveyard at other (continent) map
         if (mapId != entry->map_id)
         {
-            MANGOS_ASSERT(tempEntry); // should always exist for this case - if it doesnt, missing instance template - vanilla only issue
+            // Cross-map graveyards require an instance template; ignore invalid continent links.
+            if (!tempEntry)
+                continue;
             // if find graveyard at different map from where entrance placed (or no entrance data), use any first
             if (!mapEntry ||
                 tempEntry->ghost_entrance_map < 0 ||
