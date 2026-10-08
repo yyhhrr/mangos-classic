@@ -41,6 +41,7 @@ npc_doctor              100%    Gustaf Vanhowzen and Gregory Victor, quest 6622 
 npc_innkeeper            25%    ScriptName not assigned. Innkeepers in general.
 npc_redemption_target   100%    Used for the paladin quests: 1779,1781,9600,9685
 npc_advanced_target_dummy
+npc_training_dummy       Custom permanent training targets (not engineering summons)
 EndContentData */
 
 /*########
@@ -1139,6 +1140,104 @@ struct npc_advanced_target_dummyAI : public ScriptedAI
     }
 };
 
+/*######
+## npc_training_dummy
+######*/
+
+struct npc_training_dummyAI : public ScriptedAI
+{
+    static constexpr uint32 INACTIVITY_TIMEOUT = 10000;
+
+    explicit npc_training_dummyAI(Creature* creature) : ScriptedAI(creature)
+    {
+        Reset();
+    }
+
+    uint32 m_inactivityTimer;
+    bool m_hasActivity;
+
+    void Reset() override
+    {
+        SetReactState(REACT_PASSIVE);
+        SetCombatMovement(false);
+        SetMeleeEnabled(false);
+        SetAIImmobilizedState(true);
+        SetDeathPrevention(true);
+        m_creature->SetNoCallAssistance(true);
+        m_creature->SetNoXP(true);
+        m_creature->SetNoLoot(true);
+        m_creature->SetNoWeaponSkillGain(true);
+        m_creature->SetHealth(m_creature->GetMaxHealth());
+        m_inactivityTimer = INACTIVITY_TIMEOUT;
+        m_hasActivity = false;
+    }
+
+    void MoveInLineOfSight(Unit*) override {}
+    void AttackStart(Unit*) override {}
+
+    void RecordActivity(Unit* source)
+    {
+        if (source && source != m_creature && source->GetBeneficiaryPlayer())
+        {
+            m_inactivityTimer = INACTIVITY_TIMEOUT;
+            m_hasActivity = true;
+        }
+    }
+
+    void AttackedBy(Unit* attacker) override { RecordActivity(attacker); }
+    void SpellHit(Unit* caster, SpellEntry const*) override { RecordActivity(caster); }
+
+    void DamageTaken(Unit* dealer, uint32& damage, DamageEffectType damageType, SpellEntry const* spellInfo) override
+    {
+        RecordActivity(dealer);
+        // Keep the calculated damage unchanged: reducing it here is reported as absorption.
+        // A large health pool and direct refill avoid reaching the death-prevention clamp
+        // during ordinary attacks, without a healing spell, threat or player power gain.
+        if (damageType != INSTAKILL)
+            m_creature->SetHealth(m_creature->GetMaxHealth());
+        CreatureAI::DamageTaken(dealer, damage, damageType, spellInfo);
+    }
+
+    bool HasPeriodicActivity() const
+    {
+        return m_creature->HasAuraType(SPELL_AURA_PERIODIC_DAMAGE)
+            || m_creature->HasAuraType(SPELL_AURA_PERIODIC_DAMAGE_PERCENT)
+            || m_creature->HasAuraType(SPELL_AURA_PERIODIC_LEECH)
+            || m_creature->HasAuraType(SPELL_AURA_PERIODIC_MANA_LEECH)
+            || m_creature->HasAuraType(SPELL_AURA_POWER_BURN_MANA);
+    }
+
+    void EnterEvadeMode() override
+    {
+        // Only release this target's combat references. Do not clear the players' other fights.
+        m_creature->RemoveAllAurasOnEvade();
+        m_creature->CombatStop(true);
+        m_creature->getHostileRefManager().deleteReferences();
+        m_creature->SetLootRecipient(nullptr);
+        Reset();
+    }
+
+    void UpdateAI(uint32 diff) override
+    {
+        if (!m_hasActivity && !m_creature->IsInCombat())
+            return;
+
+        if (m_inactivityTimer > diff)
+        {
+            m_inactivityTimer -= diff;
+            return;
+        }
+
+        m_inactivityTimer = 0;
+        // Core combat time also covers hostile attempts that missed. Wait for long-period
+        // effects such as Curse of Doom instead of removing them before their first tick.
+        if (m_creature->GetCombatManager().GetCombatTimer() || HasPeriodicActivity())
+            return;
+
+        EnterEvadeMode();
+    }
+};
+
 void AddSC_npcs_special()
 {
     Script* pNewScript;
@@ -1193,6 +1292,11 @@ void AddSC_npcs_special()
     pNewScript = new Script;
     pNewScript->Name = "npc_advanced_target_dummy";
     pNewScript->GetAI = &GetNewAIInstance<npc_advanced_target_dummyAI>;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_training_dummy";
+    pNewScript->GetAI = &GetNewAIInstance<npc_training_dummyAI>;
     pNewScript->RegisterSelf();
 
     RegisterSpellScript<PaladinQuestReviveSelf>("spell_paladin_quest_revive_self");

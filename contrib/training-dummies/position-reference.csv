@@ -1,0 +1,4 @@
+role,cmangos_entry,level,source_guid,source_entry,map,x,y,z,orientation_radians,source_line,verification
+normal_single,900000,34,48327,32666,1,9992.76,2259.3,1330.94,3.80482,47949,WotLK_reference_not_game_verified
+raid_single,900001,63,48324,31146,1,9908.89,2251.49,1330.83,5.8294,47946,WotLK_reference_not_game_verified
+
