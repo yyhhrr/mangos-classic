@@ -471,6 +471,7 @@ class ChatHandler
         bool HandleNpcAllowMovementCommand(char* args);
         bool HandleNpcChangeEntryCommand(char* args);
         bool HandleNpcChangeLevelCommand(char* args);
+        bool HandleDummyLevelCommand(char* args);
         bool HandleNpcDeleteCommand(char* args);
         bool HandleNpcDelVendorItemCommand(char* args);
         bool HandleNpcFactionIdCommand(char* args);

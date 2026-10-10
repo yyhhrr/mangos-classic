@@ -728,6 +728,12 @@ ChatCommand* ChatHandler::getCommandTable()
         { nullptr,          0,                  false, nullptr,                                        "", nullptr }
     };
 
+    static ChatCommand dummyCommandTable[] =
+    {
+        { "level",          SEC_GAMEMASTER,     false, &ChatHandler::HandleDummyLevelCommand, "Syntax: .dummy level #level (1-63). Select a training dummy; resets combat and uses level-based armor and defense. Saved per spawn across respawn/restart.", nullptr },
+        { nullptr,          0,                  false, nullptr, "", nullptr }
+    };
+
     static ChatCommand movementCommandTable[] =
     {
         { "movegens",       SEC_GAMEMASTER,     false, &ChatHandler::HandleMovegensCommand,            "", nullptr },
@@ -922,6 +928,7 @@ ChatCommand* ChatHandler::getCommandTable()
         { "character",      SEC_GAMEMASTER,     true,  nullptr,                                           "", characterCommandTable},
         { "channel",        SEC_MODERATOR,      false, nullptr,                                           "", channelCommandTable  },
         { "debug",          SEC_MODERATOR,      true,  nullptr,                                           "", debugCommandTable    },
+        { "dummy",          SEC_GAMEMASTER,     false, nullptr,                                           "", dummyCommandTable    },
         { "event",          SEC_GAMEMASTER,     false, nullptr,                                           "", eventCommandTable    },
         { "gm",             SEC_PLAYER,         true,  nullptr,                                           "", gmCommandTable       },
         { "honor",          SEC_GAMEMASTER,     false, nullptr,                                           "", honorCommandTable    },

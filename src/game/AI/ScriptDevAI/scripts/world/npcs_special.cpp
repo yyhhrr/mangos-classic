@@ -1148,11 +1148,25 @@ struct npc_training_dummyAI : public ScriptedAI
 {
     static constexpr uint32 INACTIVITY_TIMEOUT = 10000;
 
-    explicit npc_training_dummyAI(Creature* creature) : ScriptedAI(creature)
+    explicit npc_training_dummyAI(Creature* creature) : ScriptedAI(creature), m_savedLevel(0)
     {
+        if (m_creature->HasStaticDBSpawnData())
+        {
+            auto result = WorldDatabase.PQuery("SELECT level FROM training_dummy_settings WHERE guid=%u AND entry=%u",
+                m_creature->GetGUIDLow(), m_creature->GetEntry());
+            if (result)
+            {
+                uint32 level = result->Fetch()[0].GetUInt32();
+                if (level >= 1 && level <= 63 && sObjectMgr.GetCreatureClassLvlStats(level, m_creature->GetCreatureInfo()->UnitClass))
+                    m_savedLevel = level;
+                else
+                    sLog.outError("Invalid saved training dummy level %u for GUID %u", level, m_creature->GetGUIDLow());
+            }
+        }
         Reset();
     }
 
+    uint32 m_savedLevel;
     uint32 m_inactivityTimer;
     bool m_hasActivity;
 
@@ -1167,9 +1181,30 @@ struct npc_training_dummyAI : public ScriptedAI
         m_creature->SetNoXP(true);
         m_creature->SetNoLoot(true);
         m_creature->SetNoWeaponSkillGain(true);
+        // Keep per-spawn settings across combat resets and respawns. Read SQL only at AI creation.
+        if (m_savedLevel)
+        {
+            if (CreatureClassLvlStats const* stats = sObjectMgr.GetCreatureClassLvlStats(m_savedLevel, m_creature->GetCreatureInfo()->UnitClass))
+            {
+                m_creature->SetLevel(m_savedLevel);
+                m_creature->SetModifierValue(UNIT_MOD_ARMOR, BASE_VALUE, float(stats->BaseArmor));
+                m_creature->UpdateArmor();
+            }
+        }
         m_creature->SetHealth(m_creature->GetMaxHealth());
         m_inactivityTimer = INACTIVITY_TIMEOUT;
         m_hasActivity = false;
+    }
+
+    void ReceiveAIEvent(AIEventType eventType, Unit* sender, Unit* /*invoker*/, uint32 level) override
+    {
+        if (eventType != AI_EVENT_CUSTOM_A || sender != m_creature || level < 1 || level > 63
+            || !sObjectMgr.GetCreatureClassLvlStats(level, m_creature->GetCreatureInfo()->UnitClass))
+            return;
+
+        // The GM command has synchronously saved this level before notifying the AI.
+        m_savedLevel = level;
+        EnterEvadeMode();
     }
 
     void MoveInLineOfSight(Unit*) override {}

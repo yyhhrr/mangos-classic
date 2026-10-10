@@ -1836,6 +1836,60 @@ bool ChatHandler::HandleNpcChangeLevelCommand(char* args)
     return true;
 }
 
+// Set only the level-dependent test properties of the dedicated, fixed-health targets.
+bool ChatHandler::HandleDummyLevelCommand(char* args)
+{
+    uint32 level;
+    if (!args || *args < '0' || *args > '9' || !ExtractUInt32(&args, level) || level < 1 || level > 63 || *args)
+    {
+        SendSysMessage("Syntax: .dummy level #level (1-63). Select a training dummy.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    Creature* dummy = getSelectedCreature();
+    if (!dummy || (dummy->GetEntry() != 900000 && dummy->GetEntry() != 900001)
+        || dummy->GetScriptName() != "npc_training_dummy" || dummy->IsPet()
+        || !dummy->IsAlive() || dummy->HasCharmer() || !dummy->AI())
+    {
+        SendSysMessage("Select a living training dummy (entry 900000 or 900001).");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    CreatureClassLvlStats const* stats = sObjectMgr.GetCreatureClassLvlStats(level, dummy->GetCreatureInfo()->UnitClass);
+    if (!stats)
+    {
+        SendSysMessage("No creature class/level stats exist for this level; target unchanged.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    if (!dummy->HasStaticDBSpawnData())
+    {
+        SendSysMessage("Select a permanently spawned training dummy so its setting can be saved.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    // Save synchronously: a failed write must not change the in-memory target or report success.
+    if (!WorldDatabase.DirectPExecute("INSERT INTO training_dummy_settings (guid, entry, level) VALUES (%u, %u, %u) ON DUPLICATE KEY UPDATE entry=VALUES(entry), level=VALUES(level)",
+        dummy->GetGUIDLow(), dummy->GetEntry(), level))
+    {
+        SendSysMessage("Could not save the training dummy level; target unchanged.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    // Its existing AI clears only this target's combat state and reapplies the saved settings.
+    dummy->AI()->ReceiveAIEvent(AI_EVENT_CUSTOM_A, dummy, dummy, level);
+
+    // NPC defense is calculated by GetDefenseSkillValue from its current level.
+    PSendSysMessage("Training dummy GUID %u: level %u, armor %u, defense skill %u. Saved across respawn/restart.",
+        dummy->GetGUIDLow(), dummy->GetLevel(), dummy->GetArmor(), dummy->GetDefenseSkillValue(nullptr));
+    return true;
+}
+
 // set npcflag of creature
 bool ChatHandler::HandleNpcFlagCommand(char* args)
 {
