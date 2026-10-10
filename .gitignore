@@ -23,6 +23,7 @@
 bin
 build
 /build-playerbots/
+audit-reports
 build_linux
 tags
 TAGS
