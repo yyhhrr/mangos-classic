@@ -28,6 +28,7 @@ EndScriptData
 #include "Globals/ObjectMgr.h"
 #include "GameEvents/GameEventMgr.h"
 #include "Entities/TemporarySpawn.h"
+#include "Spells/EngineeringTargetDummy.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
 #include "World/WorldState.h"
 #include "AI/ScriptDevAI/base/TimerAI.h"
@@ -1104,39 +1105,68 @@ struct HarvestSilithidEgg : public SpellScript
 };
 
 /*######
-## npc_advanced_target_dummy
+## npc_engineering_target_dummy
 ######*/
 
-enum
+struct npc_engineering_target_dummyAI : public ScriptedAI
 {
-    SUICIDE                     = 7,
-    TARGET_DUMMY_SPAWN_EFFECT   = 4507
-};
-
-struct npc_advanced_target_dummyAI : public ScriptedAI
-{
-    npc_advanced_target_dummyAI(Creature* creature) : ScriptedAI(creature), m_dieTimer(15000)
+    explicit npc_engineering_target_dummyAI(Creature* creature) : ScriptedAI(creature), m_dieTimer(0)
     {
-        DoCastSpellIfCan(nullptr, TARGET_DUMMY_SPAWN_EFFECT);
+        auto const* definition = EngineeringTargetDummy::Find(m_creature->GetUInt32Value(UNIT_CREATED_BY_SPELL), m_creature->GetEntry());
+        if (!definition || !m_creature->IsTemporarySummon())
+            return;
+
+        m_dieTimer = EngineeringTargetDummy::Lifetime;
         SetReactState(REACT_PASSIVE);
-        Reset();
+        SetCombatMovement(false);
+        SetFollowMovement(false);
+        SetMeleeEnabled(false);
+        m_creature->SetNoXP(true);
+
+        if (Unit* creator = m_creature->GetMap()->GetUnit(m_creature->GetSpawnerGuid()))
+        {
+            // In this core SetOwnerGuid writes UNIT_FIELD_CREATEDBY.
+            m_creature->SetOwnerGuid(creator->GetObjectGuid());
+            m_creature->SetLootRecipient(creator);
+            // The old guardian template is immune to NPCs. Ordinary players'
+            // dummies must be attackable; keep a GM creator's immunity.
+            m_creature->SetImmuneToNPC(creator->IsImmuneToNPC());
+            m_creature->SetImmuneToPlayer(creator->IsImmuneToPlayer());
+            if (creator->IsPlayerControlled())
+                m_creature->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PLAYER_CONTROLLED);
+            m_creature->SetPvP(creator->IsPvP());
+        }
+
+        DoCastSpellIfCan(m_creature, definition->passiveSpell, CAST_TRIGGERED | CAST_AURA_NOT_PRESENT);
+        DoCastSpellIfCan(m_creature, definition->spawnSpell, CAST_TRIGGERED);
     }
 
     void Reset() override {}
+    void AttackStart(Unit* /*target*/) override {}
+    void JustDied(Unit* /*killer*/) override { m_dieTimer = 0; }
+    void EnterEvadeMode() override
+    {
+        // UnitAI's normal evade path removes periodic auras and clears the
+        // loot recipient. A disposable dummy keeps both until it dies.
+        m_creature->CombatStop(true);
+    }
 
     uint32 m_dieTimer;
 
     void UpdateAI(const uint32 diff) override
     {
-        if (m_dieTimer)
+        if (!m_dieTimer || !m_creature->IsAlive())
+            return;
+
+        if (m_dieTimer <= diff)
         {
-            if (m_dieTimer <= diff)
-            {
-                DoCastSpellIfCan(m_creature, SUICIDE);
-            }
-            else
-                m_dieTimer -= diff;
+            m_dieTimer = 0;
+            // Use the normal death pipeline for both expiry and combat deaths.
+            // It generates body loot before clearing threat and keeps a corpse.
+            m_creature->Suicide();
         }
+        else
+            m_dieTimer -= diff;
     }
 };
 
@@ -1326,7 +1356,12 @@ void AddSC_npcs_special()
 
     pNewScript = new Script;
     pNewScript->Name = "npc_advanced_target_dummy";
-    pNewScript->GetAI = &GetNewAIInstance<npc_advanced_target_dummyAI>;
+    pNewScript->GetAI = &GetNewAIInstance<npc_engineering_target_dummyAI>;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_engineering_target_dummy";
+    pNewScript->GetAI = &GetNewAIInstance<npc_engineering_target_dummyAI>;
     pNewScript->RegisterSelf();
 
     pNewScript = new Script;

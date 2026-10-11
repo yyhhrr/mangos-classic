@@ -27,6 +27,7 @@
 #include "Entities/Player.h"
 #include "Entities/Unit.h"
 #include "Spells/Spell.h"
+#include "Spells/EngineeringTargetDummy.h"
 #include "Entities/DynamicObject.h"
 #include "Spells/SpellAuras.h"
 #include "Entities/UpdateData.h"
@@ -2759,7 +2760,10 @@ void Spell::EffectSummonWild(SpellEffectIndex eff_idx)
     float center_z = m_targets.m_destPos.z;
 
     float radius = GetSpellRadius(sSpellRadiusStore.LookupEntry(m_spellInfo->EffectRadiusIndex[eff_idx]));
-    TempSpawnType summonType = (m_duration == 0) ? TEMPSPAWN_DEAD_DESPAWN : TEMPSPAWN_TIMED_OR_DEAD_DESPAWN;
+    bool engineeringDummy = m_trueCaster->IsUnit() && EngineeringTargetDummy::Find(m_spellInfo->Id, creature_entry);
+    // Their AI kills them after 15 seconds. Keep the corpse until normal corpse
+    // decay instead of unsummoning it when the spell duration expires.
+    TempSpawnType summonType = (engineeringDummy || m_duration == 0) ? TEMPSPAWN_DEAD_DESPAWN : TEMPSPAWN_TIMED_OR_DEAD_DESPAWN;
 
     int32 amount = damage > 0 ? damage : 1;
 
@@ -2799,17 +2803,21 @@ void Spell::EffectSummonWild(SpellEffectIndex eff_idx)
 
         if (Creature* summon = WorldObject::SummonCreature(
             TempSpawnSettings(m_trueCaster, creature_entry, px, py, pz, m_trueCaster->GetOrientation(), summonType, m_duration, false,
-                IsSpellSetRun(m_spellInfo), 0, 0, 0, false, false, m_spellInfo->Id, -1, level), m_trueCaster->GetMap()))
+                IsSpellSetRun(m_spellInfo), 0, engineeringDummy ? m_caster->GetFaction() : 0, 0, false, false, m_spellInfo->Id, -1, level), m_trueCaster->GetMap()))
         {
-            // UNIT_FIELD_CREATEDBY are not set for these kind of spells.
-            // Does exceptions exist? If so, what are they?
-            // summon->SetCreatorGuid(m_caster->GetObjectGuid());
+            // Most wild summons do not have a creator; the engineering dummy
+            // AI sets its creator and loot recipient during initialization.
 
             // Notify original caster if not done already
             if (m_originalCaster && (m_originalCaster != m_trueCaster) && (m_originalCaster->AI()))
                 m_originalCaster->AI()->JustSummoned(summon);
             else if (m_trueCaster->IsUnit() && m_caster->AI())
                 m_caster->AI()->JustSummoned(summon);
+
+            // Preserve the three spells' existing summon hooks (e.g. 4072's
+            // no-follow script) when adapting their former guardian path.
+            if (engineeringDummy)
+                OnSummon(summon);
         }
     }
 }
@@ -2827,6 +2835,14 @@ void Spell::EffectSummonGuardian(SpellEffectIndex eff_idx)
     if (!cInfo)
     {
         sLog.outErrorDb("Spell::DoSummonGuardian: creature entry %u not found for spell %u.", pet_entry, m_spellInfo->Id);
+        return;
+    }
+
+    // Engineering dummies must be ordinary temporary creatures: Pet deaths
+    // skip body loot, and pet GUIDs cannot be opened by the corpse-loot handler.
+    if (EngineeringTargetDummy::Find(m_spellInfo->Id, pet_entry))
+    {
+        EffectSummonWild(eff_idx);
         return;
     }
 
