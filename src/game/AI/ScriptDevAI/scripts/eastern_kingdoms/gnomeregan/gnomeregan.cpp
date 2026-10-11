@@ -33,6 +33,10 @@ EndContentData */
 #include "gnomeregan.h"
 #include "AI/ScriptDevAI/base/escort_ai.h"
 #include "AI/ScriptDevAI/base/follower_ai.h"
+#include "Grids/GridNotifiers.h"
+#include "Grids/GridNotifiersImpl.h"
+#include "Grids/CellImpl.h"
+#include "Spells/Scripts/SpellScript.h"
 
 /*######
 ## npc_blastmaster_emi_shortfuse
@@ -1003,6 +1007,103 @@ bool QuestAccept_npc_kernobee(Player* pPlayer, Creature* pCreature, const Quest*
     return true;
 }
 
+// Spell choices follow VMaNGOS (ratkosrb, d8034ebeb); probabilities are per cast.
+struct GnomereganCollectingFallout : public SpellScript
+{
+    void OnInit(Spell* spell) const override
+    {
+        uint32 chosenEffect = urand(EFFECT_INDEX_0, EFFECT_INDEX_1);
+        // Gate execution, preserving the collection effect's normal target checks.
+        spell->SetEffectChance(chosenEffect == EFFECT_INDEX_0 ? 100 : 0, EFFECT_INDEX_0);
+        spell->SetEffectChance(chosenEffect == EFFECT_INDEX_1 ? 100 : 0, EFFECT_INDEX_1);
+    }
+};
+
+// Abilities and timers follow AzerothCore smart_scripts (Kitzunu, 7732e1a5b2).
+enum ViscousFalloutSpells
+{
+    SPELL_VISCOUS_TOXIC_VOLLEY    = 21687,
+    SPELL_VISCOUS_RADIATION_CLOUD = 10341,
+    SPELL_VISCOUS_CORROSIVE_OOZE  = 9459,
+};
+
+struct boss_viscous_falloutAI : public ScriptedAI
+{
+    boss_viscous_falloutAI(Creature* creature) : ScriptedAI(creature) { Reset(); }
+
+    uint32 m_toxicVolleyTimer;
+    uint32 m_radiationCloudTimer;
+    uint32 m_corrosiveOozeTimer;
+    bool m_radiationCloudPending;
+
+    void Reset() override
+    {
+        ScriptedAI::Reset();
+        m_toxicVolleyTimer = urand(4000, 12000);
+        m_radiationCloudTimer = urand(1000, 2000);
+        m_corrosiveOozeTimer = urand(2000, 9000);
+        m_radiationCloudPending = true;
+        m_creature->RemoveDynObject(SPELL_VISCOUS_RADIATION_CLOUD);
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        ScriptedAI::JustDied(killer);
+        m_creature->RemoveDynObject(SPELL_VISCOUS_RADIATION_CLOUD);
+    }
+
+    void EnterEvadeMode() override
+    {
+        m_creature->RemoveDynObject(SPELL_VISCOUS_RADIATION_CLOUD);
+        ScriptedAI::EnterEvadeMode();
+    }
+
+    void UpdateAI(const uint32 diff) override
+    {
+        if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
+            return;
+
+        if (m_radiationCloudPending)
+        {
+            if (m_radiationCloudTimer <= diff)
+            {
+                // In 1.12 this spell creates a ground effect, rather than a self aura.
+                if (DoCastSpellIfCan(m_creature, SPELL_VISCOUS_RADIATION_CLOUD, CAST_TRIGGERED) == CAST_OK)
+                    m_radiationCloudPending = false;
+            }
+            else
+                m_radiationCloudTimer -= diff;
+        }
+
+        if (m_toxicVolleyTimer <= diff)
+        {
+            if (DoCastSpellIfCan(m_creature, SPELL_VISCOUS_TOXIC_VOLLEY) == CAST_OK)
+                m_toxicVolleyTimer = urand(16000, 21000);
+        }
+        else
+            m_toxicVolleyTimer -= diff;
+
+        if (m_corrosiveOozeTimer <= diff)
+        {
+            Unit* target = nullptr;
+            MaNGOS::NearestAttackableUnitInObjectRangeCheck check(m_creature, m_creature->GetOwner(), 50.0f);
+            MaNGOS::UnitLastSearcher<MaNGOS::NearestAttackableUnitInObjectRangeCheck> searcher(target, check);
+            Cell::VisitAllObjects(m_creature, searcher, 50.0f);
+            if (target && DoCastSpellIfCan(target, SPELL_VISCOUS_CORROSIVE_OOZE) == CAST_OK)
+                m_corrosiveOozeTimer = urand(11000, 14000);
+        }
+        else
+            m_corrosiveOozeTimer -= diff;
+
+        DoMeleeAttackIfReady();
+    }
+};
+
+UnitAI* GetAI_boss_viscous_fallout(Creature* creature)
+{
+    return new boss_viscous_falloutAI(creature);
+}
+
 void AddSC_gnomeregan()
 {
     Script* pNewScript = new Script;
@@ -1021,5 +1122,12 @@ void AddSC_gnomeregan()
     pNewScript = new Script;
     pNewScript->Name = "npc_alarm_a_bomb_2600";
     pNewScript->GetAI = &GetAI_npc_alarm_a_bomb_2600;
+    pNewScript->RegisterSelf();
+
+    RegisterSpellScript<GnomereganCollectingFallout>("spell_gnomeregan_collecting_fallout");
+
+    pNewScript = new Script;
+    pNewScript->Name = "boss_viscous_fallout";
+    pNewScript->GetAI = &GetAI_boss_viscous_fallout;
     pNewScript->RegisterSelf();
 }
