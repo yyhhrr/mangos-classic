@@ -44,8 +44,13 @@ void instance_gnomeregan::Initialize()
 
 void instance_gnomeregan::OnCreatureCreate(Creature* pCreature)
 {
-    if (pCreature->GetEntry() == NPC_BLASTMASTER_SHORTFUSE)
-        m_npcEntryGuidStore[NPC_BLASTMASTER_SHORTFUSE] = pCreature->GetObjectGuid();
+    switch (pCreature->GetEntry())
+    {
+        case NPC_BLASTMASTER_SHORTFUSE:
+        case NPC_ALARM_A_BOMB_2600:
+            m_npcEntryGuidStore[pCreature->GetEntry()] = pCreature->GetObjectGuid();
+            break;
+    }
 }
 
 void instance_gnomeregan::OnObjectCreate(GameObject* pGo)

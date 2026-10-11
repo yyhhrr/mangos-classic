@@ -26,6 +26,7 @@ EndScriptData
 #include "AI/ScriptDevAI/include/sc_common.h"/* ContentData
 npc_blastmaster_emi_shortfuse
 npc_kernobee
+npc_alarm_a_bomb_2600
 EndContentData */
 
 
@@ -631,14 +632,24 @@ bool GossipSelect_npc_blastmaster_emi_shortfuse(Player* pPlayer, Creature* pCrea
 
 /*######
 ## npc_kernobee
-## TODO: It appears there are some things missing, including his? alarm-bot
+## Timing follows VMaNGOS; spell 9874 is a user-approved approximation, not verified retail behavior.
 ######*/
 
 enum
 {
     QUEST_A_FINE_MESS           = 2904,
     TRIGGER_GNOME_EXIT          = 324,                      // Add scriptlib support for it, atm simply use hardcoded values
+    NPC_KERNOBEE                = 7850,
+    SPELL_ALARM_EXPLOSION       = 9874,                    // Original 1.12 spell data: 595-805 fire damage, radius 5.
+
+    SAY_KERNOBEE_START          = 3881,
+    SAY_KERNOBEE_END            = 3929,
+    SAY_ALARM_START             = 3927,
+    SAY_ALARM_DISARMED          = 3950,
+    SAY_ALARM_SEE_END           = 3949,
 };
+
+static const float aAlarmWarningPosition[3] = { -390.82f, 42.34f, -154.795f };
 
 static const float aKernobeePositions[2][3] =
 {
@@ -646,25 +657,254 @@ static const float aKernobeePositions[2][3] =
     { -297.32f, -7.32f, -152.85f}                           // Walk out of the door
 };
 
+struct npc_alarm_a_bomb_2600AI : public ScriptedAI
+{
+    npc_alarm_a_bomb_2600AI(Creature* pCreature) : ScriptedAI(pCreature)
+    {
+        Reset();
+    }
+
+    ObjectGuid m_kernobeeGuid;
+    bool m_exploding = false;
+    bool m_explosionFinished = false;
+    bool m_restorePlayerImmunity = false;
+
+    void RestoreImmunity()
+    {
+        if (m_restorePlayerImmunity)
+            m_creature->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PLAYER);
+        m_restorePlayerImmunity = false;
+    }
+
+    void Reset() override
+    {
+        // Evading must not release an active escort's bomb to another player.
+        SetReactState(REACT_PASSIVE);
+        SetMeleeEnabled(false);
+        SetCombatMovement(false);
+    }
+
+    void JustRespawned() override
+    {
+        RestoreImmunity();
+        m_exploding = false;
+        m_explosionFinished = false;
+        m_kernobeeGuid.Clear();
+        ScriptedAI::JustRespawned();
+    }
+
+    void AttackStart(Unit* /*pWho*/) override {}
+
+    bool StartFollowing(Creature* pKernobee)
+    {
+        if (!m_creature->IsAlive() || m_exploding || !m_kernobeeGuid.IsEmpty() || !pKernobee ||
+            !pKernobee->IsAlive() || pKernobee->GetEntry() != NPC_KERNOBEE ||
+            pKernobee->GetMap() != m_creature->GetMap())
+            return false;
+
+        FollowerAI* pAI = dynamic_cast<FollowerAI*>(pKernobee->AI());
+        if (!pAI || !pAI->HasFollowState(STATE_FOLLOW_INPROGRESS) || pAI->HasFollowState(STATE_FOLLOW_COMPLETE))
+            return false;
+
+        m_kernobeeGuid = pKernobee->GetObjectGuid();
+        m_creature->GetMotionMaster()->Clear();
+        m_creature->GetMotionMaster()->MoveFollow(pKernobee, PET_FOLLOW_DIST, PET_FOLLOW_ANGLE);
+        DoBroadcastText(SAY_ALARM_START, m_creature);
+        return true;
+    }
+
+    void RestorePatrol()
+    {
+        // Kernobee's death/despawn must not cancel an explosion still resolving.
+        if (m_exploding)
+            return;
+        m_kernobeeGuid.Clear();
+        m_creature->GetMotionMaster()->Clear();
+        m_creature->GetMotionMaster()->MoveTargetedHome();
+    }
+
+    void StopFollowing(Creature* pKernobee, bool bCompleted)
+    {
+        if (m_exploding || !pKernobee || m_kernobeeGuid != pKernobee->GetObjectGuid())
+            return;
+
+        if (bCompleted)
+            DoBroadcastText(SAY_ALARM_DISARMED, m_creature);
+        RestorePatrol();
+    }
+
+    void Explode(Creature* pKernobee)
+    {
+        if (m_exploding || !m_creature->IsAlive() || !pKernobee ||
+            m_kernobeeGuid != pKernobee->GetObjectGuid())
+            return;
+
+        m_exploding = true;
+        m_explosionFinished = false;
+        m_creature->GetMotionMaster()->Clear();
+        // CanAttackSpell cross-checks caster immunity. Release only the player bit:
+        // neutral faction 594 can then hit players/pets in 9874's normal 5-yard AoE.
+        // Keep NPC immunity, faction, radius, damage and target immunities unchanged.
+        m_restorePlayerImmunity = m_creature->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PLAYER);
+        m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PLAYER);
+        SpellCastResult result = m_creature->CastSpell(m_creature, SPELL_ALARM_EXPLOSION,
+            TRIGGERED_OLD_TRIGGERED | TRIGGERED_NORMAL_COMBAT_CAST);
+        if (result != SPELL_CAST_OK)
+        {
+            script_error_log("Gnomeregan: Alarm-a-bomb 2600 could not cast spell 9874 (result %u).", uint32(result));
+            RestoreImmunity();
+            m_explosionFinished = true;                    // Failed start has no outstanding targets.
+        }
+    }
+
+    void OnSpellCastStateChange(Spell const* spell, bool state, WorldObject* target = nullptr) override
+    {
+        ScriptedAI::OnSpellCastStateChange(spell, state, target);
+        if (m_exploding && !state && spell->m_spellInfo->Id == SPELL_ALARM_EXPLOSION &&
+            spell->GetCaster() == m_creature && spell->getState() == SPELL_STATE_FINISHED)
+        {
+            // Spell::finish runs after handle_immediate/handle_delayed has settled
+            // every target. Do not kill either NPC from inside that spell stack.
+            RestoreImmunity();
+            m_explosionFinished = true;
+        }
+    }
+
+    void UpdateAI(const uint32 /*uiDiff*/) override
+    {
+        if (m_exploding)
+        {
+            if (!m_explosionFinished)
+                return;
+
+            m_explosionFinished = false;
+            ObjectGuid kernobeeGuid = m_kernobeeGuid;
+            m_kernobeeGuid.Clear();                        // Re-entrant death callbacks cannot repeat this.
+            if (Creature* pKernobee = m_creature->GetMap()->GetCreature(kernobeeGuid))
+            {
+                if (pKernobee->IsAlive())
+                    Unit::DealDamage(m_creature, pKernobee, pKernobee->GetHealth(), nullptr,
+                        DIRECT_DAMAGE, SPELL_SCHOOL_MASK_NORMAL, nullptr, false);
+            }
+            if (m_creature->IsAlive())
+                Unit::DealDamage(m_creature, m_creature, m_creature->GetHealth(), nullptr,
+                    DIRECT_DAMAGE, SPELL_SCHOOL_MASK_NORMAL, nullptr, false);
+            return;
+        }
+        if (m_kernobeeGuid.IsEmpty())
+            return;
+
+        Creature* pKernobee = m_creature->GetMap()->GetCreature(m_kernobeeGuid);
+        FollowerAI* pAI = pKernobee ? dynamic_cast<FollowerAI*>(pKernobee->AI()) : nullptr;
+        if (!pKernobee || !pKernobee->IsAlive() || !pAI ||
+            !pAI->HasFollowState(STATE_FOLLOW_INPROGRESS) || pAI->HasFollowState(STATE_FOLLOW_COMPLETE))
+            RestorePatrol();
+    }
+};
+
 struct npc_kernobeeAI : public FollowerAI
 {
     npc_kernobeeAI(Creature* pCreature) : FollowerAI(pCreature)
     {
-        m_uiCheckEndposTimer = 10000;
         Reset();
     }
 
-    uint32 m_uiCheckEndposTimer;
+    enum AlarmState { WAITING_FOR_BOMB, COUNTDOWN, FINAL_COUNTDOWN, EXPLODING, FINISHED };
+    AlarmState m_alarmState = WAITING_FOR_BOMB;
+    uint32 m_alarmTimer = 2000;
+    ObjectGuid m_alarmGuid;
+    ObjectGuid m_questLeaderGuid;
+    bool m_deathHandled = false;
 
     void Reset() override {}
 
+    void StartAlarm()
+    {
+        if (!m_alarmGuid.IsEmpty())
+        {
+            if (Creature* pAlarm = m_creature->GetMap()->GetCreature(m_alarmGuid))
+            {
+                if (npc_alarm_a_bomb_2600AI* pAI = dynamic_cast<npc_alarm_a_bomb_2600AI*>(pAlarm->AI()))
+                {
+                    if (pAlarm->IsAlive() && pAI->m_kernobeeGuid == m_creature->GetObjectGuid())
+                        return;
+                }
+            }
+            m_alarmGuid.Clear();
+        }
+
+        // Use the instance's existing spawn, including when Kernobee is on another dormitory floor.
+        if (instance_gnomeregan* pInstance = dynamic_cast<instance_gnomeregan*>(m_creature->GetInstanceData()))
+        {
+            if (Creature* pAlarm = pInstance->GetSingleCreatureFromStorage(NPC_ALARM_A_BOMB_2600, true))
+            {
+                if (npc_alarm_a_bomb_2600AI* pAI = dynamic_cast<npc_alarm_a_bomb_2600AI*>(pAlarm->AI()))
+                {
+                    if (pAI->StartFollowing(m_creature))
+                    {
+                        m_alarmGuid = pAlarm->GetObjectGuid();
+                        if (m_alarmState == WAITING_FOR_BOMB)
+                        {
+                            SetFollowPaused(true);        // Wait for the existing bomb to catch up.
+                            m_creature->SetWalk(false);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void StopAlarm(bool bCompleted)
+    {
+        if (Creature* pAlarm = m_creature->GetMap()->GetCreature(m_alarmGuid))
+        {
+            if (npc_alarm_a_bomb_2600AI* pAI = dynamic_cast<npc_alarm_a_bomb_2600AI*>(pAlarm->AI()))
+                pAI->StopFollowing(m_creature, bCompleted);
+        }
+        m_alarmGuid.Clear();
+    }
+
+    void JustDied(Unit* pKiller) override
+    {
+        if (m_deathHandled)
+            return;
+        m_deathHandled = true;
+        StopAlarm(false);
+        if (!HasFollowState(STATE_FOLLOW_INPROGRESS) || HasFollowState(STATE_FOLLOW_COMPLETE))
+            return;
+        FollowerAI::JustDied(pKiller);
+        // The blast can also kill the leader. The base follower only finds living
+        // leaders; use the original online player to fail remaining incomplete quests.
+        if (Player* pPlayer = m_creature->GetMap()->GetPlayer(m_questLeaderGuid))
+            pPlayer->FailQuestForGroup(QUEST_A_FINE_MESS);
+        m_alarmState = FINISHED;
+    }
+
+    void CorpseRemoved(uint32& uiRespawnDelay) override
+    {
+        StopAlarm(false);
+        m_alarmState = WAITING_FOR_BOMB;
+        m_alarmTimer = 2000;
+        m_questLeaderGuid.Clear();
+        m_deathHandled = false;
+        FollowerAI::CorpseRemoved(uiRespawnDelay);
+    }
+
     void ReceiveAIEvent(AIEventType eventType, Unit* /*pSender*/, Unit* pInvoker, uint32 uiMiscValue) override
     {
-        if (eventType == AI_EVENT_START_EVENT && pInvoker->GetTypeId() == TYPEID_PLAYER)
+        if (eventType == AI_EVENT_START_EVENT && pInvoker && pInvoker->GetTypeId() == TYPEID_PLAYER &&
+            uiMiscValue == QUEST_A_FINE_MESS && m_creature->IsAlive() &&
+            !m_creature->IsInCombat() && !HasFollowState(STATE_FOLLOW_INPROGRESS))
         {
             // No idea why he has UNIT_STAND_STATE_DEAD in UDB ..
             m_creature->SetStandState(UNIT_STAND_STATE_STAND);
             StartFollow((Player*)pInvoker, 0, GetQuestTemplateStore(uiMiscValue));
+            m_alarmState = WAITING_FOR_BOMB;
+            m_alarmTimer = 2000;
+            m_questLeaderGuid = pInvoker->GetObjectGuid();
+            m_deathHandled = false;
+            DoBroadcastText(SAY_KERNOBEE_START, m_creature);
+            StartAlarm();
         }
     }
 
@@ -672,29 +912,79 @@ struct npc_kernobeeAI : public FollowerAI
     {
         FollowerAI::UpdateFollowerAI(uiDiff);               // Do combat handling
 
-        if (m_creature->IsInCombat() || !HasFollowState(STATE_FOLLOW_INPROGRESS) || HasFollowState(STATE_FOLLOW_COMPLETE))
+        if (!m_creature->IsAlive() || m_creature->IsInCombat() || !HasFollowState(STATE_FOLLOW_INPROGRESS) ||
+            HasFollowState(STATE_FOLLOW_COMPLETE) || m_alarmState == EXPLODING || m_alarmState == FINISHED)
             return;
 
-        if (m_uiCheckEndposTimer < uiDiff)
+        // Check success before the deadline, even between polling ticks. Reaching
+        // the existing exit in the expiry update disarms the bomb and wins.
+        if (m_creature->IsWithinDist3d(aKernobeePositions[0][0], aKernobeePositions[0][1], aKernobeePositions[0][2], 2 * INTERACTION_DISTANCE))
         {
-            m_uiCheckEndposTimer = 500;
-            if (m_creature->IsWithinDist3d(aKernobeePositions[0][0], aKernobeePositions[0][1], aKernobeePositions[0][2], 2 * INTERACTION_DISTANCE))
-            {
-                SetFollowComplete(true);
-                if (Player* pPlayer = GetLeaderForFollower())
-                    pPlayer->RewardPlayerAndGroupAtEventExplored(QUEST_A_FINE_MESS, m_creature);
-                m_creature->GetMotionMaster()->MovePoint(1, aKernobeePositions[1][0], aKernobeePositions[1][1], aKernobeePositions[1][2]);
-                m_creature->ForcedDespawn(2000);
-            }
+            m_alarmState = FINISHED;
+            StopAlarm(true);
+            DoBroadcastText(SAY_KERNOBEE_END, m_creature);
+            SetFollowComplete(true);
+            if (Player* pPlayer = GetLeaderForFollower())
+                pPlayer->RewardPlayerAndGroupAtEventExplored(QUEST_A_FINE_MESS, m_creature);
+            m_creature->GetMotionMaster()->MovePoint(1, aKernobeePositions[1][0], aKernobeePositions[1][1], aKernobeePositions[1][2]);
+            m_creature->ForcedDespawn(2000);
+            return;
         }
+
+        StartAlarm();                                     // Retry a missing/unloaded/recreated bomb.
+        Creature* pAlarm = m_creature->GetMap()->GetCreature(m_alarmGuid);
+        npc_alarm_a_bomb_2600AI* pAlarmAI = pAlarm ? dynamic_cast<npc_alarm_a_bomb_2600AI*>(pAlarm->AI()) : nullptr;
+        if (!pAlarm || !pAlarm->IsAlive() || !pAlarmAI || pAlarmAI->m_kernobeeGuid != m_creature->GetObjectGuid())
+        {
+            SetFollowPaused(false);                       // Missing data cannot hold the original escort forever.
+            return;
+        }
+
+        if (m_alarmState == WAITING_FOR_BOMB)
+        {
+            if (m_alarmTimer > uiDiff)
+                m_alarmTimer -= uiDiff;
+            else if (m_creature->IsWithinDistInMap(pAlarm, 10.0f))
+            {
+                m_creature->SetWalk(true);
+                SetFollowPaused(false);
+                m_alarmState = COUNTDOWN;
+                m_alarmTimer = 300000;                    // VMaNGOS: starts only once the bomb is in place.
+            }
+            else
+                m_alarmTimer = 500;
+            return;                                      // Never charge the start update twice.
+        }
+
+        if (m_alarmState == COUNTDOWN && pAlarm->IsWithinDist3d(aAlarmWarningPosition[0],
+            aAlarmWarningPosition[1], aAlarmWarningPosition[2], 2 * INTERACTION_DISTANCE))
+        {
+            m_alarmState = FINAL_COUNTDOWN;
+            m_alarmTimer = 20000;                         // Reset the same clock once, do not add twenty seconds.
+            DoBroadcastText(SAY_ALARM_SEE_END, pAlarm);
+            return;
+        }
+
+        if (m_alarmTimer > uiDiff)
+            m_alarmTimer -= uiDiff;
         else
-            m_uiCheckEndposTimer -= uiDiff;
+        {
+            m_alarmState = EXPLODING;
+            m_alarmTimer = 0;
+            SetFollowPaused(true);
+            pAlarmAI->Explode(m_creature);
+        }
     }
 };
 
 UnitAI* GetAI_npc_kernobee(Creature* pCreature)
 {
     return new npc_kernobeeAI(pCreature);
+}
+
+UnitAI* GetAI_npc_alarm_a_bomb_2600(Creature* pCreature)
+{
+    return new npc_alarm_a_bomb_2600AI(pCreature);
 }
 
 bool QuestAccept_npc_kernobee(Player* pPlayer, Creature* pCreature, const Quest* pQuest)
@@ -718,5 +1008,10 @@ void AddSC_gnomeregan()
     pNewScript->Name = "npc_kernobee";
     pNewScript->GetAI = &GetAI_npc_kernobee;
     pNewScript->pQuestAcceptNPC = &QuestAccept_npc_kernobee;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_alarm_a_bomb_2600";
+    pNewScript->GetAI = &GetAI_npc_alarm_a_bomb_2600;
     pNewScript->RegisterSelf();
 }

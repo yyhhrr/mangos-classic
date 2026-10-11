@@ -22,6 +22,7 @@ enum
     DATA_EXPLOSIVE_CHARGE_USE   = 5,
 
     NPC_BLASTMASTER_SHORTFUSE   = 7998,
+    NPC_ALARM_A_BOMB_2600       = 7897,
 
     GO_RED_ROCKET               = 103820,
     GO_CAVE_IN_NORTH            = 146085,
