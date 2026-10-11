@@ -85,6 +85,10 @@ void instance_gnomeregan::SetData(uint32 uiType, uint32 uiData)
     switch (uiType)
     {
         case TYPE_GRUBBIS:
+            // Completion is final for this instance, including repeated DONE callbacks.
+            if (m_auiEncounter[0] == DONE)
+                return;
+
             m_auiEncounter[0] = uiData;
             if (uiData == IN_PROGRESS)
             {

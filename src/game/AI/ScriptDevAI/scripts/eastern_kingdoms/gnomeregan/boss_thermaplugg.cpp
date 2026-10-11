@@ -103,12 +103,26 @@ struct boss_thermapluggAI : public ScriptedAI
         DoScriptText(SAY_SLAY, m_creature);
     }
 
+    void DespawnBombs()
+    {
+        // Despawn callbacks may remove GUIDs from the tracked lists.
+        GuidList bombGuids;
+        bombGuids.swap(m_lSummonedBombGUIDs);
+        m_lLandedBombGUIDs.clear();
+
+        for (const auto& guid : bombGuids)
+        {
+            if (Creature* pBomb = m_creature->GetMap()->GetCreature(guid))
+                pBomb->ForcedDespawn();
+        }
+    }
+
     void JustDied(Unit* /*pKiller*/) override
     {
         if (m_pInstance)
             m_pInstance->SetData(TYPE_THERMAPLUGG, DONE);
 
-        m_lSummonedBombGUIDs.clear();
+        DespawnBombs();
     }
 
     void Aggro(Unit* /*pWho*/) override
@@ -131,13 +145,7 @@ struct boss_thermapluggAI : public ScriptedAI
         if (m_pInstance)
             m_pInstance->SetData(TYPE_THERMAPLUGG, FAIL);
 
-        // Remove remaining bombs
-        for (GuidList::const_iterator itr = m_lSummonedBombGUIDs.begin(); itr != m_lSummonedBombGUIDs.end(); ++itr)
-        {
-            if (Creature* pBomb = m_creature->GetMap()->GetCreature(*itr))
-                pBomb->ForcedDespawn();
-        }
-        m_lSummonedBombGUIDs.clear();
+        DespawnBombs();
     }
 
     void JustSummoned(Creature* pSummoned) override
@@ -160,6 +168,7 @@ struct boss_thermapluggAI : public ScriptedAI
     void SummonedCreatureDespawn(Creature* pSummoned) override
     {
         m_lSummonedBombGUIDs.remove(pSummoned->GetObjectGuid());
+        m_lLandedBombGUIDs.remove(pSummoned->GetObjectGuid());
     }
 
     void UpdateAI(const uint32 uiDiff) override

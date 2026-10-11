@@ -249,7 +249,11 @@ struct npc_blastmaster_emi_shortfuseAI : public npc_escortAI
         if (!m_pInstance)
             return;
 
-        m_pInstance->SetData(TYPE_GRUBBIS, FAIL);
+        // A death during the finale must not undo Grubbis's defeat.
+        if (m_pInstance->GetData(TYPE_GRUBBIS) == IN_PROGRESS)
+            m_pInstance->SetData(TYPE_GRUBBIS, FAIL);
+        else
+            m_pInstance->SetData(TYPE_EXPLOSIVE_CHARGE, DATA_EXPLOSIVE_CHARGE_USE);
 
         if (m_bSouthernCaveInOpened)                        // close southern cave-in door
             m_pInstance->DoUseDoorOrButton(GO_CAVE_IN_SOUTH);
@@ -266,6 +270,10 @@ struct npc_blastmaster_emi_shortfuseAI : public npc_escortAI
     void StartEvent(Player* pPlayer)
     {
         if (!m_pInstance)
+            return;
+
+        const uint32 uiState = m_pInstance->GetData(TYPE_GRUBBIS);
+        if (uiState != NOT_STARTED && uiState != FAIL)
             return;
 
         m_pInstance->SetData(TYPE_GRUBBIS, IN_PROGRESS);
