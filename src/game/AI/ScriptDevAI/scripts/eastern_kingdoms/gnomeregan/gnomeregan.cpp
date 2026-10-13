@@ -33,6 +33,7 @@ EndContentData */
 #include "gnomeregan.h"
 #include "AI/ScriptDevAI/base/escort_ai.h"
 #include "AI/ScriptDevAI/base/follower_ai.h"
+#include "AI/EventAI/CreatureEventAI.h"
 #include "Grids/GridNotifiers.h"
 #include "Grids/GridNotifiersImpl.h"
 #include "Grids/CellImpl.h"
@@ -1104,6 +1105,261 @@ UnitAI* GetAI_boss_viscous_fallout(Creature* creature)
     return new boss_viscous_falloutAI(creature);
 }
 
+// Gnomeregan trash additions. Existing EventAI still owns dialogue, ranged mode,
+// wrench/Chain Burn, spawn visuals, and the irradiated slime's death cloud.
+enum GnomereganTrashSpells
+{
+    SPELL_GNOMEREGAN_SUPERCHARGE = 10732,
+    SPELL_GNOMEREGAN_REBUILD     = 10345,
+    SPELL_GNOMEREGAN_CLOUD       = 10341,
+    SPELL_GNOMEREGAN_OOZE        = 9459,
+};
+
+static bool IsGnomereganSupportCaster(Unit const* caster)
+{
+    return caster && (caster->GetEntry() == 6222 || caster->GetEntry() == 6224) &&
+        !caster->IsPlayerControlled() && !caster->HasCharmer();
+}
+
+static bool IsGnomereganSupportTarget(Unit const* caster, Unit const* target, uint32 spellId)
+{
+    if (!target || !target->IsCreature() || !target->IsAlive() || !target->IsInCombat() ||
+        target->IsPlayerControlled() || target->HasCharmer() || !caster->CanAssist(target) ||
+        !caster->IsWithinDistInMap(target, 15.0f) || !caster->IsWithinLOSInMap(target))
+        return false;
+
+    // Match the existing spell_script_target whitelist; never extend support to bosses.
+    switch (target->GetEntry())
+    {
+        case 2678:
+        case 6225:
+        case 6226:
+        case 6227:
+            break;
+        default:
+            return false;
+    }
+
+    if (target->HasAura(spellId))
+        return false;
+    if (spellId == SPELL_GNOMEREGAN_REBUILD)
+        return target->GetHealth() < target->GetMaxHealth();
+    return spellId == SPELL_GNOMEREGAN_SUPERCHARGE;
+}
+
+struct GnomereganSupportTargetCheck
+{
+    GnomereganSupportTargetCheck(Unit* caster, uint32 spellId) :
+        m_caster(caster), m_spellId(spellId), m_healthPercent(100.0f), m_distance(15.0f) {}
+
+    bool operator()(Unit* target)
+    {
+        if (!IsGnomereganSupportTarget(m_caster, target, m_spellId))
+            return false;
+
+        float healthPercent = m_spellId == SPELL_GNOMEREGAN_REBUILD ? target->GetHealthPercent() : 0.0f;
+        float distance = m_caster->GetDistance(target);
+        if (healthPercent > m_healthPercent || (healthPercent == m_healthPercent && distance > m_distance))
+            return false;
+        m_healthPercent = healthPercent;
+        m_distance = distance;
+        return true;
+    }
+
+    Unit* m_caster;
+    uint32 m_spellId;
+    float m_healthPercent;
+    float m_distance;
+};
+
+struct GnomereganMechanicalSupport : public SpellScript
+{
+    bool OnCheckTarget(Spell const* spell, Unit* target, SpellEffectIndex /*effect*/) const override
+    {
+        Unit* caster = spell->GetCaster();
+        if (!IsGnomereganSupportCaster(caster))
+            return true;
+
+        // Target 38 otherwise falls back to another nearby robot. Keep the AI's
+        // explicit choice, including its health/buff/LOS checks, for every effect.
+        return target == spell->m_targets.getUnitTarget() &&
+            IsGnomereganSupportTarget(caster, target, spell->m_spellInfo->Id);
+    }
+};
+
+struct npc_gnomeregan_mechanical_supportAI : public CreatureEventAI
+{
+    npc_gnomeregan_mechanical_supportAI(Creature* creature) : CreatureEventAI(creature) { Reset(); }
+
+    uint32 m_superchargeTimer;
+    uint32 m_rebuildTimer;
+
+    void ResetSupportTimers()
+    {
+        // Split the two skills: AC's early reinforcement, existing 28.9s repair cadence.
+        m_superchargeTimer = 3000;
+        m_rebuildTimer = 28900;
+    }
+
+    void Reset() override
+    {
+        CreatureEventAI::Reset();
+        ResetSupportTimers();
+    }
+
+    void EnterCombat(Unit* enemy) override
+    {
+        ResetSupportTimers();
+        CreatureEventAI::EnterCombat(enemy);
+    }
+
+    void EnterEvadeMode() override
+    {
+        CreatureEventAI::EnterEvadeMode();
+        ResetSupportTimers();
+    }
+
+    void UpdateEventTimers(uint32 diff) override
+    {
+        CreatureEventAI::UpdateEventTimers(diff);
+        if (m_creature->IsInCombat())
+        {
+            m_superchargeTimer = m_superchargeTimer > diff ? m_superchargeTimer - diff : 0;
+            m_rebuildTimer = m_rebuildTimer > diff ? m_rebuildTimer - diff : 0;
+        }
+    }
+
+    void TrySupport(uint32 spellId, uint32& timer)
+    {
+        if (timer || !CanExecuteCombatAction())
+            return;
+        Unit* target = nullptr;
+        GnomereganSupportTargetCheck check(m_creature, spellId);
+        MaNGOS::UnitLastSearcher<GnomereganSupportTargetCheck> searcher(target, check);
+        Cell::VisitAllObjects(m_creature, searcher, 15.0f);
+        if (target && DoCastSpellIfCan(target, spellId) == CAST_OK)
+            timer = 28900;
+    }
+
+    void ExecuteActions() override
+    {
+        if (IsGnomereganSupportCaster(m_creature) && m_creature->IsInCombat() && m_creature->GetVictim())
+        {
+            TrySupport(SPELL_GNOMEREGAN_REBUILD, m_rebuildTimer);
+            TrySupport(SPELL_GNOMEREGAN_SUPERCHARGE, m_superchargeTimer);
+        }
+        CreatureEventAI::ExecuteActions();
+    }
+};
+
+UnitAI* GetAI_npc_gnomeregan_mechanical_support(Creature* creature)
+{
+    return new npc_gnomeregan_mechanical_supportAI(creature);
+}
+
+struct GnomereganTrashRadiationCloud : public SpellScript
+{
+    void OnCast(Spell* spell) const override
+    {
+        Unit* caster = spell->GetCaster();
+        if (!caster)
+            return;
+        switch (caster->GetEntry())
+        {
+            case 6218:
+            case 6219:
+            case 6220:
+                // 1.12 creates a dynamic ground object. Replace the previous
+                // cloud only after a successful cast, before creating the new one.
+                caster->RemoveDynObject(SPELL_GNOMEREGAN_CLOUD);
+                break;
+        }
+    }
+};
+
+// Active skills/timers follow AC's 6218/6219/6220 SmartAI entries, with 1.12
+// ground-cloud lifecycle and the existing EventAI death/Chain Burn behavior.
+struct npc_gnomeregan_radiationAI : public CreatureEventAI
+{
+    npc_gnomeregan_radiationAI(Creature* creature) : CreatureEventAI(creature) { Reset(); }
+
+    uint32 m_cloudTimer;
+    uint32 m_oozeTimer;
+    bool m_cloudPending;
+
+    void ResetRadiationTimers()
+    {
+        m_cloudTimer = m_creature->GetEntry() == 6220 ? urand(1000, 2000) : urand(2000, 10000);
+        m_oozeTimer = urand(2000, 9000);
+        m_cloudPending = true;
+    }
+
+    void Reset() override
+    {
+        CreatureEventAI::Reset();
+        ResetRadiationTimers();
+        m_creature->RemoveDynObject(SPELL_GNOMEREGAN_CLOUD);
+    }
+
+    void EnterCombat(Unit* enemy) override
+    {
+        ResetRadiationTimers();
+        CreatureEventAI::EnterCombat(enemy);
+    }
+
+    void EnterEvadeMode() override
+    {
+        m_creature->RemoveDynObject(SPELL_GNOMEREGAN_CLOUD);
+        CreatureEventAI::EnterEvadeMode();
+        ResetRadiationTimers();
+    }
+
+    void UpdateEventTimers(uint32 diff) override
+    {
+        CreatureEventAI::UpdateEventTimers(diff);
+        if (m_creature->IsInCombat())
+        {
+            m_cloudTimer = m_cloudTimer > diff ? m_cloudTimer - diff : 0;
+            m_oozeTimer = m_oozeTimer > diff ? m_oozeTimer - diff : 0;
+        }
+    }
+
+    void ExecuteActions() override
+    {
+        if (m_creature->IsInCombat() && m_creature->GetVictim() &&
+            !m_creature->IsPlayerControlled() && !m_creature->HasCharmer() && CanExecuteCombatAction())
+        {
+            if (m_cloudPending && !m_cloudTimer && DoCastSpellIfCan(m_creature, SPELL_GNOMEREGAN_CLOUD) == CAST_OK)
+            {
+                if (m_creature->GetEntry() == 6220)
+                    m_cloudPending = false;
+                else
+                    m_cloudTimer = urand(14000, 21000);
+            }
+
+            if (!m_oozeTimer && CanExecuteCombatAction())
+            {
+                Unit* target = nullptr;
+                MaNGOS::NearestAttackableUnitInObjectRangeCheck check(m_creature, m_creature->GetOwner(), 50.0f);
+                MaNGOS::UnitLastSearcher<MaNGOS::NearestAttackableUnitInObjectRangeCheck> searcher(target, check);
+                Cell::VisitAllObjects(m_creature, searcher, 50.0f);
+                if (target && DoCastSpellIfCan(target, SPELL_GNOMEREGAN_OOZE) == CAST_OK)
+                    m_oozeTimer = urand(11000, 14000);
+            }
+        }
+        CreatureEventAI::ExecuteActions();
+    }
+
+    // CreatureEventAI::JustDied calls our Reset before its death actions:
+    // remove the live cloud first, then allow 6218's one intentional death cloud.
+};
+
+UnitAI* GetAI_npc_gnomeregan_radiation(Creature* creature)
+{
+    return new npc_gnomeregan_radiationAI(creature);
+}
+
+
 void AddSC_gnomeregan()
 {
     Script* pNewScript = new Script;
@@ -1129,5 +1385,18 @@ void AddSC_gnomeregan()
     pNewScript = new Script;
     pNewScript->Name = "boss_viscous_fallout";
     pNewScript->GetAI = &GetAI_boss_viscous_fallout;
+    pNewScript->RegisterSelf();
+
+    RegisterSpellScript<GnomereganMechanicalSupport>("spell_gnomeregan_mechanical_support");
+    RegisterSpellScript<GnomereganTrashRadiationCloud>("spell_gnomeregan_trash_radiation_cloud");
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_gnomeregan_mechanical_support";
+    pNewScript->GetAI = &GetAI_npc_gnomeregan_mechanical_support;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_gnomeregan_radiation";
+    pNewScript->GetAI = &GetAI_npc_gnomeregan_radiation;
     pNewScript->RegisterSelf();
 }
