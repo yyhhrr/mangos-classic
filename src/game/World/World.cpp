@@ -1344,6 +1344,7 @@ void World::SetInitialWorldSettings()
     sLog.outString("Initialize game time and timers");
     m_gameTime = time(nullptr);
     m_startTime = m_gameTime;
+    LoadClientTimeSettings();
 
     time_t curr;
     time(&curr);
@@ -2047,6 +2048,54 @@ bool World::RemoveBanAccount(BanMode mode, const std::string& source, const std:
     }
     return true;
 }
+
+// The client clock controls lighting only. Server timers keep using m_gameTime.
+void World::LoadClientTimeSettings()
+{
+    m_fixedClientHour.store(-1);
+    auto result = CharacterDatabase.PQuery("SELECT fixed_hour FROM client_time_settings WHERE realm_id = %u", realmID);
+    if (!result)
+        return;
+
+    int32 hour = result->Fetch()[0].GetInt32();
+    if (hour < -1 || hour > 23)
+    {
+        sLog.outError("Invalid client_time_settings fixed_hour %d for realm %u; using real time.", hour, realmID);
+        return;
+    }
+    m_fixedClientHour.store(hour);
+}
+
+void World::FillClientTimePacket(WorldPacket& packet) const
+{
+    int32 hour = GetFixedClientHour();
+    uint32 packedTime = secsToTimeBitFields(GetGameTime());
+    if (hour >= 0)
+        // Minutes occupy bits 0..5, hour bits 6..10; preserve the real date.
+        packedTime = (packedTime & ~uint32(0x7ff)) | (uint32(hour) << 6);
+
+    packet.Initialize(SMSG_LOGIN_SETTIMESPEED, 4 + 4);
+    packet << packedTime;
+    packet << (hour >= 0 ? 0.0f : 0.01666667f);
+}
+
+bool World::SetFixedClientHour(int32 hour)
+{
+    if (hour < -1 || hour > 23)
+        return false;
+
+    // Persist successfully before changing the live clock or notifying clients.
+    if (!CharacterDatabase.DirectPExecute("INSERT INTO client_time_settings (realm_id, fixed_hour) VALUES (%u, %d) "
+        "ON DUPLICATE KEY UPDATE fixed_hour = VALUES(fixed_hour)", realmID, hour))
+        return false;
+
+    m_fixedClientHour.store(hour);
+    WorldPacket packet;
+    FillClientTimePacket(packet);
+    SendGlobalMessage(packet);
+    return true;
+}
+
 
 /// Update the game time
 void World::_UpdateGameTime()

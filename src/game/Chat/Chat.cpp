@@ -951,6 +951,7 @@ ChatCommand* ChatHandler::getCommandTable()
         { "server",         SEC_PLAYER,         true,  nullptr,                                           "", serverCommandTable   },
         { "tele",           SEC_MODERATOR,      true,  nullptr,                                           "", teleCommandTable     },
         { "trigger",        SEC_GAMEMASTER,     false, nullptr,                                           "", triggerCommandTable  },
+        { "worldtime",      SEC_ADMINISTRATOR,  true,  &ChatHandler::HandleWorldTimeCommand,            "Syntax: .worldtime [day|reset]. Show the mode, save fixed noon, or restore normal day/night.", nullptr },
         { "wp",             SEC_GAMEMASTER,     false, nullptr,                                           "", wpCommandTable       },
         { "bg",             SEC_GAMEMASTER,     false, nullptr,                                           "", battlegroundCommandTable },
 

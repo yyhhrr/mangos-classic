@@ -451,6 +451,10 @@ class World
         time_t const& GetStartTime() const { return m_startTime; }
         /// What time is it?
         time_t const& GetGameTime() const { return m_gameTime; }
+        // Client clock/lighting only; -1 means the normal server local time.
+        int32 GetFixedClientHour() const { return m_fixedClientHour.load(); }
+        bool SetFixedClientHour(int32 hour);
+        void FillClientTimePacket(WorldPacket& packet) const;
         /// Uptime (in secs)
         uint32 GetUptime() const { return uint32(m_gameTime - m_startTime); }
 
@@ -608,6 +612,7 @@ class World
         void StartBGQueueThread();
     protected:
         void _UpdateGameTime();
+        void LoadClientTimeSettings();
         // callback for UpdateRealmCharacters
         void _UpdateRealmCharCount(QueryResult* resultCharCount, uint32 accountId);
 
@@ -646,6 +651,7 @@ class World
 
         time_t m_startTime;
         time_t m_gameTime;
+        std::atomic<int32> m_fixedClientHour{-1};
         IntervalTimer m_timers[WUPDATE_COUNT];
         uint32 mail_timer;
         uint32 mail_timer_expires;

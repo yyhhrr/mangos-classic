@@ -7362,3 +7362,41 @@ bool ChatHandler::HandleGoNextCommand(char* args)
 
     return HandleGoHelper(player, mapId, x, y, &z);
 }
+
+bool ChatHandler::HandleWorldTimeCommand(char* args)
+{
+    SkipWhiteSpaces(&args);
+    if (!*args)
+    {
+        int32 hour = sWorld.GetFixedClientHour();
+        if (hour >= 0)
+            PSendSysMessage("Client time is fixed at %02d:00 (saved). Use .worldtime reset to restore normal day/night.", hour);
+        else
+            SendSysMessage("Client time follows server local time. Use .worldtime day for a saved, fixed noon.");
+        return true;
+    }
+
+    char* mode = ExtractLiteralArg(&args);
+    SkipWhiteSpaces(&args);
+    if (!mode || *args)
+        return false;
+
+    int32 hour;
+    if (strcmp(mode, "day") == 0)
+        hour = 12;
+    else if (strcmp(mode, "reset") == 0)
+        hour = -1;
+    else
+        return false;
+
+    if (!sWorld.SetFixedClientHour(hour))
+    {
+        SendSysMessage("Could not save client time. Check the database log; the current mode was not changed.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    SendSysMessage(hour >= 0 ? "Client time is now fixed at 12:00 and saved for restart." :
+        "Normal day/night restored from server local time and saved for restart.");
+    return true;
+}
