@@ -1585,6 +1585,13 @@ class Player : public Unit
         bool UpdateGatherSkill(uint32 SkillId, uint32 SkillValue, uint32 RedLevel, uint32 Multiplicator = 1);
         bool UpdateFishingSkill();
 
+        void StartAutoFishing(uint32 spellId);
+        void StopAutoFishing(char const* reason = nullptr);
+        void UpdateAutoFishing(uint32 diff);
+        bool ShouldSuppressAutoFishingCast(uint32 spellId);
+        bool IsAutoFishing() const { return m_autoFishing.spellId != 0; }
+        uint32 GetAutoFishingSpellId() const { return m_autoFishing.spellId; }
+
         bool UpdateStats(Stats stat) override;
         bool UpdateAllStats() override;
         void UpdateResistances(uint32 school) override;
@@ -2564,6 +2571,20 @@ class Player : public Unit
         std::map<uint32, ObjectGuid> m_followAngles;
 
         uint8 m_fishingSteps;
+
+        struct AutoFishingState
+        {
+            uint32 spellId = 0;
+            uint32 timer = 0;
+            uint8 bobberWaitChecks = 0;
+            bool waitingForBobber = false;
+            ObjectGuid bobberGuid;
+            ObjectGuid lootGuid;
+        } m_autoFishing;
+
+        // Cancel-channel and cast can be sent together by a single button press.
+        uint32 m_autoFishingStopSpellId = 0;
+        uint32 m_autoFishingStopTimer = 0;
 
         std::map<uint32, ItemSetEffect> m_itemSetEffects;
 

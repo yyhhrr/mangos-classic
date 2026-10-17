@@ -380,6 +380,10 @@ void WorldSession::HandleMovementOpcodes(WorldPacket& recv_data)
     if (!ProcessMovementInfo(movementInfo, mover, plMover, recv_data))
         return;
 
+    if (plMover == _player && _player->IsAutoFishing() &&
+        movementInfo.HasMovementFlag(MovementFlags(MOVEFLAG_MASK_MOVING | MOVEFLAG_JUMPING)))
+        _player->StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xef\xbc\x9a\xe8\xa7\x92\xe8\x89\xb2\xe7\xa7\xbb\xe5\x8a\xa8\xe3\x80\x82");
+
     // CMSG opcode has no handler in client, should not be sent to others.
     // It is sent by client when you jump and hit something on the way up,
     // thus stopping upward movement and causing you to descend sooner.

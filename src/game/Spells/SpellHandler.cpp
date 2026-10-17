@@ -361,6 +361,30 @@ void WorldSession::HandleCastSpellOpcode(WorldPacket& recvPacket)
         }
     }
 
+    if (caster == _player && mover == _player)
+    {
+        // Recognize all learned fishing ranks by the object they summon.
+        bool fishingCast = false;
+        for (uint32 i = 0; i < MAX_EFFECT_INDEX; ++i)
+        {
+            if (spellInfo->Effect[i] != SPELL_EFFECT_TRANS_DOOR)
+                continue;
+            GameObjectInfo const* info = ObjectMgr::GetGameObjectInfo(spellInfo->EffectMiscValue[i]);
+            if (info && info->type == GAMEOBJECT_TYPE_FISHINGNODE)
+            {
+                fishingCast = true;
+                break;
+            }
+        }
+        if (fishingCast && _player->ShouldSuppressAutoFishingCast(spellId))
+        {
+            recvPacket.rpos(recvPacket.wpos());
+            return;
+        }
+        if (!fishingCast && _player->IsAutoFishing())
+            _player->StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xef\xbc\x9a\xe6\xad\xa3\xe5\x9c\xa8\xe6\x96\xbd\xe6\x94\xbe\xe5\x85\xb6\xe4\xbb\x96\xe6\xb3\x95\xe6\x9c\xaf\xe3\x80\x82");
+    }
+
     // client provided targets
     SpellCastTargets targets;
 
@@ -404,6 +428,12 @@ void WorldSession::HandleCancelCastOpcode(WorldPacket& recvPacket)
 
     if (!_player->IsClientControlled(_player))
         return;
+
+    if (_player->IsAutoFishing() && (spellId == 0 || spellId == _player->GetAutoFishingSpellId()))
+    {
+        _player->StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xe3\x80\x82");
+        return;
+    }
 
     if (_player->IsNonMeleeSpellCasted(false))
         _player->InterruptNonMeleeSpells(false, spellId);
@@ -530,12 +560,20 @@ void WorldSession::HandleCancelAutoRepeatSpellOpcode(WorldPacket& /*recvPacket*/
 
 void WorldSession::HandleCancelChanneling(WorldPacket& recv_data)
 {
-    recv_data.read_skip<uint32>();                          // spellid, not used
+    uint32 spellId;
+    recv_data >> spellId;
 
     // ignore for remote control state (for player case)
     Unit* mover = _player->GetMover();
     if (mover != _player && mover->GetTypeId() == TYPEID_PLAYER)
         return;
+
+    if (mover == _player && _player->IsAutoFishing() &&
+        (spellId == 0 || spellId == _player->GetAutoFishingSpellId()))
+    {
+        _player->StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xe3\x80\x82");
+        return;
+    }
 
     _player->InterruptSpell(CURRENT_CHANNELED_SPELL);
 }

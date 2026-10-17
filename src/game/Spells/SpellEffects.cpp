@@ -5426,6 +5426,14 @@ void Spell::EffectTransmitted(SpellEffectIndex eff_idx)
     cMap->Add(pGameObj);
     pGameObj->AIM_Initialize();
 
+    // A manual cast starts the loop only after the real fishing node exists.
+    if (goinfo->type == GAMEOBJECT_TYPE_FISHINGNODE && m_caster->GetTypeId() == TYPEID_PLAYER)
+    {
+        Player* player = static_cast<Player*>(m_caster);
+        if (m_clientCast || player->IsAutoFishing())
+            player->StartAutoFishing(m_spellInfo->Id);
+    }
+
     // Notify Summoner
     if (m_originalCaster && (m_originalCaster != m_caster) && (m_originalCaster->AI()))
         m_originalCaster->AI()->JustSummoned(pGameObj);

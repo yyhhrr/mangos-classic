@@ -1412,6 +1412,7 @@ void Player::Update(const uint32 diff)
     SetCanDelayTeleport(true);
     Unit::Update(diff);
     SetCanDelayTeleport(false);
+    UpdateAutoFishing(diff);
 
     if (IsHasDelayedTeleport() && m_semaphoreTeleport_Near)
         TeleportTo(m_teleport_dest, m_teleport_options);
@@ -2229,6 +2230,7 @@ void Player::AddToWorld()
 
 void Player::RemoveFromWorld()
 {
+    StopAutoFishing();
     // cleanup
     if (IsInWorld())
     {
@@ -5132,6 +5134,255 @@ bool Player::UpdateGatherSkill(uint32 SkillId, uint32 SkillValue, uint32 RedLeve
         }
     }
     return false;
+}
+
+void Player::StartAutoFishing(uint32 spellId)
+{
+    WorldSession* session = GetSession();
+    if (!session || session->IsOffline() || session->isLogingOut() || !IsInWorld() ||
+        !IsAlive() || IsInCombat() || IsMoving() || IsBeingTeleported() || GetMover() != this)
+        return;
+
+#if defined(ENABLE_PLAYERBOTS) || defined(BUILD_DEPRECATED_PLAYERBOT)
+    if (GetPlayerbotAI())
+        return;
+#endif
+
+    if (m_autoFishingStopTimer)
+        return;
+
+    // This is called only after a real fishing node was successfully added to the map.
+    GameObject* bobber = GetGameObject(spellId);
+    if (!bobber || bobber->GetGoType() != GAMEOBJECT_TYPE_FISHINGNODE ||
+        bobber->GetOwnerGuid() != GetObjectGuid())
+        return;
+
+    if (IsAutoFishing() && m_autoFishing.spellId != spellId)
+        return;
+
+    bool const starting = !IsAutoFishing();
+    m_autoFishing.spellId = spellId;
+    m_autoFishing.timer = 200;
+    m_autoFishing.bobberWaitChecks = 0;
+    m_autoFishing.waitingForBobber = false;
+    m_autoFishing.bobberGuid = bobber->GetObjectGuid();
+    m_autoFishing.lootGuid.Clear();
+
+    if (starting)
+        ChatHandler(session).SendSysMessage("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\xbc\x80\xe5\x90\xaf\xe3\x80\x82\xe5\x86\x8d\xe6\xac\xa1\xe6\x96\xbd\xe6\x94\xbe\xe9\x92\x93\xe9\xb1\xbc\xe6\x88\x96\xe7\xa7\xbb\xe5\x8a\xa8\xe5\x8d\xb3\xe5\x8f\xaf\xe5\x81\x9c\xe6\xad\xa2\xe3\x80\x82");
+}
+
+void Player::StopAutoFishing(char const* reason)
+{
+    if (!IsAutoFishing())
+        return;
+
+    uint32 const spellId = m_autoFishing.spellId;
+    m_autoFishing = AutoFishingState();
+    m_autoFishingStopSpellId = spellId;
+    m_autoFishingStopTimer = 500;
+
+    // Never interrupt an unrelated cast or discard an existing loot window.
+    if (Spell* channel = GetCurrentSpell(CURRENT_CHANNELED_SPELL))
+        if (channel->m_spellInfo->Id == spellId)
+            InterruptSpell(CURRENT_CHANNELED_SPELL);
+
+    WorldSession* session = GetSession();
+    if (reason && session && !session->IsOffline() && !session->isLogingOut())
+        ChatHandler(session).SendSysMessage(reason);
+}
+
+bool Player::ShouldSuppressAutoFishingCast(uint32 /*spellId*/)
+{
+    // The caller has classified this incoming manual spell as a fishing cast.
+    if (IsAutoFishing())
+    {
+        StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xe3\x80\x82");
+        return true;
+    }
+
+    return m_autoFishingStopTimer != 0;
+}
+
+void Player::UpdateAutoFishing(uint32 diff)
+{
+    // Update even while disabled: a cancel-channel + cast packet pair must not restart fishing.
+    if (m_autoFishingStopTimer)
+        m_autoFishingStopTimer = diff >= m_autoFishingStopTimer ? 0 : m_autoFishingStopTimer - diff;
+
+    if (!IsAutoFishing())
+        return;
+
+    WorldSession* session = GetSession();
+    if (!session || session->IsOffline() || session->isLogingOut() || !IsInWorld() ||
+        !IsAlive() || IsBeingTeleported())
+    {
+        StopAutoFishing();
+        return;
+    }
+
+    if (IsMoving() || IsInCombat() || IsMounted() || IsTaxiFlying() ||
+        IsStunned() || GetMover() != this || HasCharmer())
+    {
+        StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xef\xbc\x9a\xe8\xa7\x92\xe8\x89\xb2\xe7\xa7\xbb\xe5\x8a\xa8\xe3\x80\x81\xe8\xbf\x9b\xe5\x85\xa5\xe6\x88\x98\xe6\x96\x97\xe6\x88\x96\xe5\xbd\x93\xe5\x89\x8d\xe7\x8a\xb6\xe6\x80\x81\xe6\x97\xa0\xe6\xb3\x95\xe9\x92\x93\xe9\xb1\xbc\xe3\x80\x82");
+        return;
+    }
+
+    Item* pole = GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND);
+    if (!HasSkill(SKILL_FISHING) || !HasSpell(m_autoFishing.spellId) || !pole ||
+        pole->GetProto()->Class != ITEM_CLASS_WEAPON ||
+        pole->GetProto()->SubClass != ITEM_SUBCLASS_WEAPON_FISHING_POLE)
+    {
+        StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xef\xbc\x9a\xe9\x9c\x80\xe8\xa6\x81\xe5\xb7\xb2\xe5\xad\xa6\xe4\xbc\x9a\xe7\x9a\x84\xe9\x92\x93\xe9\xb1\xbc\xe6\x8a\x80\xe8\x83\xbd\xe5\x92\x8c\xe8\xa3\x85\xe5\xa4\x87\xe5\x9c\xa8\xe4\xb8\xbb\xe6\x89\x8b\xe7\x9a\x84\xe9\xb1\xbc\xe7\xab\xbf\xe3\x80\x82");
+        return;
+    }
+
+    if (diff < m_autoFishing.timer)
+    {
+        m_autoFishing.timer -= diff;
+        return;
+    }
+    m_autoFishing.timer = 200;
+
+    Spell* channel = GetCurrentSpell(CURRENT_CHANNELED_SPELL);
+    if ((channel && channel->m_spellInfo->Id != m_autoFishing.spellId) ||
+        IsNonMeleeSpellCasted(true, true))
+    {
+        StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xef\xbc\x9a\xe6\xad\xa3\xe5\x9c\xa8\xe6\x96\xbd\xe6\x94\xbe\xe5\x85\xb6\xe4\xbb\x96\xe6\xb3\x95\xe6\x9c\xaf\xe3\x80\x82");
+        return;
+    }
+
+    // A manual bobber click may have opened loot before this polling tick.
+    if (m_autoFishing.lootGuid.IsEmpty() && !GetLootGuid().IsEmpty())
+    {
+        GameObject* oldBobber = m_autoFishing.bobberGuid.IsEmpty() ? nullptr :
+            GetMap()->GetGameObject(m_autoFishing.bobberGuid);
+        Loot* openedLoot = sLootMgr.GetLoot(this, GetLootGuid());
+        bool const fishingLoot = openedLoot &&
+            (openedLoot->GetLootType() == LOOT_FISHING ||
+             openedLoot->GetLootType() == LOOT_FISHING_FAIL ||
+             openedLoot->GetLootType() == LOOT_FISHINGHOLE);
+        bool const thisCatch = oldBobber &&
+            (GetLootGuid() == m_autoFishing.bobberGuid ||
+             (openedLoot && openedLoot->GetLootType() == LOOT_FISHINGHOLE &&
+              oldBobber->GetLootState() == GO_JUST_DEACTIVATED));
+        if (!fishingLoot || !thisCatch)
+        {
+            StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xef\xbc\x9a\xe6\xad\xa3\xe5\x9c\xa8\xe6\x8b\xbe\xe5\x8f\x96\xe5\x85\xb6\xe4\xbb\x96\xe7\x89\xa9\xe5\x93\x81\xe3\x80\x82");
+            return;
+        }
+        m_autoFishing.lootGuid = GetLootGuid();
+    }
+
+    if (m_autoFishing.lootGuid.IsEmpty())
+    {
+        GameObject* bobber = GetGameObject(m_autoFishing.spellId);
+        if (bobber)
+        {
+            if (bobber->GetGoType() != GAMEOBJECT_TYPE_FISHINGNODE ||
+                bobber->GetOwnerGuid() != GetObjectGuid())
+            {
+                StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xef\xbc\x9a\xe6\xb5\xae\xe6\xa0\x87\xe7\x8a\xb6\xe6\x80\x81\xe5\xbc\x82\xe5\xb8\xb8\xe3\x80\x82");
+                return;
+            }
+
+            m_autoFishing.bobberGuid = bobber->GetObjectGuid();
+            m_autoFishing.waitingForBobber = false;
+            m_autoFishing.bobberWaitChecks = 0;
+            if (bobber->GetLootState() == GO_NOT_READY)
+                return;
+            if (bobber->GetLootState() != GO_READY)
+            {
+                StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xef\xbc\x9a\xe6\xb5\xae\xe6\xa0\x87\xe5\xb7\xb2\xe4\xb8\x8d\xe5\x8f\xaf\xe4\xbd\xbf\xe7\x94\xa8\xe3\x80\x82");
+                return;
+            }
+
+            // Ownership, zone/skill chance, skill-up, fish pools and loot are handled here.
+            bobber->Use(this);
+            if (!IsAutoFishing())
+                return;
+            m_autoFishing.lootGuid = GetLootGuid();
+            if (m_autoFishing.lootGuid.IsEmpty())
+            {
+                // Fish escaped (or another normal catch failure): wait, then cast again.
+                m_autoFishing.bobberGuid.Clear();
+                m_autoFishing.timer = 1500;
+                return;
+            }
+        }
+        else if (channel || m_autoFishing.waitingForBobber)
+        {
+            // Some water/LOS/area failures occur after SpellStart returned success.
+            if (++m_autoFishing.bobberWaitChecks >= 25)
+                StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xef\xbc\x9a\xe6\x9c\xaa\xe7\x94\x9f\xe6\x88\x90\xe6\x9c\x89\xe6\x95\x88\xe6\xb5\xae\xe6\xa0\x87\xef\xbc\x8c\xe8\xaf\xb7\xe8\xb0\x83\xe6\x95\xb4\xe4\xbd\x8d\xe7\xbd\xae\xe6\x88\x96\xe6\x9c\x9d\xe5\x90\x91\xe5\x90\x8e\xe9\x87\x8d\xe6\x96\xb0\xe6\x96\xbd\xe6\x94\xbe\xe9\x92\x93\xe9\xb1\xbc\xe3\x80\x82");
+            return;
+        }
+        else if (!m_autoFishing.bobberGuid.IsEmpty())
+        {
+            // A naturally expired float must finish disappearing before the next cast.
+            m_autoFishing.bobberGuid.Clear();
+            m_autoFishing.timer = 1500;
+            return;
+        }
+        else
+        {
+            uint32 const spellId = m_autoFishing.spellId;
+            m_autoFishing.waitingForBobber = true;
+            m_autoFishing.bobberWaitChecks = 0;
+            SpellCastResult const result = CastSpell(this, spellId, TRIGGERED_NONE);
+            if (result != SPELL_CAST_OK)
+                StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xef\xbc\x9a\xe6\x97\xa0\xe6\xb3\x95\xe6\x96\xbd\xe6\x94\xbe\xe9\x92\x93\xe9\xb1\xbc\xef\xbc\x8c\xe8\xaf\xb7\xe6\xa3\x80\xe6\x9f\xa5\xe4\xbd\x8d\xe7\xbd\xae\xe5\x92\x8c\xe8\xa7\x92\xe8\x89\xb2\xe7\x8a\xb6\xe6\x80\x81\xe3\x80\x82");
+            return;
+        }
+    }
+
+    // Use and collect during one map tick so client auto-loot cannot race this catch.
+    ObjectGuid const lootGuid = m_autoFishing.lootGuid;
+    Loot* loot = sLootMgr.GetLoot(this, lootGuid);
+    if (!loot || (loot->GetLootType() != LOOT_FISHING &&
+                  loot->GetLootType() != LOOT_FISHING_FAIL &&
+                  loot->GetLootType() != LOOT_FISHINGHOLE) ||
+        loot->GetOwnerSet().find(GetObjectGuid()) == loot->GetOwnerSet().end())
+    {
+        StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xef\xbc\x9a\xe6\x97\xa0\xe6\xb3\x95\xe8\xaf\xbb\xe5\x8f\x96\xe6\x9c\xac\xe6\xac\xa1\xe9\x92\x93\xe9\xb1\xbc\xe6\x8e\x89\xe8\x90\xbd\xe3\x80\x82");
+        return;
+    }
+
+    if (!GetLootGuid().IsEmpty() && GetLootGuid() != lootGuid)
+    {
+        StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xef\xbc\x9a\xe6\xad\xa3\xe5\x9c\xa8\xe6\x8b\xbe\xe5\x8f\x96\xe5\x85\xb6\xe4\xbb\x96\xe7\x89\xa9\xe5\x93\x81\xe3\x80\x82");
+        return;
+    }
+
+    if (loot->GetGoldAmount())
+        loot->SendGold(this);
+
+    LootItemList items;
+    loot->GetLootItemsListFor(this, items);
+    for (LootItem* item : items)
+    {
+        if (item->isBlocked || !item->IsAllowed(this, loot) ||
+            item->GetSlotTypeForSharedLoot(this, loot) != LOOT_SLOT_NORMAL)
+        {
+            StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xef\xbc\x9a\xe6\x9c\xac\xe6\xac\xa1\xe6\x8e\x89\xe8\x90\xbd\xe9\x9c\x80\xe8\xa6\x81\xe6\x89\x8b\xe5\x8a\xa8\xe5\x88\x86\xe9\x85\x8d\xe6\x88\x96\xe6\x8b\xbe\xe5\x8f\x96\xe3\x80\x82");
+            return;
+        }
+        if (loot->SendItem(this, item) != EQUIP_ERR_OK)
+        {
+            // Keep the window and its remaining items; Release would discard fish loot.
+            StopAutoFishing("\xe8\x87\xaa\xe5\x8a\xa8\xe9\x92\x93\xe9\xb1\xbc\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xef\xbc\x9a\xe8\x83\x8c\xe5\x8c\x85\xe7\xa9\xba\xe9\x97\xb4\xe4\xb8\x8d\xe8\xb6\xb3\xe6\x88\x96\xe7\x89\xa9\xe5\x93\x81\xe6\x95\xb0\xe9\x87\x8f\xe5\x8f\x97\xe9\x99\x90\xef\xbc\x8c\xe8\xaf\xb7\xe5\xa4\x84\xe7\x90\x86\xe5\xbd\x93\xe5\x89\x8d\xe6\x8e\x89\xe8\x90\xbd\xe3\x80\x82");
+            return;
+        }
+    }
+
+    // The last SendItem/SendGold can clear GetLootGuid(), but fish-hole usage still
+    // must be advanced by Release on the exact loot object captured above.
+    loot->Release(this);
+    m_autoFishing.lootGuid.Clear();
+    m_autoFishing.bobberGuid.Clear();
+    m_autoFishing.waitingForBobber = false;
+    m_autoFishing.bobberWaitChecks = 0;
+    m_autoFishing.timer = 1500;
 }
 
 uint8 GetFishingStepsNeededToLevelUp(uint32 SkillValue)
