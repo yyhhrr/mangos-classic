@@ -13806,9 +13806,10 @@ void Player::KilledMonsterCredit(uint32 entry, ObjectGuid guid)
         Quest const* qInfo = sObjectMgr.GetQuestTemplate(questid);
         if (!qInfo)
             continue;
-        // just if !ingroup || !noraidgroup || raidgroup
+        // Battleground raid groups still award personal quest objective credit.
         QuestStatusData& q_status = mQuestStatus[questid];
-        if (q_status.m_status == QUEST_STATUS_INCOMPLETE && (!GetGroup() || !GetGroup()->IsRaidGroup() || qInfo->IsAllowedInRaid()))
+        if (q_status.m_status == QUEST_STATUS_INCOMPLETE &&
+            (!GetGroup() || !GetGroup()->IsRaidGroup() || qInfo->IsAllowedInRaid() || InBattleGround()))
         {
             if (qInfo->HasSpecialFlag(QUEST_SPECIAL_FLAG_KILL_OR_CAST))
             {

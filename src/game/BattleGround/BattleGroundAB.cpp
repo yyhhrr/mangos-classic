@@ -274,6 +274,10 @@ void BattleGroundAB::HandlePlayerClickedOnFlag(Player* player, GameObject* go)
 
     ABNodes node = ABNodes(event);
 
+    // Friendly banners cannot be assaulted or defended again.
+    if (m_nodeStatus[node] != BG_AB_NODE_STATUS_NEUTRAL && teamIndex != m_nodeStatus[node] % 2)
+        return;
+
     player->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_PVP_ACTIVE_CANCELS);
 
     // Node is NEUTRAL -> change to CONTESTED
@@ -350,6 +354,10 @@ void BattleGroundAB::HandlePlayerClickedOnFlag(Player* player, GameObject* go)
 
     // update score
     UpdatePlayerScore(player, scoreType, 1);
+
+    // Personal assault credit for every level bracket of The Battle for Arathi Basin.
+    static uint32 const nodeQuestCredits[BG_AB_MAX_NODES] = { 15001, 15002, 15003, 15004, 15005 };
+    player->KilledMonsterCredit(nodeQuestCredits[node]);
 
     // update banner object
     DoUpdateBanner(node, m_nodeStatus[node], true);
