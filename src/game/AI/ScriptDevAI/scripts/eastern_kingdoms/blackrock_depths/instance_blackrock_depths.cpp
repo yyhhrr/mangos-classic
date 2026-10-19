@@ -398,6 +398,33 @@ void instance_blackrock_depths::SetData(uint32 uiType, uint32 uiData)
     }
 }
 
+bool instance_blackrock_depths::GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const
+{
+    // Theldren is summoned only for the challenge variant, which awards Arena Spoils.
+    if (bossEntry == NPC_THELDREN)
+    {
+        reward.gameObjectEntry = GO_ARENA_SPOILS;
+        reward.completed = GetData(TYPE_RING_OF_LAW) == DONE;
+        return true;
+    }
+
+    switch (bossEntry)
+    {
+        case NPC_HATEREL:
+        case NPC_ANGERREL:
+        case NPC_VILEREL:
+        case NPC_GLOOMREL:
+        case NPC_SEETHREL:
+        case NPC_DOOMREL:
+        case NPC_DOPEREL:
+            reward.gameObjectEntry = GO_CHEST_SEVEN;
+            reward.completed = GetData(TYPE_TOMB_OF_SEVEN) == DONE;
+            return true;
+        default:
+            return false;
+    }
+}
+
 uint32 instance_blackrock_depths::GetData(uint32 uiType) const
 {
     switch (uiType)

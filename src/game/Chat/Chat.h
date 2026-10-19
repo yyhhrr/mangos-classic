@@ -472,6 +472,15 @@ class ChatHandler
         bool HandleNpcChangeEntryCommand(char* args);
         bool HandleNpcChangeLevelCommand(char* args);
         bool HandleDummyLevelCommand(char* args);
+        Creature* GetBossLootCommandTarget(bool allowDead);
+        std::string GetBossLootItemLink(uint32 itemId) const;
+        bool HandleBossDropCommand(char* args);
+        bool HandleBossLootChangeCommand(char* args, bool append);
+        bool HandleBossLootSetCommand(char* args);
+        bool HandleBossLootAddCommand(char* args);
+        bool HandleBossLootRemoveCommand(char* args);
+        bool HandleBossLootShowCommand(char* args);
+        bool HandleBossLootClearCommand(char* args);
         bool HandleNpcDeleteCommand(char* args);
         bool HandleNpcDelVendorItemCommand(char* args);
         bool HandleNpcFactionIdCommand(char* args);

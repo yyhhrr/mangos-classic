@@ -190,6 +190,16 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
     }
 }
 
+bool instance_molten_core::GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const
+{
+    if (bossEntry != NPC_MAJORDOMO)
+        return false;
+
+    reward.gameObjectEntry = GO_CACHE_OF_THE_FIRE_LORD;
+    reward.completed = GetData(TYPE_MAJORDOMO) == DONE;
+    return true;
+}
+
 uint32 instance_molten_core::GetData(uint32 uiType) const
 {
     if (uiType < MAX_ENCOUNTER)

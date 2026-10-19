@@ -1,4 +1,4 @@
-/*
+﻿/*
  * This file is part of the CMaNGOS Project. See AUTHORS file for Copyright information
  *
  * This program is free software; you can redistribute it and/or modify
@@ -65,6 +65,14 @@
 // |color|Htele:id|h[name]|h|r
 
 bool ChatHandler::load_command_table = true;
+
+// Keep this feature's messages UTF-8 independently of the compiler's ANSI code page.
+template <typename Char, size_t N>
+static char const* BossLootUtf8(Char const (&text)[N])
+{
+    static_assert(sizeof(Char) == 1, "UTF-8 code units must be bytes");
+    return reinterpret_cast<char const*>(text);
+}
 
 ChatCommand* ChatHandler::getCommandTable()
 {
@@ -728,6 +736,16 @@ ChatCommand* ChatHandler::getCommandTable()
         { nullptr,          0,                  false, nullptr,                                        "", nullptr }
     };
 
+    static ChatCommand bossLootCommandTable[] =
+    {
+        { "set",            SEC_GAMEMASTER,     false, &ChatHandler::HandleBossLootSetCommand, BossLootUtf8(u8"用法：.bossloot set <物品ID或物品链接> [更多物品ID或链接]。为选中活着的目标替换下一次指定掉落；仅能选择其原有掉落或关联奖励箱中的物品，可在战斗中设置。"), nullptr },
+        { "add",            SEC_GAMEMASTER,     false, &ChatHandler::HandleBossLootAddCommand, BossLootUtf8(u8"用法：.bossloot add <物品ID或物品链接>。在当前预约中追加一种物品，可在战斗中使用。"), nullptr },
+        { "remove",         SEC_GAMEMASTER,     false, &ChatHandler::HandleBossLootRemoveCommand, BossLootUtf8(u8"用法：.bossloot remove <物品ID或物品链接>。从当前预约中移除一种物品，可在战斗中使用。"), nullptr },
+        { "show",           SEC_GAMEMASTER,     false, &ChatHandler::HandleBossLootShowCommand, BossLootUtf8(u8"用法：.bossloot show。查看选中目标的尸体和关联奖励箱预约。"), nullptr },
+        { "clear",          SEC_GAMEMASTER,     false, &ChatHandler::HandleBossLootClearCommand, BossLootUtf8(u8"用法：.bossloot clear。清除选中目标的尸体和关联奖励箱预约，可在战斗中使用。"), nullptr },
+        { nullptr,          0,                  false, nullptr, "", nullptr }
+    };
+
     static ChatCommand dummyCommandTable[] =
     {
         { "level",          SEC_GAMEMASTER,     false, &ChatHandler::HandleDummyLevelCommand, "Syntax: .dummy level #level (1-63). Select a training dummy; resets combat and uses level-based armor and defense. Saved per spawn across respawn/restart.", nullptr },
@@ -926,6 +944,8 @@ ChatCommand* ChatHandler::getCommandTable()
 #endif
         { "cast",           SEC_ADMINISTRATOR,  false, nullptr,                                           "", castCommandTable     },
         { "character",      SEC_GAMEMASTER,     true,  nullptr,                                           "", characterCommandTable},
+        { "bossloot",       SEC_GAMEMASTER,     false, nullptr,                                           "", bossLootCommandTable },
+        { "bd",             SEC_GAMEMASTER,     false, &ChatHandler::HandleBossDropCommand, BossLootUtf8(u8"选中目标：.bd <多个物品ID或链接> 替换指定清单；.bd 查看；.bd add/remove <物品ID或链接> 追加/移除；.bd clear 清空；.bd list [页码] 列出可选物品；.bd pick <多个编号> 按刚列出的编号替换清单。仅本次有效，可在战斗中修改。"), nullptr },
         { "channel",        SEC_MODERATOR,      false, nullptr,                                           "", channelCommandTable  },
         { "debug",          SEC_MODERATOR,      true,  nullptr,                                           "", debugCommandTable    },
         { "dummy",          SEC_GAMEMASTER,     false, nullptr,                                           "", dummyCommandTable    },

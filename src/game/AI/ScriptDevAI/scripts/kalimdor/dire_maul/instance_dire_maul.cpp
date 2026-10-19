@@ -383,6 +383,16 @@ void instance_dire_maul::SetData(uint32 uiType, uint32 uiData)
     }
 }
 
+bool instance_dire_maul::GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const
+{
+    if (bossEntry != NPC_KING_GORDOK)
+        return false;
+
+    reward.gameObjectEntry = GO_GORDOK_TRIBUTE;
+    reward.completed = GetData(TYPE_KING_GORDOK) == DONE;
+    return true;
+}
+
 uint32 instance_dire_maul::GetData(uint32 uiType) const
 {
     if (uiType < MAX_ENCOUNTER)

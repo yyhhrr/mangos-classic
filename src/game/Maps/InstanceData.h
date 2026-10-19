@@ -23,6 +23,10 @@
 #include "Entities/ObjectGuid.h"
 #include "Util/ByteBuffer.h"
 
+#include <map>
+#include <utility>
+#include <vector>
+
 class Map;
 class Unit;
 class Player;
@@ -46,6 +50,12 @@ enum InstanceConditionIDs                                   // Suggested values 
     // to check for which team the instance is doing scripts
     INSTANCE_CONDITION_ID_TEAM_HORDE        = 67,
     INSTANCE_CONDITION_ID_TEAM_ALLIANCE     = 469,
+};
+
+struct BossLootReward
+{
+    uint32 gameObjectEntry = 0;
+    bool completed = false;
 };
 
 class InstanceData
@@ -131,6 +141,14 @@ class InstanceData
         virtual uint32 GetData(uint32 /*Type*/) const { return 0; }
         virtual void SetData(uint32 /*Type*/, uint32 /*Data*/) {}
 
+        // Instance scripts declare ownership of encounter reward chests. Reservations remain
+        // here until first normal loot generation, even if their boss has despawned.
+        virtual bool GetBossLootReward(uint32 /*bossEntry*/, BossLootReward& /*reward*/) const { return false; }
+        void SetBossLootItems(uint32 bossEntry, std::vector<uint32> const& itemIds);
+        std::vector<uint32> const& GetBossLootItems(uint32 gameObjectEntry) const;
+        std::vector<uint32> TakeBossLootItems(uint32 gameObjectEntry);
+        void ClearBossLootItems(uint32 gameObjectEntry);
+
         // Condition criteria additional requirements check
         // This is used for such things are heroic loot
         // See ObjectMgr.h enum ConditionSource for possible values of conditionSourceType
@@ -155,6 +173,11 @@ class InstanceData
 
         virtual void ShowChatCommands(ChatHandler* /*handler*/) {}
         virtual void ExecuteChatCommand(ChatHandler* /*handler*/, char* /*args*/) {}
+
+    private:
+        // GO entry -> (boss entry, requested items); one reservation per shared reward chest.
+        // Deliberately not part of Save(): unloading the instance or restarting cancels it.
+        std::map<uint32, std::pair<uint32, std::vector<uint32>>> m_bossLootItems;
 };
 
 #endif

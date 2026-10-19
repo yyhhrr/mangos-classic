@@ -31,6 +31,7 @@
 #include <list>
 #include <memory>
 #include <optional>
+#include <vector>
 
 struct SpellEntry;
 
@@ -756,6 +757,8 @@ class Creature : public Unit
         static void DeleteFromDB(uint32 lowguid, CreatureData const* data);
 
         void PrepareBodyLootState(Unit* killer);
+        std::vector<uint32> const& GetBossLootItems() const { return m_bossLootItems; }
+        void SetBossLootItems(std::vector<uint32> const& itemIds) { m_bossLootItems = itemIds; }
         CreatureLootStatus GetLootStatus() const { return m_lootStatus; }
         virtual void InspectingLoot() override;
         void SetLootStatus(CreatureLootStatus status, bool forced = false);
@@ -957,6 +960,7 @@ class Creature : public Unit
 
         uint32 m_gossipMenuId;
         uint32 m_lootMoney;
+        std::vector<uint32> m_bossLootItems;                 // one next corpse generation, never saved to the creature template
         ObjectGuid m_lootRecipientGuid;                     // player who will have rights for looting if m_lootGroupRecipient==0 or group disbanded
         uint32 m_lootGroupRecipientId;                      // group who will have rights for looting if set and exist
         CreatureLootStatus m_lootStatus;                    // loot status (used to know when we could loot, pickpocket or skin)

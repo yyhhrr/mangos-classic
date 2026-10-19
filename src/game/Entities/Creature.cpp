@@ -1066,9 +1066,18 @@ bool Creature::CanTrainAndResetTalentsOf(Player* pPlayer) const
 
 void Creature::PrepareBodyLootState(Unit* killer)
 {
+    // A reservation belongs to this life only, including kills without a valid loot recipient.
+    auto guaranteedItemIds = std::move(m_bossLootItems);
+    m_bossLootItems.clear();
+
     // if can weild loot - already generated on spawn
     if (GetSettings().HasFlag(CreatureStaticFlags::CAN_WIELD_LOOT) && m_loot != nullptr && m_loot->GetLootType() == LOOT_CORPSE)
+    {
+        if (!guaranteedItemIds.empty())
+            sLog.outError("BossLoot: consumed %u reserved corpse items for %s without applying them because loot was generated before death.",
+                uint32(guaranteedItemIds.size()), GetGuidStr().c_str());
         return;
+    }
 
     // loot may already exist (pickpocket case)
     delete m_loot;
@@ -1085,8 +1094,12 @@ void Creature::PrepareBodyLootState(Unit* killer)
             looter = GetLootRecipient();
 
         if (looter || GetSettings().HasFlag(CreatureStaticFlags::CAN_WIELD_LOOT))
-            m_loot = new Loot(looter, this, LOOT_CORPSE);
+            m_loot = new Loot(looter, this, LOOT_CORPSE, guaranteedItemIds);
     }
+
+    if (!guaranteedItemIds.empty() && !m_loot)
+        sLog.outError("BossLoot: consumed %u reserved corpse items for %s without generating loot (no loot recipient or loot disabled).",
+            uint32(guaranteedItemIds.size()), GetGuidStr().c_str());
 
     if (m_lootStatus == CREATURE_LOOT_STATUS_LOOTED && !HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SKINNABLE))
     {
@@ -1911,6 +1924,7 @@ void Creature::SetDeathState(DeathState s)
 
     if (s == JUST_ALIVED)
     {
+        m_bossLootItems.clear();
         clearUnitState(static_cast<uint32>(UNIT_STAT_ALL_STATE));
 
         Unit::SetDeathState(ALIVE);

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * This file is part of the CMaNGOS Project. See AUTHORS file for Copyright information
  *
  * This program is free software; you can redistribute it and/or modify
@@ -30,6 +30,7 @@
 #include "Entities/Corpse.h"
 #include "Tools/Language.h"
 #include "BattleGround/BattleGroundMgr.h"
+#include "Maps/InstanceData.h"
 #include <sstream>
 #include <iomanip>
 
@@ -929,7 +930,13 @@ GroupLootRoll* Loot::GetRollForSlot(uint32 itemSlot)
 // Inserts the item into the loot (called by LootTemplate processors)
 void Loot::AddItem(LootStoreItem const& item)
 {
-    if (m_lootItems.size() < MAX_NR_LOOT_ITEMS)                              // Normal drop
+    // Keep space for missing guarantees without pessimistically summing every
+    // low-probability row in the template. Natural duplicates retain normal rules.
+    bool reservedItem = m_reservedLootItems.find(item.itemid) != m_reservedLootItems.end()
+        && IsGuaranteedItemEligible(item, m_guaranteedLootOwner);
+    uint32 reservedSlots = std::min<uint32>(MAX_NR_LOOT_ITEMS, uint32(m_reservedLootItems.size()));
+    uint32 slotLimit = MAX_NR_LOOT_ITEMS - reservedSlots + (reservedItem ? 1 : 0);
+    if (m_lootItems.size() < slotLimit)
     {
         LootItem* lootItem = new LootItem(item, m_maxSlot++, uint32(m_threshold));
 
@@ -937,6 +944,8 @@ void Loot::AddItem(LootStoreItem const& item)
             m_haveItemOverThreshold = true;
 
         m_lootItems.push_back(lootItem);
+        if (reservedItem)
+            m_reservedLootItems.erase(item.itemid);
     }
 }
 
@@ -955,9 +964,240 @@ void Loot::AddItem(uint32 itemid, uint32 count, uint32 randomSuffix, int32 rando
     }
 }
 
-// Calls processor of corresponding LootTemplate (which handles everything including references)
-bool Loot::FillLoot(uint32 loot_id, LootStore const& store, Player* lootOwner, bool /*personal*/, bool noEmptyError)
+
+// Keep this feature's messages UTF-8 independently of the compiler's ANSI code page.
+template <typename Char, size_t N>
+static char const* BossLootUtf8(Char const (&text)[N])
 {
+    static_assert(sizeof(Char) == 1, "UTF-8 code units must be bytes");
+    return reinterpret_cast<char const*>(text);
+}
+
+// Check the same quest/condition/start-quest restrictions used for ordinary loot,
+// without rolling a count or random enchantment merely to validate a request.
+bool Loot::IsGuaranteedItemEligible(LootStoreItem const& item, Player const* lootOwner) const
+{
+    if (!lootOwner)
+        return false;
+
+    LootItem probe(item.itemid, 1, 0, 0, 0);
+    probe.lootItemType = item.needs_quest ? LOOTITEM_TYPE_QUEST :
+        (item.conditionId ? LOOTITEM_TYPE_CONDITIONNAL : LOOTITEM_TYPE_NORMAL);
+    probe.conditionId = item.conditionId;
+    Player* masterLooter = m_lootMethod == MASTER_LOOT ? ObjectAccessor::FindPlayer(m_masterOwnerGuid) : nullptr;
+    for (ObjectGuid const& guid : m_ownerSet)
+        if (Player* player = ObjectAccessor::FindPlayer(guid))
+            if (probe.AllowedForPlayer(player, GetLootTarget(), masterLooter))
+                return true;
+    return false;
+}
+
+void Loot::ClearGuaranteedItems()
+{
+    m_reservedLootItems.clear();
+    m_guaranteedLootOwner = nullptr;
+}
+
+void Loot::ReserveGuaranteedItems(std::vector<uint32> const& itemIds, LootTemplate const& lootTemplate, Player* lootOwner)
+{
+    ClearGuaranteedItems();
+    if (!lootOwner || itemIds.empty())
+        return;
+    for (uint32 itemId : itemIds)
+        if (itemId && lootTemplate.FindGuaranteedItem(itemId, this, lootOwner))
+            m_reservedLootItems.insert(itemId);
+    if (m_reservedLootItems.size() > MAX_NR_LOOT_ITEMS)
+    {
+        sLog.outError("BossLoot: request exceeds the client loot slot limit; no slots reserved.");
+        ClearGuaranteedItems();
+        return;
+    }
+    m_guaranteedLootOwner = lootOwner;
+}
+
+bool Loot::ApplyGuaranteedItems(std::vector<uint32> const& itemIds, LootTemplate const& lootTemplate, Player* lootOwner)
+{
+    std::set<uint32> seen;
+    std::vector<LootStoreItem const*> missing;
+    bool success = true;
+    Player* masterLooter = m_lootMethod == MASTER_LOOT ? ObjectAccessor::FindPlayer(m_masterOwnerGuid) : nullptr;
+
+    for (uint32 itemId : itemIds)
+    {
+        if (!itemId || !seen.insert(itemId).second)
+            continue;
+        bool alreadyDropped = false;
+        for (LootItem const* item : m_lootItems)
+        {
+            if (item->itemId != itemId)
+                continue;
+            for (ObjectGuid const& guid : m_ownerSet)
+                if (Player* player = ObjectAccessor::FindPlayer(guid))
+                    if (item->AllowedForPlayer(player, GetLootTarget(), masterLooter))
+                        alreadyDropped = true;
+            if (alreadyDropped)
+                break;
+        }
+        if (alreadyDropped)
+            continue; // Natural drops satisfy the guarantee; do not add another copy.
+
+        if (LootStoreItem const* item = lootTemplate.FindGuaranteedItem(itemId, this, lootOwner))
+            missing.push_back(item);
+        else
+        {
+            success = false;
+            sLog.outError("BossLoot: item %u could not be guaranteed for %s: current loot conditions or template no longer permit it.", itemId, m_guidTarget.GetString().c_str());
+            if (lootOwner && lootOwner->GetSession())
+                lootOwner->GetSession()->SendNotification(BossLootUtf8(u8"指定掉落 %u 未生效：当前任务或掉落条件不满足，或掉落表已变化。"), itemId);
+        }
+    }
+
+    if (missing.size() > MAX_NR_LOOT_ITEMS - m_lootItems.size())
+    {
+        sLog.outError("BossLoot: insufficient loot slots for %s after a template change; normal loot retained.", m_guidTarget.GetString().c_str());
+        if (lootOwner && lootOwner->GetSession())
+            lootOwner->GetSession()->SendNotification(BossLootUtf8(u8"指定掉落未生效：掉落表已变化，剩余槽位不足；正常掉落保留。"));
+        return false;
+    }
+    for (LootStoreItem const* item : missing)
+    {
+        AddItem(*item); // Preserve normal count range, quest/condition type and random properties.
+        sLog.outString("BossLoot: guaranteed item %u generated for %s.", item->itemid, m_guidTarget.GetString().c_str());
+    }
+    return success;
+}
+
+LootStoreItem const* LootTemplate::FindGuaranteedItem(uint32 itemId, Loot const* loot, Player const* lootOwner) const
+{
+    return FindGuaranteedItem(itemId, loot, lootOwner, {});
+}
+
+LootStoreItem const* LootTemplate::FindGuaranteedItemInList(LootStoreItemList const& entries, bool grouped, uint32 itemId, Loot const* loot, Player const* lootOwner, std::set<LootTemplate const*> const& ancestors) const
+{
+    for (LootStoreItem const& row : entries)
+    {
+        if ((!grouped && row.chance <= 0.0f) || !row.maxcount || !row.mincountOrRef)
+            continue;
+        if (loot && row.conditionId && (!lootOwner || !PlayerOrGroupFulfilsCondition(*loot, lootOwner, row.conditionId)))
+            continue;
+
+        if (row.mincountOrRef < 0)
+        {
+            if (LootTemplate const* referenced = LootTemplates_Reference.GetLootFor(-row.mincountOrRef))
+                if (LootStoreItem const* found = referenced->FindGuaranteedItem(itemId, loot, lootOwner, ancestors))
+                    return found;
+        }
+        else if (row.itemid == itemId && (!loot || loot->IsGuaranteedItemEligible(row, lootOwner)))
+            return &row;
+    }
+    return nullptr;
+}
+
+LootStoreItem const* LootTemplate::FindGuaranteedItem(uint32 itemId, Loot const* loot, Player const* lootOwner, std::set<LootTemplate const*> ancestors) const
+{
+    if (!itemId || ancestors.size() >= 32 || !ancestors.insert(this).second)
+        return nullptr;
+    if (LootStoreItem const* item = FindGuaranteedItemInList(Entries, false, itemId, loot, lootOwner, ancestors))
+        return item;
+
+    for (LootGroup const& group : Groups)
+    {
+        if (LootStoreItem const* item = FindGuaranteedItemInList(group.ExplicitlyChanced, true, itemId, loot, lootOwner, ancestors))
+            return item;
+
+        // Equal-chance entries cannot be rolled if applicable explicit chances fill the group.
+        // Before combat, count only unconditional blockers because conditional rows can change.
+        double blockingChance = 0.0;
+        for (LootStoreItem const& row : group.ExplicitlyChanced)
+            if (!row.conditionId || (loot && lootOwner && PlayerOrGroupFulfilsCondition(*loot, lootOwner, row.conditionId)))
+                blockingChance += row.chance;
+        if (blockingChance < 100.0)
+            if (LootStoreItem const* item = FindGuaranteedItemInList(group.EqualChanced, true, itemId, loot, lootOwner, ancestors))
+                return item;
+    }
+    return nullptr;
+}
+
+uint32 LootTemplate::GetMaxLootItems() const
+{
+    return GetMaxLootItems({});
+}
+
+uint32 LootTemplate::GetMaxLootItemsInList(LootStoreItemList const& entries, bool grouped, std::set<LootTemplate const*> const& ancestors) const
+{
+    uint32 total = 0;
+    for (LootStoreItem const& row : entries)
+    {
+        if (!row.mincountOrRef)
+            return MAX_NR_LOOT_ITEMS;
+        if ((!grouped && row.chance <= 0.0f) || !row.maxcount)
+            continue;
+        uint32 slots = 1;
+        if (row.mincountOrRef < 0)
+        {
+            LootTemplate const* referenced = LootTemplates_Reference.GetLootFor(-row.mincountOrRef);
+            slots = referenced ? referenced->GetMaxLootItems(ancestors) * uint32(row.maxcount) : 0;
+        }
+        slots = std::min<uint32>(slots, MAX_NR_LOOT_ITEMS);
+        total = grouped ? std::max(total, slots) : std::min<uint32>(MAX_NR_LOOT_ITEMS, total + slots);
+    }
+    return total;
+}
+
+uint32 LootTemplate::GetMaxLootItems(std::set<LootTemplate const*> ancestors) const
+{
+    if (ancestors.size() >= 32 || !ancestors.insert(this).second)
+        return MAX_NR_LOOT_ITEMS; // Fail closed on malformed/cyclic reference graphs.
+    uint32 total = GetMaxLootItemsInList(Entries, false, ancestors);
+    for (LootGroup const& group : Groups)
+    {
+        uint32 slots = std::max(GetMaxLootItemsInList(group.ExplicitlyChanced, true, ancestors),
+            GetMaxLootItemsInList(group.EqualChanced, true, ancestors));
+        total = std::min<uint32>(MAX_NR_LOOT_ITEMS, total + slots);
+    }
+    return total;
+}
+
+void LootTemplate::CollectGuaranteedItems(std::set<uint32>& itemIds) const
+{
+    std::set<uint32> candidates;
+    CollectGuaranteedItems(candidates, {});
+    for (uint32 itemId : candidates)
+        if (FindGuaranteedItem(itemId))
+            itemIds.insert(itemId);
+}
+
+void LootTemplate::CollectGuaranteedItems(std::set<uint32>& itemIds, std::set<LootTemplate const*> ancestors) const
+{
+    if (ancestors.size() >= 32 || !ancestors.insert(this).second)
+        return;
+    auto collect = [&](LootStoreItemList const& entries, bool grouped)
+    {
+        for (LootStoreItem const& row : entries)
+        {
+            if ((!grouped && row.chance <= 0.0f) || !row.maxcount || !row.mincountOrRef)
+                continue;
+            if (row.mincountOrRef < 0)
+            {
+                if (LootTemplate const* referenced = LootTemplates_Reference.GetLootFor(-row.mincountOrRef))
+                    referenced->CollectGuaranteedItems(itemIds, ancestors);
+            }
+            else
+                itemIds.insert(row.itemid);
+        }
+    };
+    collect(Entries, false);
+    for (LootGroup const& group : Groups)
+    {
+        collect(group.ExplicitlyChanced, true);
+        collect(group.EqualChanced, true);
+    }
+}
+
+// Calls processor of corresponding LootTemplate (which handles everything including references)
+bool Loot::FillLoot(uint32 loot_id, LootStore const& store, Player* lootOwner, bool /*personal*/, bool noEmptyError, std::vector<uint32> const& guaranteedItemIds)
+{
+    ClearGuaranteedItems();
     // Must be provided
     if (!lootOwner)
         return false;
@@ -973,7 +1213,13 @@ bool Loot::FillLoot(uint32 loot_id, LootStore const& store, Player* lootOwner, b
 
     m_lootItems.reserve(MAX_NR_LOOT_ITEMS);
 
+    ReserveGuaranteedItems(guaranteedItemIds, *tab, lootOwner);
     tab->Process(*this, lootOwner, store.IsRatesAllowed()); // Processing is done there, callback via Loot::AddItem()
+
+    // Before owner permissions and group rolls: retain the normal results and add only if needed.
+    if (!guaranteedItemIds.empty())
+        ApplyGuaranteedItems(guaranteedItemIds, *tab, lootOwner);
+    ClearGuaranteedItems();
 
     // fill the loot owners right here so its impossible from this point to change loot result
     Player* masterLooter = nullptr;
@@ -1670,7 +1916,7 @@ void Loot::SetGroupLootRight(Player* player)
     m_lootMethod = NOT_GROUP_TYPE_LOOT;
 }
 
-Loot::Loot(Player* player, Creature* creature, LootType type) :
+Loot::Loot(Player* player, Creature* creature, LootType type, std::vector<uint32> const& guaranteedItemIds) :
     m_lootTarget(nullptr), m_itemTarget(nullptr), m_gold(0), m_maxSlot(0), m_lootType(type),
     m_clientLootType(CLIENT_LOOT_CORPSE), m_lootMethod(NOT_GROUP_TYPE_LOOT), m_threshold(ITEM_QUALITY_UNCOMMON), m_maxEnchantSkill(0), m_haveItemOverThreshold(false),
     m_isChecked(false), m_isChest(false), m_isChanged(false), m_isFakeLoot(false), m_createTime(World::GetCurrentClockTime())
@@ -1707,7 +1953,7 @@ Loot::Loot(Player* player, Creature* creature, LootType type) :
                 SetGroupLootRight(player);
             m_clientLootType = CLIENT_LOOT_CORPSE;
 
-            if ((creatureInfo->LootId && FillLoot(creatureInfo->LootId, LootTemplates_Creature, player, false)) || creatureInfo->MaxLootGold > 0)
+            if ((creatureInfo->LootId && FillLoot(creatureInfo->LootId, LootTemplates_Creature, player, false, false, guaranteedItemIds)) || creatureInfo->MaxLootGold > 0)
             {
                 GenerateMoneyLoot(creatureInfo->MinLootGold, creatureInfo->MaxLootGold);
                 // loot may be anyway empty (loot may be empty or contain items that no one have right to loot)
@@ -1847,7 +2093,11 @@ Loot::Loot(Player* player, GameObject* gameObject, LootType type) :
                         m_isChest = true;
 
                     SetGroupLootRight(player);
-                    FillLoot(lootid, LootTemplates_Gameobject, player, false);
+                    std::vector<uint32> guaranteedItemIds;
+                    if (m_isChest)
+                        if (InstanceData* instance = gameObject->GetMap()->GetInstanceData())
+                            guaranteedItemIds = instance->TakeBossLootItems(gameObject->GetEntry());
+                    FillLoot(lootid, LootTemplates_Gameobject, player, false, false, guaranteedItemIds);
                     GenerateMoneyLoot(gameObject->GetGOInfo()->MinMoneyLoot, gameObject->GetGOInfo()->MaxMoneyLoot);
 
                     if (m_lootType == LOOT_FISHINGHOLE)
@@ -2232,6 +2482,7 @@ Loot::~Loot()
 
 void Loot::Clear()
 {
+    ClearGuaranteedItems();
     for (auto& m_lootItem : m_lootItems)
         delete m_lootItem;
     m_lootItems.clear();

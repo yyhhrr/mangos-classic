@@ -20,6 +20,45 @@
 #include "Database/DatabaseEnv.h"
 #include "Maps/Map.h"
 
+void InstanceData::SetBossLootItems(uint32 bossEntry, std::vector<uint32> const& itemIds)
+{
+    BossLootReward reward;
+    if (!GetBossLootReward(bossEntry, reward) || !reward.gameObjectEntry || reward.completed)
+        return;
+
+    if (itemIds.empty())
+        m_bossLootItems.erase(reward.gameObjectEntry);
+    else
+        m_bossLootItems[reward.gameObjectEntry] = std::make_pair(bossEntry, itemIds);
+}
+
+std::vector<uint32> const& InstanceData::GetBossLootItems(uint32 gameObjectEntry) const
+{
+    static std::vector<uint32> const emptyItems;
+    auto itr = m_bossLootItems.find(gameObjectEntry);
+    return itr == m_bossLootItems.end() ? emptyItems : itr->second.second;
+}
+
+std::vector<uint32> InstanceData::TakeBossLootItems(uint32 gameObjectEntry)
+{
+    auto itr = m_bossLootItems.find(gameObjectEntry);
+    if (itr == m_bossLootItems.end())
+        return {};
+
+    BossLootReward reward;
+    if (!GetBossLootReward(itr->second.first, reward) || reward.gameObjectEntry != gameObjectEntry || !reward.completed)
+        return {};
+
+    auto itemIds = std::move(itr->second.second);
+    m_bossLootItems.erase(itr);
+    return itemIds;
+}
+
+void InstanceData::ClearBossLootItems(uint32 gameObjectEntry)
+{
+    m_bossLootItems.erase(gameObjectEntry);
+}
+
 void InstanceData::SaveToDB() const
 {
     // no reason to save BGs/Arenas

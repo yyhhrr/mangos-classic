@@ -167,6 +167,16 @@ void instance_uldaman::SetData64(uint32 uiData, uint64 uiGuid)
     }
 }
 
+bool instance_uldaman::GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const
+{
+    if (bossEntry != NPC_ARCHAEDAS)
+        return false;
+
+    reward.gameObjectEntry = GO_ANCIENT_TREASURE;
+    reward.completed = GetData(TYPE_ARCHAEDAS) == DONE;
+    return true;
+}
+
 uint32 instance_uldaman::GetData(uint32 uiType) const
 {
     switch (uiType)

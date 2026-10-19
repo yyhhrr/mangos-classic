@@ -1,4 +1,4 @@
-/*
+﻿/*
  * This file is part of the CMaNGOS Project. See AUTHORS file for Copyright information
  *
  * This program is free software; you can redistribute it and/or modify
@@ -36,6 +36,8 @@
 #include "GameEvents/GameEventMgr.h"
 #include "Spells/SpellMgr.h"
 #include "Maps/MapPersistentStateMgr.h"
+#include "Maps/InstanceData.h"
+#include "Loot/LootMgr.h"
 #include "Accounts/AccountMgr.h"
 #include "GMTickets/GMTicketMgr.h"
 #include "MotionGenerators/WaypointManager.h"
@@ -52,7 +54,12 @@
 #include "Anticheat/Anticheat.hpp"
 #include "Entities/Transports.h"
 
+#include <algorithm>
+#include <chrono>
 #include <fstream>
+#include <mutex>
+#include <set>
+#include <sstream>
 #include <map>
 #include <typeinfo>
 
@@ -1887,6 +1894,482 @@ bool ChatHandler::HandleDummyLevelCommand(char* args)
     // NPC defense is calculated by GetDefenseSkillValue from its current level.
     PSendSysMessage("Training dummy GUID %u: level %u, armor %u, defense skill %u. Saved across respawn/restart.",
         dummy->GetGUIDLow(), dummy->GetLevel(), dummy->GetArmor(), dummy->GetDefenseSkillValue(nullptr));
+    return true;
+}
+
+// Keep this feature's messages UTF-8 independently of the compiler's ANSI code page.
+template <typename Char, size_t N>
+static char const* BossLootUtf8(Char const (&text)[N])
+{
+    static_assert(sizeof(Char) == 1, "UTF-8 code units must be bytes");
+    return reinterpret_cast<char const*>(text);
+}
+
+static std::string BossLootItemIds(std::vector<uint32> const& itemIds)
+{
+    std::ostringstream text;
+    for (uint32 itemId : itemIds)
+    {
+        if (text.tellp() > 0)
+            text << ", ";
+        text << itemId;
+    }
+    return itemIds.empty() ? BossLootUtf8(u8"无") : text.str();
+}
+
+struct BossDropSnapshot
+{
+    ObjectGuid targetGuid;
+    uint32 mapId = 0;
+    uint32 instanceId = 0;
+    std::vector<uint32> itemIds;
+    std::chrono::steady_clock::time_point expires;
+};
+
+static std::mutex s_bossDropSnapshotMutex;
+static std::map<uint64, BossDropSnapshot> s_bossDropSnapshots;
+
+static std::string BossLootGameObjectName(uint32 entry, int32 localeIndex)
+{
+    if (localeIndex >= 0)
+        if (GameObjectLocale const* locale = sObjectMgr.GetGameObjectLocale(entry))
+            if (locale->Name.size() > size_t(localeIndex) && !locale->Name[localeIndex].empty())
+                return locale->Name[localeIndex];
+    if (GameObjectInfo const* info = ObjectMgr::GetGameObjectInfo(entry))
+        return info->name;
+    return std::to_string(entry);
+}
+
+std::string ChatHandler::GetBossLootItemLink(uint32 itemId) const
+{
+    ItemPrototype const* item = ObjectMgr::GetItemPrototype(itemId);
+    if (!item)
+        return std::to_string(itemId);
+    std::string itemName = item->Name1;
+    sObjectMgr.GetItemLocaleStrings(itemId, GetSessionDbLocaleIndex(), &itemName);
+    uint32 color = item->Quality < MAX_ITEM_QUALITY ? ItemQualityColors[item->Quality] : ItemQualityColors[ITEM_QUALITY_NORMAL];
+    std::ostringstream link;
+    link << "|c" << std::hex << color << "|Hitem:" << std::dec << itemId << ":0:0:0|h[" << itemName << "]|h|r";
+    return link.str();
+}
+
+bool ChatHandler::HandleBossDropCommand(char* args)
+{
+    Creature* creature = GetBossLootCommandTarget(true);
+    if (!creature)
+        return false;
+    SkipWhiteSpaces(&args);
+    if (!args || !*args)
+        return HandleBossLootShowCommand(args);
+    if ((*args >= '0' && *args <= '9') || *args == '|')
+        return HandleBossLootSetCommand(args);
+
+    char* operation = ExtractLiteralArg(&args);
+    if (!operation)
+        return false;
+    if (!strcmp(operation, "set"))
+        return HandleBossLootSetCommand(args);
+    if (!strcmp(operation, "show"))
+        return HandleBossLootShowCommand(args);
+    if (!strcmp(operation, "add"))
+        return HandleBossLootAddCommand(args);
+    if (!strcmp(operation, "remove"))
+        return HandleBossLootRemoveCommand(args);
+    if (!strcmp(operation, "clear"))
+        return HandleBossLootClearCommand(args);
+
+    uint64 playerGuid = m_session->GetPlayer()->GetObjectGuid().GetRawValue();
+    auto now = std::chrono::steady_clock::now();
+    BossDropSnapshot snapshot;
+    bool hasSnapshot = false;
+    {
+        std::lock_guard<std::mutex> guard(s_bossDropSnapshotMutex);
+        for (auto itr = s_bossDropSnapshots.begin(); itr != s_bossDropSnapshots.end();)
+            if (itr->second.expires <= now)
+                itr = s_bossDropSnapshots.erase(itr);
+            else
+                ++itr;
+        auto itr = s_bossDropSnapshots.find(playerGuid);
+        if (itr != s_bossDropSnapshots.end())
+        {
+            snapshot = itr->second;
+            hasSnapshot = snapshot.targetGuid == creature->GetObjectGuid()
+                && snapshot.mapId == creature->GetMapId() && snapshot.instanceId == creature->GetInstanceId();
+        }
+    }
+
+    if (!strcmp(operation, "list"))
+    {
+        uint32 page = 1;
+        bool refresh = !args || !*args;
+        if (!refresh && (!ExtractUInt32(&args, page) || !page || *args))
+        {
+            SendSysMessage(BossLootUtf8(u8"用法：.bd list [页码]，每页 20 件物品。"));
+            SetSentErrorMessage(true);
+            return false;
+        }
+        if (refresh || !hasSnapshot)
+        {
+            std::set<uint32> itemIds;
+            if (!creature->IsNoLoot()
+                && !creature->GetSettings().HasFlag(CreatureStaticFlags::CAN_WIELD_LOOT)
+                && !creature->GetSettings().HasFlag(CreatureStaticFlags::DESPAWN_INSTANTLY))
+                if (LootTemplate const* loot = LootTemplates_Creature.GetLootFor(creature->GetCreatureInfo()->LootId))
+                    loot->CollectGuaranteedItems(itemIds);
+            BossLootReward reward;
+            InstanceData* instanceData = creature->GetInstanceData();
+            if (instanceData && instanceData->GetBossLootReward(creature->GetEntry(), reward) && reward.gameObjectEntry)
+                if (GameObjectInfo const* chest = ObjectMgr::GetGameObjectInfo(reward.gameObjectEntry))
+                    if (chest->type == GAMEOBJECT_TYPE_CHEST)
+                        if (LootTemplate const* loot = LootTemplates_Gameobject.GetLootFor(chest->GetLootId()))
+                            loot->CollectGuaranteedItems(itemIds);
+            snapshot.targetGuid = creature->GetObjectGuid();
+            snapshot.mapId = creature->GetMapId();
+            snapshot.instanceId = creature->GetInstanceId();
+            snapshot.itemIds.assign(itemIds.begin(), itemIds.end());
+            snapshot.expires = now + std::chrono::minutes(10);
+            std::lock_guard<std::mutex> guard(s_bossDropSnapshotMutex);
+            s_bossDropSnapshots[playerGuid] = snapshot;
+        }
+        if (snapshot.itemIds.empty())
+        {
+            SendSysMessage(BossLootUtf8(u8"该目标没有可供指定的正常尸体掉落或已声明的关联奖励箱物品。"));
+            return true;
+        }
+        uint32 pageCount = (uint32(snapshot.itemIds.size()) + 19) / 20;
+        if (page > pageCount)
+        {
+            PSendSysMessage(BossLootUtf8(u8"没有第 %u 页；当前列表共 %u 页。"), page, pageCount);
+            SetSentErrorMessage(true);
+            return false;
+        }
+        PSendSysMessage(BossLootUtf8(u8"%s（NPC %u）可选掉落：第 %u/%u 页，共 %u 件。"),
+            creature->GetNameForLocaleIdx(GetSessionDbLocaleIndex()), creature->GetEntry(), page, pageCount, uint32(snapshot.itemIds.size()));
+        uint32 last = std::min(page * 20, uint32(snapshot.itemIds.size()));
+        for (uint32 index = (page - 1) * 20; index < last; ++index)
+            PSendSysMessage(BossLootUtf8(u8"%u. %s（%u）"), index + 1, GetBossLootItemLink(snapshot.itemIds[index]).c_str(), snapshot.itemIds[index]);
+        SendSysMessage(BossLootUtf8(u8"输入 .bd pick 2 5 按编号替换指定清单；.bd list 2 查看下一页。编号绑定当前目标，10 分钟内有效；重新 .bd list 会刷新编号。任务和条件资格仍按原规则。"));
+        return true;
+    }
+
+    if (!strcmp(operation, "pick"))
+    {
+        if (!hasSnapshot)
+        {
+            SendSysMessage(BossLootUtf8(u8"请先对当前目标输入 .bd list；旧编号可能已过期或属于其他目标。"));
+            SetSentErrorMessage(true);
+            return false;
+        }
+        std::ostringstream itemIds;
+        uint32 count = 0;
+        while (args && *args)
+        {
+            uint32 index = 0;
+            if (!ExtractUInt32(&args, index) || !index || index > snapshot.itemIds.size() || ++count > MAX_NR_LOOT_ITEMS)
+            {
+                SendSysMessage(BossLootUtf8(u8"编号无效或超过 16 个，预约未修改。请用 .bd list 查看编号，再输入 .bd pick 2 5。"));
+                SetSentErrorMessage(true);
+                return false;
+            }
+            if (count > 1)
+                itemIds << ' ';
+            itemIds << snapshot.itemIds[index - 1];
+        }
+        if (!count)
+        {
+            SendSysMessage(BossLootUtf8(u8"用法：.bd pick <多个编号>，例如 .bd pick 2 5。"));
+            SetSentErrorMessage(true);
+            return false;
+        }
+        std::string commandArgs = itemIds.str();
+        std::vector<char> buffer(commandArgs.begin(), commandArgs.end());
+        buffer.push_back('\0');
+        return HandleBossLootSetCommand(buffer.data());
+    }
+
+    SendSysMessage(BossLootUtf8(u8"用法：.bd <多个物品ID或链接> 设置；.bd 查看；.bd add/remove <ID或链接>；.bd clear；.bd list [页码]；.bd pick <多个编号>。"));
+    SetSentErrorMessage(true);
+    return false;
+}
+
+Creature* ChatHandler::GetBossLootCommandTarget(bool allowDead)
+{
+    // WorldDatabase.command may override the command table's advertised access level.
+    if (!m_session || GetAccessLevel() < SEC_GAMEMASTER)
+    {
+        SendSysMessage(BossLootUtf8(u8"只有游戏内 GM 可以使用指定掉落命令。"));
+        SetSentErrorMessage(true);
+        return nullptr;
+    }
+
+    Creature* creature = getSelectedCreature();
+    if (!creature || (!allowDead && !creature->IsAlive()))
+    {
+        SendSysMessage(allowDead ? BossLootUtf8(u8"请先选中要查询的怪物。") : BossLootUtf8(u8"请先选中活着的怪物；目标死亡后不能再修改指定掉落。"));
+        SetSentErrorMessage(true);
+        return nullptr;
+    }
+
+    BossLootReward reward;
+    InstanceData* instanceData = creature->GetInstanceData();
+    if (!allowDead && instanceData && instanceData->GetBossLootReward(creature->GetEntry(), reward) && reward.completed)
+    {
+        SendSysMessage(BossLootUtf8(u8"该遭遇已经完成，不能再修改指定掉落。已有奖励箱预约仍会在首次生成掉落时使用。"));
+        SetSentErrorMessage(true);
+        return nullptr;
+    }
+    return creature;
+}
+
+bool ChatHandler::HandleBossLootChangeCommand(char* args, bool append)
+{
+    Creature* creature = GetBossLootCommandTarget(false);
+    if (!creature)
+        return false;
+
+    InstanceData* instanceData = creature->GetInstanceData();
+    BossLootReward reward;
+    bool hasReward = instanceData && instanceData->GetBossLootReward(creature->GetEntry(), reward) && reward.gameObjectEntry;
+
+    if (creature->IsPet() || creature->HasCharmer() || creature->IsPlayerControlled()
+        || creature->GetOwnerGuid().IsPlayer() || creature->GetControllingPlayer())
+    {
+        SendSysMessage(BossLootUtf8(u8"该目标是宠物、受控制单位或不使用正常死亡掉落，不能指定掉落。"));
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    std::vector<uint32> requestedItems;
+    std::set<uint32> distinctItems;
+    if (append)
+    {
+        for (uint32 itemId : creature->GetBossLootItems())
+            if (distinctItems.insert(itemId).second)
+                requestedItems.push_back(itemId);
+        if (hasReward)
+            for (uint32 itemId : instanceData->GetBossLootItems(reward.gameObjectEntry))
+                if (distinctItems.insert(itemId).second)
+                    requestedItems.push_back(itemId);
+    }
+
+    uint32 argumentCount = 0;
+    SkipWhiteSpaces(&args);
+    while (args && *args)
+    {
+        uint32 itemId = 0;
+        if (!ExtractUint32KeyFromLink(&args, "Hitem", itemId) || !itemId || (append && argumentCount))
+        {
+            SendSysMessage(append ? BossLootUtf8(u8"用法：.bossloot add <物品ID或物品链接>。") : BossLootUtf8(u8"用法：.bossloot set <物品ID或物品链接> [更多物品ID或链接]。"));
+            SetSentErrorMessage(true);
+            return false;
+        }
+        ++argumentCount;
+        if (!distinctItems.insert(itemId).second)
+        {
+            PSendSysMessage(BossLootUtf8(u8"物品 %u 被重复指定或已在预约中，预约未修改。"), itemId);
+            SetSentErrorMessage(true);
+            return false;
+        }
+        requestedItems.push_back(itemId);
+        if (requestedItems.size() > MAX_NR_LOOT_ITEMS)
+        {
+            SendSysMessage(BossLootUtf8(u8"一次最多指定 16 种不同物品，预约未修改。"));
+            SetSentErrorMessage(true);
+            return false;
+        }
+    }
+    if (!argumentCount)
+    {
+        SendSysMessage(append ? BossLootUtf8(u8"用法：.bossloot add <物品ID或物品链接>。") : BossLootUtf8(u8"用法：.bossloot set <物品ID或物品链接> [更多物品ID或链接]。"));
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    bool normalCorpse = !creature->IsNoLoot()
+        && !creature->GetSettings().HasFlag(CreatureStaticFlags::CAN_WIELD_LOOT)
+        && !creature->GetSettings().HasFlag(CreatureStaticFlags::DESPAWN_INSTANTLY);
+    LootTemplate const* corpseLoot = normalCorpse ? LootTemplates_Creature.GetLootFor(creature->GetCreatureInfo()->LootId) : nullptr;
+    bool recognizedBoss = creature->IsWorldBoss()
+        || creature->GetSettings().HasFlag(CreatureStaticFlags::BOSS_MOB)
+        || sObjectMgr.IsEncounter(creature->GetEntry(), creature->GetMapId()) || hasReward;
+    // Some classic encounter members and summoned bosses lack a uniform boss flag.
+    // An actual normal corpse loot template is sufficient for this GM-only testing tool.
+    if ((!recognizedBoss && !corpseLoot) || (!normalCorpse && !hasReward))
+    {
+        SendSysMessage(BossLootUtf8(u8"该目标没有正常尸体掉落，也没有已声明的遭遇奖励箱，不能指定掉落。"));
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    LootTemplate const* chestLoot = nullptr;
+    if (hasReward)
+        if (GameObjectInfo const* chestInfo = ObjectMgr::GetGameObjectInfo(reward.gameObjectEntry))
+            if (chestInfo->type == GAMEOBJECT_TYPE_CHEST)
+                chestLoot = LootTemplates_Gameobject.GetLootFor(chestInfo->GetLootId());
+
+    std::vector<uint32> corpseItems;
+    std::vector<uint32> chestItems;
+    for (uint32 itemId : requestedItems)
+    {
+        if (!ObjectMgr::GetItemPrototype(itemId))
+        {
+            PSendSysMessage(BossLootUtf8(u8"物品 %u 不存在，全部预约保持原状。"), itemId);
+            SetSentErrorMessage(true);
+            return false;
+        }
+        if (corpseLoot && corpseLoot->FindGuaranteedItem(itemId))
+            corpseItems.push_back(itemId);
+        else if (chestLoot && chestLoot->FindGuaranteedItem(itemId))
+            chestItems.push_back(itemId);
+        else
+        {
+            PSendSysMessage(BossLootUtf8(u8"物品 %u 不在该目标的有效尸体掉落或关联奖励箱掉落中，全部预约保持原状。"), itemId);
+            SetSentErrorMessage(true);
+            return false;
+        }
+    }
+
+    if (!chestItems.empty())
+    {
+        // These encounter rewards use database spawns. Inspect only loaded copies
+        // in this instance; do not load grids or alter the reward object's state.
+        bool unavailable = false;
+        auto checkChest = [&](GameObjectDataPair const& spawn)
+        {
+            if (spawn.second.id != reward.gameObjectEntry || spawn.second.mapid != creature->GetMapId())
+                return false;
+            if (GameObject* chest = creature->GetMap()->GetGameObject(ObjectGuid(HIGHGUID_GAMEOBJECT, spawn.second.id, spawn.first)))
+                unavailable = chest->m_loot || chest->GetLootState() != GO_READY;
+            return unavailable;
+        };
+        sObjectMgr.DoGOData(checkChest);
+        if (unavailable)
+        {
+            SendSysMessage(BossLootUtf8(u8"关联奖励箱已生成掉落或正在使用，不能再修改该次奖励；全部预约保持原状。"));
+            SetSentErrorMessage(true);
+            return false;
+        }
+    }
+
+    // Validate every item and both source capacities before replacing either reservation.
+    creature->SetBossLootItems(corpseItems);
+    if (hasReward)
+        instanceData->SetBossLootItems(creature->GetEntry(), chestItems);
+
+    PSendSysMessage(BossLootUtf8(u8"已%s %s（NPC %u）的下一次指定掉落，共 %u 种物品。"),
+        append ? BossLootUtf8(u8"追加并更新") : BossLootUtf8(u8"设置"), creature->GetNameForLocaleIdx(GetSessionDbLocaleIndex()), creature->GetEntry(), uint32(requestedItems.size()));
+    SendSysMessage(BossLootUtf8(u8"仅本次有效；随机已出的指定物品不重复补入。任务条件照常。实际超过16格时优先保留指定物品；重启或地图卸载取消预设。"));
+    m_session->SendNotification(BossLootUtf8(u8"已指定 %u 种物品，仅本次有效。"), uint32(requestedItems.size()));
+    HandleBossLootShowCommand(nullptr);
+    sLog.outCommand(GetAccountId(), "BossLoot %s: actor=%s account=%u target=%s entry=%u map=%u instance=%u corpseItems=[%s] chestEntry=%u chestItems=[%s] nextOnly=1",
+        append ? "add" : "set", m_session->GetPlayer()->GetName(), GetAccountId(), creature->GetGuidStr().c_str(), creature->GetEntry(), creature->GetMapId(), creature->GetInstanceId(),
+        BossLootItemIds(corpseItems).c_str(), hasReward ? reward.gameObjectEntry : 0, BossLootItemIds(chestItems).c_str());
+    return true;
+}
+
+bool ChatHandler::HandleBossLootSetCommand(char* args)
+{
+    return HandleBossLootChangeCommand(args, false);
+}
+
+bool ChatHandler::HandleBossLootAddCommand(char* args)
+{
+    return HandleBossLootChangeCommand(args, true);
+}
+
+bool ChatHandler::HandleBossLootRemoveCommand(char* args)
+{
+    Creature* creature = GetBossLootCommandTarget(false);
+    if (!creature)
+        return false;
+    uint32 itemId = 0;
+    if (!ExtractUint32KeyFromLink(&args, "Hitem", itemId) || !itemId || *args)
+    {
+        SendSysMessage(BossLootUtf8(u8"用法：.bossloot remove <物品ID或物品链接>。"));
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    std::vector<uint32> corpseItems = creature->GetBossLootItems();
+    std::vector<uint32> chestItems;
+    InstanceData* instanceData = creature->GetInstanceData();
+    BossLootReward reward;
+    bool hasReward = instanceData && instanceData->GetBossLootReward(creature->GetEntry(), reward) && reward.gameObjectEntry;
+    if (hasReward)
+        chestItems = instanceData->GetBossLootItems(reward.gameObjectEntry);
+    size_t oldCount = corpseItems.size() + chestItems.size();
+    corpseItems.erase(std::remove(corpseItems.begin(), corpseItems.end(), itemId), corpseItems.end());
+    chestItems.erase(std::remove(chestItems.begin(), chestItems.end(), itemId), chestItems.end());
+    if (oldCount == corpseItems.size() + chestItems.size())
+    {
+        PSendSysMessage(BossLootUtf8(u8"物品 %u 不在当前预约中，预约未修改。"), itemId);
+        SetSentErrorMessage(true);
+        return false;
+    }
+    creature->SetBossLootItems(corpseItems);
+    if (hasReward)
+        instanceData->SetBossLootItems(creature->GetEntry(), chestItems);
+    PSendSysMessage(BossLootUtf8(u8"已从 %s（NPC %u）的预约中移除物品 %u；其他预约保持不变。"),
+        creature->GetNameForLocaleIdx(GetSessionDbLocaleIndex()), creature->GetEntry(), itemId);
+    m_session->SendNotification(BossLootUtf8(u8"已移除指定物品，剩余 %u 种，仅本次有效。"), uint32(corpseItems.size() + chestItems.size()));
+    HandleBossLootShowCommand(nullptr);
+    sLog.outCommand(GetAccountId(), "BossLoot remove: actor=%s account=%u target=%s entry=%u map=%u instance=%u item=%u corpseItems=[%s] chestEntry=%u chestItems=[%s]",
+        m_session->GetPlayer()->GetName(), GetAccountId(), creature->GetGuidStr().c_str(), creature->GetEntry(), creature->GetMapId(), creature->GetInstanceId(), itemId,
+        BossLootItemIds(corpseItems).c_str(), hasReward ? reward.gameObjectEntry : 0, BossLootItemIds(chestItems).c_str());
+    return true;
+}
+
+bool ChatHandler::HandleBossLootShowCommand(char* args)
+{
+    Creature* creature = GetBossLootCommandTarget(true);
+    if (!creature)
+        return false;
+    if (args && *args)
+        return false;
+
+    PSendSysMessage(BossLootUtf8(u8"%s（NPC %u，%s）的尸体指定物品：%u 种。"),
+        creature->GetNameForLocaleIdx(GetSessionDbLocaleIndex()), creature->GetEntry(), creature->GetGuidStr().c_str(), uint32(creature->GetBossLootItems().size()));
+    for (uint32 itemId : creature->GetBossLootItems())
+        PSendSysMessage(BossLootUtf8(u8"尸体：%s（%u）"), GetBossLootItemLink(itemId).c_str(), itemId);
+    BossLootReward reward;
+    InstanceData* instanceData = creature->GetInstanceData();
+    if (instanceData && instanceData->GetBossLootReward(creature->GetEntry(), reward) && reward.gameObjectEntry)
+    {
+        std::vector<uint32> const& itemIds = instanceData->GetBossLootItems(reward.gameObjectEntry);
+        PSendSysMessage(BossLootUtf8(u8"关联奖励箱 [%s]（%u）：%u 种；遭遇%s。共享同一奖励箱的 Boss 共用这份预约。"),
+            BossLootGameObjectName(reward.gameObjectEntry, GetSessionDbLocaleIndex()).c_str(), reward.gameObjectEntry,
+            uint32(itemIds.size()), reward.completed ? BossLootUtf8(u8"已完成") : BossLootUtf8(u8"未完成"));
+        for (uint32 itemId : itemIds)
+            PSendSysMessage(BossLootUtf8(u8"奖励箱：%s（%u）"), GetBossLootItemLink(itemId).c_str(), itemId);
+    }
+    else
+        SendSysMessage(BossLootUtf8(u8"该目标没有已声明的关联奖励箱。"));
+    SendSysMessage(BossLootUtf8(u8"预约仅使用一次；正常分配、任务及条件资格仍按原规则。"));
+    return true;
+}
+
+bool ChatHandler::HandleBossLootClearCommand(char* args)
+{
+    Creature* creature = GetBossLootCommandTarget(false);
+    if (!creature)
+        return false;
+    if (args && *args)
+        return false;
+
+    BossLootReward reward;
+    InstanceData* instanceData = creature->GetInstanceData();
+    bool hasReward = instanceData && instanceData->GetBossLootReward(creature->GetEntry(), reward) && reward.gameObjectEntry;
+    std::string corpseItems = BossLootItemIds(creature->GetBossLootItems());
+    std::string chestItems = hasReward ? BossLootItemIds(instanceData->GetBossLootItems(reward.gameObjectEntry)) : BossLootUtf8(u8"无");
+    creature->SetBossLootItems({});
+    if (hasReward)
+        instanceData->ClearBossLootItems(reward.gameObjectEntry);
+    PSendSysMessage(BossLootUtf8(u8"已清除 %s（NPC %u）的全部尸体预约%s。"),
+        creature->GetNameForLocaleIdx(GetSessionDbLocaleIndex()), creature->GetEntry(), hasReward ? BossLootUtf8(u8"及关联奖励箱的共享预约") : "");
+    m_session->SendNotification(BossLootUtf8(u8"已清空指定掉落。"));
+    sLog.outCommand(GetAccountId(), "BossLoot clear: actor=%s account=%u target=%s entry=%u map=%u instance=%u corpseItems=[%s] chestEntry=%u chestItems=[%s]",
+        m_session->GetPlayer()->GetName(), GetAccountId(), creature->GetGuidStr().c_str(), creature->GetEntry(), creature->GetMapId(), creature->GetInstanceId(),
+        corpseItems.c_str(), hasReward ? reward.gameObjectEntry : 0, chestItems.c_str());
     return true;
 }
 

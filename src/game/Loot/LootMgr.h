@@ -1,4 +1,4 @@
-/*
+﻿/*
  * This file is part of the CMaNGOS Project. See AUTHORS file for Copyright information
  *
  * This program is free software; you can redistribute it and/or modify
@@ -260,7 +260,7 @@ typedef std::set<uint32> LootIdSet;
 class LootTemplate
 {
     private:
-        class LootGroup                           // A set of loot definitions for items (refs are not allowed)
+        class LootGroup                           // A mutually exclusive group of items or references
         {
             public:
                 void AddEntry(LootStoreItem const& item);                 // Adds an entry to the group (at loading stage)
@@ -276,6 +276,7 @@ class LootTemplate
                 bool CheckLootRefs(LootIdSet* ref_set, LootIdSet& prevRefs);
 
             private:
+                friend class LootTemplate;
                 LootStoreItemList ExplicitlyChanced;                // Entries with chances defined in DB
                 LootStoreItemList EqualChanced;                     // Zero chances - every entry takes the same chance
 
@@ -290,6 +291,12 @@ class LootTemplate
         // Rolls for every item in the template and adds the rolled items the the loot
         void Process(Loot& loot, Player const* lootOwner, bool rate, LootStatsData* lootStatsData = nullptr) const;
 
+        // Validate actual item/reference/group reachability; optional runtime loot also checks eligibility.
+        LootStoreItem const* FindGuaranteedItem(uint32 itemId, Loot const* loot = nullptr, Player const* lootOwner = nullptr) const;
+        // Conservative upper bound, saturated at the client limit (16).
+        uint32 GetMaxLootItems() const;
+        void CollectGuaranteedItems(std::set<uint32>& itemIds) const;
+
         // True if template includes at least 1 quest drop entry
         bool HasQuestDrop(uint8 groupId = 0) const;
         // True if template includes at least 1 quest drop for an active quest of the player
@@ -301,6 +308,11 @@ class LootTemplate
         void Verify(LootStore const& lootstore, uint32 id) const;
         bool CheckLootRefs(LootIdSet* ref_set, LootIdSet& prevRefs);
     private:
+        LootStoreItem const* FindGuaranteedItem(uint32 itemId, Loot const* loot, Player const* lootOwner, std::set<LootTemplate const*> ancestors) const;
+        LootStoreItem const* FindGuaranteedItemInList(LootStoreItemList const& entries, bool grouped, uint32 itemId, Loot const* loot, Player const* lootOwner, std::set<LootTemplate const*> const& ancestors) const;
+        uint32 GetMaxLootItems(std::set<LootTemplate const*> ancestors) const;
+        uint32 GetMaxLootItemsInList(LootStoreItemList const& entries, bool grouped, std::set<LootTemplate const*> const& ancestors) const;
+        void CollectGuaranteedItems(std::set<uint32>& itemIds, std::set<LootTemplate const*> ancestors) const;
         LootStoreItemList Entries;                          // not grouped only
         LootGroups        Groups;                           // groups have own (optimized) processing, grouped entries go there
 };
@@ -355,7 +367,7 @@ class Loot
         friend class GroupLootRoll;
         friend class LootMgr;
 
-        Loot(Player* player, Creature* creature, LootType type);
+        Loot(Player* player, Creature* creature, LootType type, std::vector<uint32> const& guaranteedItemIds = {});
         Loot(Player* player, GameObject* gameObject, LootType type);
         Loot(Player* player, Corpse* corpse, LootType type);
         Loot(Player* player, Item* item, LootType type);
@@ -378,10 +390,15 @@ class Loot
         void SetGoldAmount(uint32 _gold);
         void SendGold(Player* player);
         bool IsItemAlreadyIn(uint32 itemId) const;
+        bool IsGuaranteedItemEligible(LootStoreItem const& item, Player const* lootOwner) const;
         void PrintLootList(ChatHandler& chat, WorldSession* session) const;
         bool HasLoot() const;
         uint32 GetGoldAmount() const { return m_gold; }
         LootType GetLootType() const { return m_lootType; }
+        // Use the real Loot object; callers must not mirror its private memory layout.
+        bool IsPlayerLooting(ObjectGuid const& playerGuid) const { return m_playersLooting.find(playerGuid) != m_playersLooting.end(); }
+        bool IsGroupLootPendingCheck() const { return m_lootMethod != NOT_GROUP_TYPE_LOOT && !m_isChecked; }
+        LootItemList const& GetLootItems() const { return m_lootItems; }
         LootItem* GetLootItemInSlot(uint32 itemSlot);
         GroupLootRoll* GetRollForSlot(uint32 itemSlot);
         InventoryResult SendItem(Player* target, uint32 itemSlot);
@@ -395,6 +412,7 @@ class Loot
         std::tuple<uint32, uint32, uint32> GetQualifiedWeapons();
 
         bool IsLootedFor(Player const* player) const;
+        bool IsLootedForAll() const;
 
     private:
         Loot(): m_lootTarget(nullptr), m_itemTarget(nullptr), m_gold(0), m_maxSlot(0), m_lootType(),
@@ -402,7 +420,6 @@ class Loot
             m_isChecked(false), m_isChest(false), m_isChanged(false), m_isFakeLoot(false)
         {}
         void Clear();
-        bool IsLootedForAll() const;
         void SendReleaseFor(ObjectGuid const& guid);
         void SendReleaseFor(Player* plr);
         void SendReleaseForAll();
@@ -413,7 +430,10 @@ class Loot
         void GroupCheck();
         void SetGroupLootRight(Player* player);
         void GenerateMoneyLoot(uint32 minAmount, uint32 maxAmount);
-        bool FillLoot(uint32 loot_id, LootStore const& store, Player* lootOwner, bool personal, bool noEmptyError = false);
+        bool FillLoot(uint32 loot_id, LootStore const& store, Player* lootOwner, bool personal, bool noEmptyError = false, std::vector<uint32> const& guaranteedItemIds = {});
+        bool ApplyGuaranteedItems(std::vector<uint32> const& itemIds, LootTemplate const& lootTemplate, Player* lootOwner);
+        void ReserveGuaranteedItems(std::vector<uint32> const& itemIds, LootTemplate const& lootTemplate, Player* lootOwner);
+        void ClearGuaranteedItems();
         void ForceLootAnimationClientUpdate() const;
         void SetPlayerIsLooting(Player* player);
         void SetPlayerIsNotLooting(Player* player);
@@ -426,6 +446,9 @@ class Loot
         Item*            m_itemTarget;
         ObjectGuid       m_guidTarget;
 
+        // Temporary state for one FillLoot call; only eligible missing IDs reserve slots.
+        std::set<uint32> m_reservedLootItems;
+        Player const*   m_guaranteedLootOwner = nullptr;
         LootItemList     m_lootItems;                     // store of the items contained in loot
         uint32           m_gold;                          // amount of money contained in loot
         uint32           m_maxSlot;                       // used to increment slot index and get total items count

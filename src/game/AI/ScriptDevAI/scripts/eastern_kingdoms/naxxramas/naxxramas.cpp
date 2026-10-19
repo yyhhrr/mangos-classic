@@ -730,6 +730,22 @@ void instance_naxxramas::Load(const char* chrIn)
     OUT_LOAD_INST_DATA_COMPLETE;
 }
 
+bool instance_naxxramas::GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const
+{
+    switch (bossEntry)
+    {
+        case NPC_MOGRAINE:
+        case NPC_ZELIEK:
+        case NPC_THANE:
+        case NPC_BLAUMEUX:
+            reward.gameObjectEntry = GO_CHEST_HORSEMEN_NORM;
+            reward.completed = GetData(TYPE_FOUR_HORSEMEN) == DONE;
+            return true;
+        default:
+            return false;
+    }
+}
+
 uint32 instance_naxxramas::GetData(uint32 type) const
 {
     if (type < MAX_ENCOUNTER)

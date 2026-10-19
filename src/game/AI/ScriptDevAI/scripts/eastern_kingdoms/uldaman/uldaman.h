@@ -55,6 +55,7 @@ class instance_uldaman : public ScriptedInstance
         void SetData(uint32 uiType, uint32 uiData) override;
         void SetData64(uint32 uiData, uint64 uiGuid) override;
         uint32 GetData(uint32 uiType) const override;
+        bool GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const override;
         uint64 GetData64(uint32 uiData) const override;
 
         void StartEvent(uint32 uiEventId, Player* pPlayer);
