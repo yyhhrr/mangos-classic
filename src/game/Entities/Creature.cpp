@@ -1808,7 +1808,7 @@ bool Creature::HasQuest(uint32 quest_id) const
     for (QuestRelationsMap::const_iterator itr = bounds.first; itr != bounds.second; ++itr)
     {
         if (itr->second == quest_id)
-            return true;
+            return !m_ai || m_ai->CanOfferQuest(quest_id);
     }
     return false;
 }

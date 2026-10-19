@@ -130,6 +130,10 @@ class UnitAI : public CombatActions
          */
         virtual void GetAIInformation(ChatHandler& /*reader*/) {}
 
+        // Event-driven quest offers can change without disabling unrelated turn-ins.
+        // HasQuest, quest menus and dialog status all consult the same predicate.
+        virtual bool CanOfferQuest(uint32 /*questId*/) const { return true; }
+
         ///== Reactions At =================================
 
         /**

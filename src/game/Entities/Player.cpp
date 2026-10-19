@@ -12275,7 +12275,8 @@ void Player::PrepareQuestMenu(ObjectGuid guid) const
     QuestRelationsMapBounds irbounds;
 
     // pets also can have quests
-    if (Creature* pCreature = GetMap()->GetAnyTypeCreature(guid))
+    Creature* questgiverCreature = GetMap()->GetAnyTypeCreature(guid);
+    if (Creature* pCreature = questgiverCreature)
     {
         rbounds = sObjectMgr.GetCreatureQuestRelationsMapBounds(pCreature->GetEntry());
         irbounds = sObjectMgr.GetCreatureQuestInvolvedRelationsMapBounds(pCreature->GetEntry());
@@ -12324,7 +12325,7 @@ void Player::PrepareQuestMenu(ObjectGuid guid) const
 
         Quest const* pQuest = sObjectMgr.GetQuestTemplate(quest_id);
 
-        if (!pQuest || !pQuest->IsActive())
+        if (!pQuest || !pQuest->IsActive() || (questgiverCreature && !questgiverCreature->HasQuest(quest_id)))
             continue;
 
         QuestStatus status = GetQuestStatus(quest_id);

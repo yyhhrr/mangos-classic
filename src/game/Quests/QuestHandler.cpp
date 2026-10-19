@@ -685,7 +685,7 @@ uint32 WorldSession::getDialogStatus(const Player* pPlayer, const Object* questg
         uint32 quest_id = itr->second;
         Quest const* pQuest = sObjectMgr.GetQuestTemplate(quest_id);
 
-        if (!pQuest || !pQuest->IsActive())
+        if (!pQuest || !pQuest->IsActive() || !questgiver->HasQuest(quest_id))
             continue;
 
         QuestStatus status = pPlayer->GetQuestStatus(quest_id);
