@@ -47,8 +47,9 @@ std::shared_ptr<std::map<int32, UnitConditionEntry>> UnitConditionMgr::Load()
         bar.step();
         Field* fields = result->Fetch();
 
-        UnitConditionEntry conditionEntry;
+        UnitConditionEntry conditionEntry{};
         conditionEntry.Id = fields[0].GetUInt32();
+        conditionEntry.Flags = fields[1].GetUInt32();
         for (uint32 i = 0; i < 8; ++i)
         {
             conditionEntry.Variable[i] = fields[i + 2].GetUInt32();
@@ -88,6 +89,11 @@ bool UnitConditionMgr::Meets(Unit const* source, Unit const* target, int32 Id)
     UnitConditionEntry& entry = itr->second;
     for (uint32 i = 0; i < 8; i++)
     {
+        // Empty slots are unused, including holes before later conditions.
+        // Treating them as true would make any OR entry always succeed.
+        if (entry.Variable[i] == uint32(UnitCondition::NONE))
+            continue;
+
         bool result = meets(source, target, UnitCondition(entry.Variable[i]), entry.Operation[i], entry.Value[i]);
         if (result && (entry.Flags & UNIT_CONDITION_FLAG_OR)) // return on first true or
             return true;
