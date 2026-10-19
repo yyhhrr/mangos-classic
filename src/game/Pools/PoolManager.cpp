@@ -486,7 +486,7 @@ void PoolGroup<GameObject>::Spawn1Object(MapPersistentState& mapState, PoolObjec
             GameObjectData const* data = sObjectMgr.GetGOData(obj->guid);
             MANGOS_ASSERT(data);
             GameObject* pGameobject = GameObject::CreateGameObject(data->id);
-            if (!pGameobject->LoadFromDB(obj->guid, dataMap, obj->guid, 0))
+            if (!pGameobject->LoadFromDB(obj->guid, dataMap, obj->guid, 0, false))
                 delete pGameobject;
             else
             {
@@ -497,6 +497,11 @@ void PoolGroup<GameObject>::Spawn1Object(MapPersistentState& mapState, PoolObjec
                     if (sWorld.getConfig(CONFIG_BOOL_SAVE_RESPAWN_TIME_IMMEDIATELY))
                         pGameobject->SaveRespawnTime();
                 }
+
+                // Add publishes visibility (and AI callbacks), so the timer must
+                // already be final. Otherwise clients briefly see an unready node.
+                dataMap->Add(pGameobject);
+                pGameobject->AIM_Initialize();
             }
         }
         // for not loaded grid just update respawn time (avoid work for instances until implemented support)

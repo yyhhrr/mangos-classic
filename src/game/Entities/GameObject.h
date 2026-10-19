@@ -725,7 +725,8 @@ class GameObject : public WorldObject
 
         void SaveToDB() const;
         void SaveToDB(uint32 mapid) const;
-        bool LoadFromDB(uint32 dbGuid, Map* map, uint32 newGuid, uint32 forcedEntry);
+        // Pool replacements finalize their respawn timer before entering the map.
+        bool LoadFromDB(uint32 dbGuid, Map* map, uint32 newGuid, uint32 forcedEntry, bool addToMap = true);
         void DeleteFromDB() const;
 
         ObjectGuid const& GetOwnerGuid() const override { return GetGuidValue(OBJECT_FIELD_CREATED_BY); }

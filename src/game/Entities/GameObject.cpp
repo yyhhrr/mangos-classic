@@ -867,7 +867,7 @@ void GameObject::SaveToDB(uint32 mapid) const
     WorldDatabase.CommitTransaction();
 }
 
-bool GameObject::LoadFromDB(uint32 dbGuid, Map* map, uint32 newGuid, uint32 forcedEntry)
+bool GameObject::LoadFromDB(uint32 dbGuid, Map* map, uint32 newGuid, uint32 forcedEntry, bool addToMap)
 {
     GameObjectData const* data = sObjectMgr.GetGOData(dbGuid);
 
@@ -963,8 +963,11 @@ bool GameObject::LoadFromDB(uint32 dbGuid, Map* map, uint32 newGuid, uint32 forc
         }
     }
 
-    map->Add(this);
-    AIM_Initialize();
+    if (addToMap)
+    {
+        map->Add(this);
+        AIM_Initialize();
+    }
 
     return true;
 }
