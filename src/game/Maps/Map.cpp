@@ -1797,92 +1797,104 @@ bool DungeonMap::Add(Player* player)
     if (!CanEnter(player))
         return false;
 
-    // check for existing instance binds
-    InstancePlayerBind* playerBind = player->GetBoundInstance(GetId());
-    if (playerBind && playerBind->perm)
-    {
-        // cannot enter other instances if bound permanently
-        if (playerBind->state != GetPersistanceState())
-        {
-            sLog.outError("InstanceMap::Add: player %s(%d) is permanently bound to instance %d,%d,%d,%d,%d but he is being put in instance %d,%d,%d,%d,%d",
-                          player->GetName(), player->GetGUIDLow(), playerBind->state->GetMapId(),
-                          playerBind->state->GetInstanceId(),
-                          playerBind->state->GetPlayerCount(), playerBind->state->GetGroupCount(),
-                          playerBind->state->CanReset(),
-                          GetPersistanceState()->GetMapId(), GetPersistanceState()->GetInstanceId(),
-                          GetPersistanceState()->GetPlayerCount(),
-                          GetPersistanceState()->GetGroupCount(), GetPersistanceState()->CanReset());
-            MANGOS_ASSERT(false);
-        }
-    }
+    bool directSummon = false;
+#ifdef ENABLE_PLAYERBOTS
+    if (player->GetPlayerbotAI())
+        directSummon = player->GetPlayerbotAI()->GetDirectSummonMap() == this;
+#endif
+    // A direct summon visits the group member's exact instance without overwriting
+    // either the bot's saved progress or the group's bindings.
+    if (directSummon)
+        player->m_InstanceValid = true;
     else
     {
-        Group* pGroup = player->GetGroup();
-        if (pGroup)
+        // check for existing instance binds
+        InstancePlayerBind* playerBind = player->GetBoundInstance(GetId());
+        if (playerBind && playerBind->perm)
         {
-            // solo saves should be reset when entering a group
-            InstanceGroupBind* groupBind = pGroup->GetBoundInstance(GetId());
-            if (playerBind)
+            // cannot enter other instances if bound permanently
+            if (playerBind->state != GetPersistanceState())
             {
-                sLog.outError("InstanceMap::Add: %s is being put in instance %d,%d,%d,%d,%d but he is in group (Id: %d) and is bound to instance %d,%d,%d,%d,%d!",
-                              player->GetGuidStr().c_str(), playerBind->state->GetMapId(), playerBind->state->GetInstanceId(),
+                sLog.outError("InstanceMap::Add: player %s(%d) is permanently bound to instance %d,%d,%d,%d,%d but he is being put in instance %d,%d,%d,%d,%d",
+                              player->GetName(), player->GetGUIDLow(), playerBind->state->GetMapId(),
+                              playerBind->state->GetInstanceId(),
                               playerBind->state->GetPlayerCount(), playerBind->state->GetGroupCount(),
-                              playerBind->state->CanReset(), pGroup->GetId(),
-                              playerBind->state->GetMapId(), playerBind->state->GetInstanceId(),
-                              playerBind->state->GetPlayerCount(), playerBind->state->GetGroupCount(), playerBind->state->CanReset());
-
-                if (groupBind)
-                    sLog.outError("InstanceMap::Add: the group (Id: %d) is bound to instance %d,%d,%d,%d,%d",
-                                  pGroup->GetId(),
-                                  groupBind->state->GetMapId(), groupBind->state->GetInstanceId(),
-                                  groupBind->state->GetPlayerCount(), groupBind->state->GetGroupCount(), groupBind->state->CanReset());
-
-                // no reason crash if we can fix state
-                player->UnbindInstance(GetId());
-            }
-
-            // bind to the group or keep using the group save
-            if (!groupBind)
-                pGroup->BindToInstance(GetPersistanceState(), false);
-            else
-            {
-                // cannot jump to a different instance without resetting it
-                if (groupBind->state != GetPersistentState())
-                {
-                    sLog.outError("InstanceMap::Add: %s is being put in instance %d,%d but he is in group (Id: %d) which is bound to instance %d,%d!",
-                                  player->GetGuidStr().c_str(), GetPersistentState()->GetMapId(),
-                                  GetPersistentState()->GetInstanceId(),
-                                  pGroup->GetId(), groupBind->state->GetMapId(),
-                                  groupBind->state->GetInstanceId());
-
-                    sLog.outError("MapSave players: %d, group count: %d",
-                                  GetPersistanceState()->GetPlayerCount(), GetPersistanceState()->GetGroupCount());
-
-                    if (groupBind->state)
-                        sLog.outError("GroupBind save players: %d, group count: %d", groupBind->state->GetPlayerCount(), groupBind->state->GetGroupCount());
-                    else
-                        sLog.outError("GroupBind save nullptr");
-                    MANGOS_ASSERT(false);
-                }
-                // if the group/leader is permanently bound to the instance
-                // players also become permanently bound when they enter
-                if (groupBind->perm)
-                {
-                    WorldPacket data(SMSG_INSTANCE_SAVE_CREATED, 4);
-                    data << uint32(0);
-                    player->GetSession()->SendPacket(data);
-                    player->BindToInstance(GetPersistanceState(), true);
-                }
+                              playerBind->state->CanReset(),
+                              GetPersistanceState()->GetMapId(), GetPersistanceState()->GetInstanceId(),
+                              GetPersistanceState()->GetPlayerCount(),
+                              GetPersistanceState()->GetGroupCount(), GetPersistanceState()->CanReset());
+                MANGOS_ASSERT(false);
             }
         }
         else
         {
-            // set up a solo bind or continue using it
-            if (!playerBind)
-                player->BindToInstance(GetPersistanceState(), false);
+            Group* pGroup = player->GetGroup();
+            if (pGroup)
+            {
+                // solo saves should be reset when entering a group
+                InstanceGroupBind* groupBind = pGroup->GetBoundInstance(GetId());
+                if (playerBind)
+                {
+                    sLog.outError("InstanceMap::Add: %s is being put in instance %d,%d,%d,%d,%d but he is in group (Id: %d) and is bound to instance %d,%d,%d,%d,%d!",
+                                  player->GetGuidStr().c_str(), playerBind->state->GetMapId(), playerBind->state->GetInstanceId(),
+                                  playerBind->state->GetPlayerCount(), playerBind->state->GetGroupCount(),
+                                  playerBind->state->CanReset(), pGroup->GetId(),
+                                  playerBind->state->GetMapId(), playerBind->state->GetInstanceId(),
+                                  playerBind->state->GetPlayerCount(), playerBind->state->GetGroupCount(), playerBind->state->CanReset());
+
+                    if (groupBind)
+                        sLog.outError("InstanceMap::Add: the group (Id: %d) is bound to instance %d,%d,%d,%d,%d",
+                                      pGroup->GetId(),
+                                      groupBind->state->GetMapId(), groupBind->state->GetInstanceId(),
+                                      groupBind->state->GetPlayerCount(), groupBind->state->GetGroupCount(), groupBind->state->CanReset());
+
+                    // no reason crash if we can fix state
+                    player->UnbindInstance(GetId());
+                }
+
+                // bind to the group or keep using the group save
+                if (!groupBind)
+                    pGroup->BindToInstance(GetPersistanceState(), false);
+                else
+                {
+                    // cannot jump to a different instance without resetting it
+                    if (groupBind->state != GetPersistentState())
+                    {
+                        sLog.outError("InstanceMap::Add: %s is being put in instance %d,%d but he is in group (Id: %d) which is bound to instance %d,%d!",
+                                      player->GetGuidStr().c_str(), GetPersistentState()->GetMapId(),
+                                      GetPersistentState()->GetInstanceId(),
+                                      pGroup->GetId(), groupBind->state->GetMapId(),
+                                      groupBind->state->GetInstanceId());
+
+                        sLog.outError("MapSave players: %d, group count: %d",
+                                      GetPersistanceState()->GetPlayerCount(), GetPersistanceState()->GetGroupCount());
+
+                        if (groupBind->state)
+                            sLog.outError("GroupBind save players: %d, group count: %d", groupBind->state->GetPlayerCount(), groupBind->state->GetGroupCount());
+                        else
+                            sLog.outError("GroupBind save nullptr");
+                        MANGOS_ASSERT(false);
+                    }
+                    // if the group/leader is permanently bound to the instance
+                    // players also become permanently bound when they enter
+                    if (groupBind->perm)
+                    {
+                        WorldPacket data(SMSG_INSTANCE_SAVE_CREATED, 4);
+                        data << uint32(0);
+                        player->GetSession()->SendPacket(data);
+                        player->BindToInstance(GetPersistanceState(), true);
+                    }
+                }
+            }
             else
-                // cannot jump to a different instance without resetting it
-                MANGOS_ASSERT(playerBind->state == GetPersistentState());
+            {
+                // set up a solo bind or continue using it
+                if (!playerBind)
+                    player->BindToInstance(GetPersistanceState(), false);
+                else
+                    // cannot jump to a different instance without resetting it
+                    MANGOS_ASSERT(playerBind->state == GetPersistentState());
+            }
         }
     }
 

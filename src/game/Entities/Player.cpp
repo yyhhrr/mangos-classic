@@ -1915,6 +1915,14 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
 
     MapEntry const* mEntry = sMapStore.LookupEntry(mapid);  // Validity checked in IsValidMapCoord
 
+    Map* directSummonMap = nullptr;
+#ifdef ENABLE_PLAYERBOTS
+    if (GetPlayerbotAI())
+        directSummonMap = GetPlayerbotAI()->GetDirectSummonMap();
+    if (directSummonMap && directSummonMap->GetId() != mapid)
+        directSummonMap = nullptr;
+#endif
+
     // do not let charmed players/creatures teleport
     if (HasCharmer())
         return false;
@@ -1997,7 +2005,7 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
         }
     }
 
-    if ((GetMapId() == mapid) && (!m_transport))            // TODO the !m_transport might have unexpected effects when teleporting from transport to other place on same map
+    if ((GetMapId() == mapid) && (!m_transport) && (!directSummonMap || directSummonMap == GetMap()))            // TODO the !m_transport might have unexpected effects when teleporting from transport to other place on same map
     {
         // lets reset far teleport flag if it wasn't reset during chained teleports
         SetSemaphoreTeleportFar(false);
@@ -2058,7 +2066,7 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
         // If the map is not created, assume it is possible to enter it.
         // It will be created in the WorldPortAck.
         DungeonPersistentState* state = GetBoundInstanceSaveForSelfOrGroup(mapid);
-        Map* map = sMapMgr.FindMap(mapid, state ? state->GetInstanceId() : 0);
+        Map* map = directSummonMap ? directSummonMap : sMapMgr.FindMap(mapid, state ? state->GetInstanceId() : 0);
         if (!map || map->CanEnter(this))
         {
             // lets reset near teleport flag if it wasn't reset during chained teleports
@@ -20244,6 +20252,15 @@ AreaLockStatus Player::GetAreaTriggerLockStatus(AreaTrigger const* at, uint32& m
     MapEntry const* mapEntry = sMapStore.LookupEntry(at->target_mapId);
     if (!mapEntry)
         return AREA_LOCKSTATUS_UNKNOWN_ERROR;
+
+#ifdef ENABLE_PLAYERBOTS
+    // Group-only summon is a synchronous world-thread transfer. Bypass gameplay entry
+    // requirements only for its exact destination, never for ordinary bot movement.
+    if (GetPlayerbotAI())
+        if (Map* map = GetPlayerbotAI()->GetDirectSummonMap())
+            if (map->GetId() == at->target_mapId)
+                return AREA_LOCKSTATUS_OK;
+#endif
 
     // Gamemaster can always enter
     if (IsGameMaster())

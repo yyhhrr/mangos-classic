@@ -112,6 +112,8 @@ enum class UnitCondition
     PATH_FAIL_COUNT                          = 84,
     UNUSED                                   = 85,
     LABEL                                    = 86,
+    // Value = planned HoT spell ID; source = recipient, target = caster.
+    HAS_SAME_OR_STRONGER_HELPFUL_AURA         = 87,
     MAX
 };
 

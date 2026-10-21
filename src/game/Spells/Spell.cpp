@@ -5193,14 +5193,19 @@ SpellCastResult Spell::CheckCast(bool strict)
         }
     }
 
-    if (!m_ignoreCosts && !m_IsTriggeredSpell)
+    // NORMAL_COMBAT_CAST requests normal control checks even when a database
+    // script waives costs for an NPC without a mana pool.  Other triggered or
+    // cost-ignoring casts retain their existing behavior.
+    if (!m_IsTriggeredSpell && (!m_ignoreCosts || m_notifyAI))
     {
-        SpellCastResult castResult = CheckPower(strict);
-        if (castResult != SPELL_CAST_OK)
-            return castResult;
+        if (!m_ignoreCosts)
+        {
+            SpellCastResult castResult = CheckPower(strict);
+            if (castResult != SPELL_CAST_OK)
+                return castResult;
+        }
 
-        // triggered spell not affected by stun/etc
-        castResult = CheckCasterAuras(m_param1);
+        SpellCastResult castResult = CheckCasterAuras(m_param1);
         if (castResult != SPELL_CAST_OK)
             return castResult;
     }

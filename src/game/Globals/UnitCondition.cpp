@@ -23,8 +23,83 @@
 #include "MotionGenerators/MotionMaster.h"
 #include "MotionGenerators/MovementGenerator.h"
 #include "Spells/SpellAuras.h"
+#include "Spells/SpellMgr.h"
+#include <cstring>
 #include "Util/ProgressBar.h"
 #include "Log/Log.h"
+
+namespace
+{
+// A targeting condition, not a stacking rule.  Only explicitly configured spell
+// lists use it, so unrelated HoTs can continue to coexist normally.
+bool HasSameOrStrongerHelpfulPeriodicHeal(Unit const* recipient, Unit const* caster, uint32 spellId)
+{
+    SpellEntry const* requested = sSpellTemplate.LookupEntry<SpellEntry>(spellId);
+    if (!recipient || !caster || !requested)
+        return false;
+
+    double requestedRate = 0.0;
+    for (uint32 i = 0; i < MAX_EFFECT_INDEX; ++i)
+    {
+        if (!requested->Effect[i] || requested->EffectApplyAuraName[i] != SPELL_AURA_PERIODIC_HEAL ||
+            !requested->EffectAmplitude[i] || !IsPositiveEffect(requested, SpellEffectIndex(i)))
+            continue;
+
+        // Do not roll random values or consume spell modifiers while examining
+        // possible targets.  Use the upper base value, including level scaling.
+        // Existing auras contain their snapshotted caster bonuses.  This native
+        // NPC condition deliberately does not simulate new healing bonuses.
+        int32 amount = caster->CalculateSpellEffectValue(recipient, requested, SpellEffectIndex(i), nullptr, true, false);
+        if (amount > 0)
+            requestedRate += double(amount) / requested->EffectAmplitude[i];
+    }
+    if (requestedRate <= 0.0)
+        return false;
+
+    for (auto const& auraPair : recipient->GetSpellAuraHolderMap())
+    {
+        SpellAuraHolder const* holder = auraPair.second;
+        if (!holder || holder->IsDeleted() || !holder->IsPositive() || !holder->GetStackAmount() ||
+            (!holder->IsPermanent() && holder->GetAuraDuration() <= 0))
+            continue;
+
+        SpellEntry const* existing = holder->GetSpellProto();
+        if (!existing)
+            continue;
+
+        bool sameSpell = requested->Id == existing->Id;
+        bool sameChain = sSpellMgr.IsSpellAnotherRankOfSpell(requested->Id, existing->Id);
+        // Many NPC versions have family 0 and no spell_chain entry.  A shared
+        // nonempty enUS base name plus school identifies those equivalents;
+        // comparing the aura type alone would confuse Renew with Rejuvenation.
+        bool sameName = requested->SpellName[0] && existing->SpellName[0] && requested->SpellName[0][0] &&
+            std::strcmp(requested->SpellName[0], existing->SpellName[0]) == 0 &&
+            requested->GetSchoolMask() == existing->GetSchoolMask() &&
+            (requested->SpellFamilyName == existing->SpellFamilyName || !requested->SpellFamilyName || !existing->SpellFamilyName);
+        if (!sameSpell && !sameChain && !sameName)
+            continue;
+
+        bool hasPeriodicHeal = false;
+        double existingRate = 0.0;
+        for (uint32 i = 0; i < MAX_EFFECT_INDEX; ++i)
+        {
+            Aura const* aura = holder->GetAuraByEffectIndex(SpellEffectIndex(i));
+            if (!aura || !aura->IsPositive() || !aura->IsPeriodic() ||
+                aura->GetModifier()->m_auraname != SPELL_AURA_PERIODIC_HEAL || !aura->GetModifier()->periodictime)
+                continue;
+
+            hasPeriodicHeal = true;
+            if (aura->GetAmount() > 0)
+                existingRate += double(aura->GetAmount()) / holder->GetStackAmount() / aura->GetModifier()->periodictime;
+        }
+        // The same active spell must not be repeatedly refreshed.  For another
+        // rank or an NPC equivalent, allow an upgrade from a weaker effect.
+        if (hasPeriodicHeal && (sameSpell || existingRate >= requestedRate))
+            return true;
+    }
+    return false;
+}
+}
 
 std::shared_ptr<std::map<int32, UnitConditionEntry>> UnitConditionMgr::Load()
 {
@@ -144,6 +219,8 @@ int32 UnitConditionMgr::getConditionValue(Unit const* source, Unit const* target
             {
                 return holder->IsPositive();
             }) ? value : 0;
+        case UnitCondition::HAS_SAME_OR_STRONGER_HELPFUL_AURA:
+            return value > 0 && HasSameOrStrongerHelpfulPeriodicHeal(source, target, uint32(value)) ? value : 0;
         case UnitCondition::HAS_HELPFUL_AURA_DISPEL_TYPE:
             return source->HasAuraHolder([value](SpellAuraHolder* holder)
             {
@@ -159,7 +236,7 @@ int32 UnitConditionMgr::getConditionValue(Unit const* source, Unit const* target
             {
                 return !holder->IsPositive();
             }) ? value : 0;
-        case UnitCondition::HAS_HARMFUL_AURA_DISPEL_TYPE: break;
+        case UnitCondition::HAS_HARMFUL_AURA_DISPEL_TYPE:
             return source->HasAuraHolder([value](SpellAuraHolder* holder)
             {
                 return !holder->IsPositive() && holder->GetSpellProto()->Dispel == value;

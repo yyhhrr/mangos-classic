@@ -32,6 +32,10 @@
 #include "World/World.h"
 #include "Anticheat/Anticheat.hpp"
 
+#ifdef ENABLE_PLAYERBOTS
+#include "playerbot/playerbot.h"
+#endif
+
 void WorldSession::HandleMoveWorldportAckOpcode(WorldPacket& /*recv_data*/)
 {
     DEBUG_LOG("WORLD: got MSG_MOVE_WORLDPORT_ACK.");
@@ -99,6 +103,12 @@ void WorldSession::HandleMoveWorldportAckOpcode()
     };
 
     Map* map = nullptr;
+#ifdef ENABLE_PLAYERBOTS
+    if (GetPlayer()->GetPlayerbotAI())
+        map = GetPlayer()->GetPlayerbotAI()->GetDirectSummonMap();
+    if (map && map->GetId() != loc.mapid)
+        map = nullptr;
+#endif
 
     // prevent crash at attempt landing to not existed battleground instance
     if (mEntry->IsBattleGround())
