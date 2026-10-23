@@ -32,6 +32,64 @@
 #include "Spells/Spell.h"
 #include "MotionGenerators/MovementGenerator.h"
 
+#include "Spells/SpellAuras.h"
+#include "Spells/SpellMgr.h"
+#include <cstring>
+
+namespace
+{
+// Opt-in EventAI targeting filter, not a global aura stacking rule. Compare
+// snapshotted positive stamina amounts before choosing a recipient, so a full
+// buffed ally cannot repeatedly hide another ally that still needs Fortitude.
+bool HasSameOrStrongerEventAIFortitude(Unit const* recipient, Unit const* caster, uint32 spellId)
+{
+    SpellEntry const* requested = sSpellTemplate.LookupEntry<SpellEntry>(spellId);
+    if (!recipient || !caster || !requested)
+        return false;
+
+    int32 requestedAmount = 0;
+    for (uint32 i = 0; i < MAX_EFFECT_INDEX; ++i)
+        if (requested->Effect[i] && requested->EffectApplyAuraName[i] == SPELL_AURA_MOD_STAT &&
+            requested->EffectMiscValue[i] == STAT_STAMINA && IsPositiveEffect(requested, SpellEffectIndex(i)))
+            requestedAmount = std::max(requestedAmount,
+                caster->CalculateSpellEffectValue(recipient, requested, SpellEffectIndex(i), nullptr, true, false));
+    if (requestedAmount <= 0)
+        return false;
+
+    for (auto const& auraPair : recipient->GetSpellAuraHolderMap())
+    {
+        SpellAuraHolder const* holder = auraPair.second;
+        if (!holder || holder->IsDeleted() || !holder->IsPositive() || !holder->GetStackAmount() ||
+            (!holder->IsPermanent() && holder->GetAuraDuration() <= 0))
+            continue;
+        SpellEntry const* existing = holder->GetSpellProto();
+        if (!existing)
+            continue;
+
+        bool sameSpell = requested->Id == existing->Id;
+        bool sameChain = sSpellMgr.IsSpellAnotherRankOfSpell(requested->Id, existing->Id);
+        // The priest family mask includes single-target and Prayer variants.
+        bool samePriestFortitude = requested->SpellFamilyName == SPELLFAMILY_PRIEST &&
+            existing->SpellFamilyName == SPELLFAMILY_PRIEST &&
+            (requested->SpellFamilyFlags & uint64(0x8)) && (existing->SpellFamilyFlags & uint64(0x8));
+        // NPC equivalents sometimes have family zero and no rank chain.
+        bool sameNpcName = (!requested->SpellFamilyName || !existing->SpellFamilyName) &&
+            requested->SpellName[0] && existing->SpellName[0] && requested->SpellName[0][0] &&
+            std::strcmp(requested->SpellName[0], existing->SpellName[0]) == 0 &&
+            requested->GetSchoolMask() == existing->GetSchoolMask();
+        if (!sameSpell && !sameChain && !samePriestFortitude && !sameNpcName)
+            continue;
+
+        for (uint32 i = 0; i < MAX_EFFECT_INDEX; ++i)
+            if (Aura const* aura = holder->GetAuraByEffectIndex(SpellEffectIndex(i)))
+                if (aura->IsPositive() && aura->GetModifier()->m_auraname == SPELL_AURA_MOD_STAT &&
+                    aura->GetModifier()->m_miscvalue == STAT_STAMINA && aura->GetAmount() >= requestedAmount)
+                    return true;
+    }
+    return false;
+}
+}
+
 bool CreatureEventAIHolder::UpdateRepeatTimer(Creature* creature, uint32 repeatMin, uint32 repeatMax)
 {
     if (repeatMin == repeatMax)
@@ -413,7 +471,22 @@ bool CreatureEventAI::CheckEvent(CreatureEventAIHolder& holder, Unit* actionInvo
             if ((event.friendly_buff.flags & 0x4) != 0)
                 spawnGroupId = m_creature->GetCreatureGroup() ? m_creature->GetCreatureGroup()->GetGroupId() : 0;
 
-            if ((event.friendly_buff.flags & 0x3) == 0)
+            if ((event.friendly_buff.flags & FRIENDLY_BUFF_SAME_OR_STRONGER) != 0)
+            {
+                uint32 mode = event.friendly_buff.flags & 0x3;
+                if ((mode == 0 && !m_creature->IsInCombat()) || (mode == 2 && m_creature->IsInCombat()))
+                    return false;
+                bool inCombat = mode == 0 || (mode != 2 && m_creature->IsInCombat());
+                pList = DoFindFriendlyMissingBuff((float)event.friendly_buff.radius,
+                    event.friendly_buff.spellId, inCombat, true, spawnGroupId);
+                pList.remove_if([&](Creature* candidate)
+                {
+                    return !candidate || candidate->IsControlledByPlayer() ||
+                        !m_creature->IsWithinDistInMap(candidate, (float)event.friendly_buff.radius) ||
+                        HasSameOrStrongerEventAIFortitude(candidate, m_creature, event.friendly_buff.spellId);
+                });
+            }
+            else if ((event.friendly_buff.flags & 0x3) == 0)
             {
                 if (!m_creature->IsInCombat())
                     return false;

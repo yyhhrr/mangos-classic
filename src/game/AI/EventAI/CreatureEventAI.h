@@ -213,6 +213,13 @@ enum EventFlags : uint32
     // no free bits, uint8 field
 };
 
+enum FriendlyMissingBuffFlags
+{
+    // Existing low bits select combat mode;0x4 optionally restricts spawn group.
+    // This filter is used only by explicitly opted-in Fortitude events.
+    FRIENDLY_BUFF_SAME_OR_STRONGER = 0x8,
+};
+
 enum SpawnedEventMode
 {
     SPAWNED_EVENT_ALWAY = 0,
