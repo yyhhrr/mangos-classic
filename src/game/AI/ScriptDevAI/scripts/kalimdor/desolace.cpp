@@ -183,30 +183,132 @@ bool GossipHello_npc_aged_dying_ancient_kodo(Player* pPlayer, Creature* pCreatur
 enum
 {
     QUEST_RETURN_TO_VAHLARRIEL  = 1440,
+    SAY_DALINDA_START          = 2143,
+    SAY_DALINDA_FINISH         = 2144,
 };
 
 struct npc_dalinda_malemAI : public npc_escortAI
 {
-    npc_dalinda_malemAI(Creature* m_creature) : npc_escortAI(m_creature)
+    enum EscortPhase
+    {
+        PHASE_WAITING,
+        PHASE_STARTING,
+        PHASE_ESCORTING,
+        PHASE_GOODBYE,
+        PHASE_DEPARTING,
+        PHASE_DESPAWNING,
+    };
+
+    npc_dalinda_malemAI(Creature* m_creature) : npc_escortAI(m_creature), m_phase(PHASE_WAITING), m_pauseTimer(0)
     {
         m_creature->SetStandState(UNIT_STAND_STATE_KNEEL, true);
         Reset();
     }
 
+    EscortPhase m_phase;
+    uint32 m_pauseTimer;
+
+    // An evade must preserve the escort phase, dialogue delay and standing pose.
     void Reset() override {}
+
+    void JustRespawned() override
+    {
+        npc_escortAI::JustRespawned();
+        SetEscortPaused(false);
+        End();
+        m_phase = PHASE_WAITING;
+        m_pauseTimer = 0;
+        m_creature->SetStandState(UNIT_STAND_STATE_KNEEL, true);
+    }
+
+    bool CanOfferQuest(uint32 questId) const override
+    {
+        // Also guards stale accept packets while the completed escort leaves.
+        return questId != QUEST_RETURN_TO_VAHLARRIEL ||
+            (m_phase == PHASE_WAITING && !HasEscortState(STATE_ESCORT_ESCORTING) && !m_creature->IsInCombat());
+    }
 
     void JustStartedEscort() override
     {
+        m_phase = PHASE_STARTING;
+        m_pauseTimer = 5000;
         m_creature->SetStandState(UNIT_STAND_STATE_STAND);
+        SetEscortPaused(true);
+        DoBroadcastText(SAY_DALINDA_START, m_creature, GetPlayerForEscort());
+    }
+
+    void MoveInLineOfSight(Unit* who) override
+    {
+        // Her template is defensive: the generic sight handler otherwise returns
+        // before reaching the escort helper. Preserve its attack/sight gates.
+        if (HasReactState(REACT_DEFENSIVE) && HasEscortState(STATE_ESCORT_ESCORTING) &&
+            (m_phase == PHASE_STARTING || m_phase == PHASE_ESCORTING) &&
+            GetAIOrder() != ORDER_EVADE && !m_creature->GetVictim() &&
+            !m_creature->IsNeutralToAll() && m_creature->CanInitiateAttack())
+        {
+            if (!m_creature->CanFly() && who->IsFlying() &&
+                m_creature->GetDistanceZ(who) > (IsRangedUnit() ? CREATURE_Z_ATTACK_RANGE_RANGED : CREATURE_Z_ATTACK_RANGE_MELEE))
+                return;
+
+            if (AssistPlayerInCombat(who))
+                return;
+        }
+
+        npc_escortAI::MoveInLineOfSight(who);
     }
 
     void WaypointReached(uint32 uiPointId) override
     {
-        if (uiPointId == 18)
+        if (!HasEscortState(STATE_ESCORT_ESCORTING))
+            return;
+
+        if (uiPointId == 18 && m_phase == PHASE_ESCORTING)
         {
-            if (Player* pPlayer = GetPlayerForEscort())
-                pPlayer->RewardPlayerAndGroupAtEventExplored(QUEST_RETURN_TO_VAHLARRIEL, m_creature);
+            // The goodbye and credit are one-shot, including repeated movement callbacks.
+            m_phase = PHASE_GOODBYE;
+            m_pauseTimer = 8000;
+            SetEscortPaused(true);
+            Player* player = GetPlayerForEscort();
+            if (player)
+                player->RewardPlayerAndGroupAtEventExplored(QUEST_RETURN_TO_VAHLARRIEL, m_creature);
+            DoBroadcastText(SAY_DALINDA_FINISH, m_creature, player);
+
+            // Keep the last escape leg, without further quest failure or distance checks.
+            QuestEnd();
         }
+        else if (uiPointId == 19 && m_phase == PHASE_DEPARTING)
+        {
+            m_phase = PHASE_DESPAWNING;
+            m_pauseTimer = 0;
+            // The final database waypoint also has a wait to prevent a pre-sent return spline.
+            SetEscortPaused(true);
+            End();
+            m_creature->ForcedDespawn(1000);
+        }
+    }
+
+    void UpdateEscortAI(const uint32 diff) override
+    {
+        // Fighting or returning from a fight must not consume the dialogue pause.
+        if (m_pauseTimer && !m_creature->IsInCombat() && GetAIOrder() != ORDER_EVADE)
+        {
+            if (m_pauseTimer <= diff)
+            {
+                m_pauseTimer = 0;
+                if (m_phase == PHASE_STARTING)
+                    m_phase = PHASE_ESCORTING;
+                else if (m_phase == PHASE_GOODBYE)
+                {
+                    m_phase = PHASE_DEPARTING;
+                    SetRun(true);
+                }
+                SetEscortPaused(false);
+            }
+            else
+                m_pauseTimer -= diff;
+        }
+
+        npc_escortAI::UpdateEscortAI(diff);
     }
 };
 
@@ -221,9 +323,14 @@ bool QuestAccept_npc_dalinda_malem(Player* pPlayer, Creature* pCreature, const Q
     {
         if (npc_dalinda_malemAI* pEscortAI = dynamic_cast<npc_dalinda_malemAI*>(pCreature->AI()))
         {
-            // TODO This faction change needs confirmation, also possible that we need to drop her PASSIVE flag
-            pCreature->SetFactionTemporary(FACTION_ESCORT_A_NEUTRAL_PASSIVE, TEMPFACTION_RESTORE_RESPAWN | TEMPFACTION_TOGGLE_IMMUNE_TO_NPC);
+            if (!pEscortAI->CanOfferQuest(QUEST_RETURN_TO_VAHLARRIEL))
+                return true;
+
             pEscortAI->Start(false, pPlayer, pQuest);
+            if (!pEscortAI->HasEscortState(STATE_ESCORT_ESCORTING))
+                return true;
+
+            pCreature->SetFactionTemporary(FACTION_ESCORT_A_NEUTRAL_PASSIVE, TEMPFACTION_RESTORE_RESPAWN | TEMPFACTION_TOGGLE_IMMUNE_TO_NPC);
         }
     }
     return true;
