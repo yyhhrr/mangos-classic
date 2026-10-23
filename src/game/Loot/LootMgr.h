@@ -424,6 +424,7 @@ class Loot
         void SendReleaseFor(Player* plr);
         void SendReleaseForAll();
         void SendAllowedLooter();
+        uint32 GetItemGrantCount(Player const* player, LootItem const* lootItem) const;
         void NotifyMoneyRemoved();
         void NotifyItemRemoved(uint32 lootIndex);
         void NotifyItemRemoved(Player* player, uint32 lootIndex) const;

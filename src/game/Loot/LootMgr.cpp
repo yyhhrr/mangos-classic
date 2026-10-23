@@ -2246,6 +2246,30 @@ void Loot::SendAllowedLooter()
         return;
 }
 
+uint32 Loot::GetItemGrantCount(Player const* player, LootItem const* lootItem) const
+{
+    uint32 const count = lootItem->count;
+    // These two seasonal sources replenish unique stacks without changing shared loot.
+    if (!player || !m_isChest || !m_lootTarget || m_lootTarget->GetTypeId() != TYPEID_GAMEOBJECT ||
+        !lootItem->itemProto || lootItem->itemProto->MaxCount != 5)
+        return count;
+
+    GameObject const* gameObject = static_cast<GameObject const*>(m_lootTarget);
+    if (gameObject->GetGoType() != GAMEOBJECT_TYPE_CHEST)
+        return count;
+
+    bool const isAppleBob = gameObject->GetEntry() == 180523 &&
+        gameObject->GetGOInfo()->GetLootId() == 17378 && lootItem->itemId == 20516;
+    bool const isHardpackedSnowdrift = gameObject->GetEntry() == 180654 &&
+        gameObject->GetGOInfo()->GetLootId() == 17489 && lootItem->itemId == 21038;
+    if (!isAppleBob && !isHardpackedSnowdrift)
+        return count;
+
+    uint32 const ownedCount = player->GetItemCount(lootItem->itemId, true);
+    // Keep the normal inventory error at the cap; never turn a failed pickup into a zero-item success.
+    return ownedCount < 5 ? std::min<uint32>(count, 5 - ownedCount) : count;
+}
+
 InventoryResult Loot::SendItem(Player* target, uint32 itemSlot)
 {
     LootItem* lootItem = GetLootItemInSlot(itemSlot);
@@ -2268,8 +2292,9 @@ InventoryResult Loot::SendItem(Player* target, LootItem* lootItem, bool sendErro
     InventoryResult msg = EQUIP_ERR_CANT_DO_RIGHT_NOW;
     if (target->GetSession())
     {
+        uint32 const grantCount = GetItemGrantCount(target, lootItem);
         ItemPosCountVec dest;
-        msg = target->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, lootItem->itemId, lootItem->count);
+        msg = target->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, lootItem->itemId, grantCount);
         if (msg == EQUIP_ERR_OK)
         {
             Item* newItem = target->StoreNewItem(dest, lootItem->itemId, true, lootItem->randomPropertyId);
@@ -2282,7 +2307,7 @@ InventoryResult Loot::SendItem(Player* target, LootItem* lootItem, bool sendErro
             else
                 NotifyItemRemoved(lootItem->lootSlot);
 
-            target->SendNewItem(newItem, uint32(lootItem->count), false, false, true);
+            target->SendNewItem(newItem, grantCount, false, false, true);
 
             if (!m_isChest)
             {
@@ -2391,12 +2416,13 @@ bool Loot::AutoStore(Player* player, bool broadcast /*= false*/, uint32 bag /*= 
         if (!lootItem->IsAllowed(player, this))
             continue; // already looted or not allowed
 
+        uint32 const grantCount = GetItemGrantCount(player, lootItem);
         ItemPosCountVec dest;
-        InventoryResult msg = player->CanStoreNewItem(bag, slot, dest, lootItem->itemId, lootItem->count);
+        InventoryResult msg = player->CanStoreNewItem(bag, slot, dest, lootItem->itemId, grantCount);
         if (msg != EQUIP_ERR_OK && slot != NULL_SLOT)
-            msg = player->CanStoreNewItem(bag, NULL_SLOT, dest, lootItem->itemId, lootItem->count);
+            msg = player->CanStoreNewItem(bag, NULL_SLOT, dest, lootItem->itemId, grantCount);
         if (msg != EQUIP_ERR_OK && bag != NULL_BAG)
-            msg = player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, lootItem->itemId, lootItem->count);
+            msg = player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, lootItem->itemId, grantCount);
         if (msg != EQUIP_ERR_OK)
         {
             player->SendEquipError(msg, nullptr, nullptr, 0, lootItem->itemId);
@@ -2410,7 +2436,7 @@ bool Loot::AutoStore(Player* player, bool broadcast /*= false*/, uint32 bag /*= 
             lootItem->allowedGuid.clear();
 
         Item* pItem = player->StoreNewItem(dest, lootItem->itemId, true, lootItem->randomPropertyId);
-        player->SendNewItem(pItem, lootItem->count, false, false, broadcast);
+        player->SendNewItem(pItem, grantCount, false, false, broadcast);
         m_isChanged = true;
     }
 
