@@ -70,6 +70,18 @@ AuctionHouseBot.Loot.Skinning   =    3,  5, 50, 50
 AuctionHouseBot.Items.Profession = 80, 90, 0, 50
 
 ###################################################################################################################
+# Maximum total units of each item that AHBot may supply to one auction market.
+#
+# Counts all active player and bot auctions by item ID, including every unit in each stack.
+# Separate faction markets have separate limits; linked auction houses share one limit.
+# Only the remaining quantity is added; existing auctions at or above the limit are left in place.
+# Applies to loot, profession items and items explicitly configured with .ahbot item.
+# This limits bot restocking; players can still post their own auctions above the limit.
+# Values: 0-1000000. 0 disables the limit (default). Example: 20 caps each item at 20 units.
+###################################################################################################################
+AuctionHouseBot.Items.MaxPerItem = 0
+
+###################################################################################################################
 # Enable dynamic max required level filtering
 #
 # If enabled, AHBot checks the database for the highest-level character currently online
@@ -146,6 +158,28 @@ AuctionHouseBot.Value.Rare      = 400,400,400,400,400,400,400,400,  0,400,  0,40
 AuctionHouseBot.Value.Epic      = 800,800,800,800,800,800,800,800,  0,800,  0,800,800,800,  0,800,800
 AuctionHouseBot.Value.Legendary =   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
 AuctionHouseBot.Value.Artifact  =   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+
+###################################################################################################################
+# Sell items with no NPC price
+#
+# 1: Allow otherwise eligible items with BuyPrice = 0 and SellPrice = 0 to use the fallback selling value.
+# 0: Skip those items unless a positive per-item value has been explicitly configured in ahbot_items.
+# This does not change binding restrictions, blacklists, quality/class filters or item-level limits.
+# Default value is 1 (enabled).
+###################################################################################################################
+AuctionHouseBot.Sell.UnpricedItems = 1
+
+###################################################################################################################
+# Selling fallback for items with both BuyPrice and SellPrice equal to zero
+#
+# Base value in copper per item level, multiplied by max(1, ItemLevel, RequiredLevel), then by the existing
+# quality/class value percentage. Existing price variance and stack-size pricing apply afterwards.
+# For example, an unpriced level 50 uncommon item at 200% is valued at 1 gold with the default of 100.
+# This only affects selling and the .ahbot item price display; it does not raise the bot's buying budget.
+# Existing blacklists, binding restrictions, quality/class filters and level caps still apply.
+# Value must be between 0 and 1000000. Set to 0 to disable. Default value is 100 (1 silver per item level).
+###################################################################################################################
+AuctionHouseBot.Value.Fallback = 100
 
 ###################################################################################################################
 # Vendor item value override

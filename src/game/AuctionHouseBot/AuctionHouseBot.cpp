@@ -54,6 +54,7 @@ void AuctionHouseBot::Initialize()
 
     m_chanceSell = GetMinMaxConfig("AuctionHouseBot.Chance.Sell", 0, 100, 10);
     m_chanceBuy = GetMinMaxConfig("AuctionHouseBot.Chance.Buy", 0, 100, 10);
+    m_maxItemCount = GetMinMaxConfig("AuctionHouseBot.Items.MaxPerItem", 0, 1000000, 0);
 
     sLog.outString("AHBot selling items: %s", m_chanceSell > 0 ? "Enabled" : "Disabled");
     sLog.outString("AHBot buying items: %s", m_chanceBuy > 0 ? "Enabled" : "Disabled");
@@ -112,6 +113,10 @@ void AuctionHouseBot::Initialize()
         // item value for items sold by vendors
         m_vendorValue = m_ahBotCfg.GetBoolDefault("AuctionHouseBot.Value.Vendor", true);
 
+        // Selling fallback for items without NPC buy or sell prices (copper per item level).
+        m_sellUnpricedItems = m_ahBotCfg.GetBoolDefault("AuctionHouseBot.Sell.UnpricedItems", true);
+        m_fallbackItemValue = GetMinMaxConfig("AuctionHouseBot.Value.Fallback", 0, 1000000, 100);
+
         // item value variance
         m_valueVariance = GetMinMaxConfig("AuctionHouseBot.Value.Variance", 0, 100, 10);
 
@@ -162,7 +167,8 @@ void AuctionHouseBot::Update()
         m_houseAction = 0;
 
     AuctionHouseType houseType = AuctionHouseType(m_houseAction % MAX_AUCTION_HOUSE_TYPE);
-    AuctionHouseObject* auctionHouse = sAuctionMgr.GetAuctionsMap(houseType);
+    AuctionHouseEntry const* houseEntry = sAuctionHouseStore.LookupEntry(houseType == AUCTION_HOUSE_ALLIANCE ? 1 : (houseType == AUCTION_HOUSE_HORDE ? 6 : 7));
+    AuctionHouseObject* auctionHouse = sAuctionMgr.GetAuctionsMap(houseEntry);
     if (m_houseAction < MAX_AUCTION_HOUSE_TYPE && urand(0, 99) < m_chanceSell)
     {
 	// Lazy-refresh dynamic level
@@ -176,6 +182,19 @@ void AuctionHouseBot::Update()
 		m_lastLevelUpdateTime = now;
 	    }
 	}
+        // Count actual units from every seller in this market, excluding expired auctions.
+        std::unordered_map<uint32, uint64> listedItemCounts;
+        if (m_maxItemCount > 0)
+        {
+            time_t const now = sWorld.GetGameTime();
+            for (auto const& auctionEntry : auctionHouse->GetAuctions())
+            {
+                AuctionEntry const* auction = auctionEntry.second;
+                if (auction->expireTime > now)
+                    listedItemCounts[auction->itemTemplate] += auction->itemCount;
+            }
+        }
+
         // Sell items
         std::unordered_map<uint32, uint32> itemMap;
 
@@ -239,17 +258,29 @@ void AuctionHouseBot::Update()
                     continue; // item class is filtered out
             }
 
-            uint32 itemValue = ValueWithVariance(iterator != m_itemData.end() ? iterator->second.Value : CalculateBuyoutPrice(prototype));
-            for (uint32 stackCounter = 0; stackCounter < itemEntry.second; stackCounter += prototype->GetMaxStackSize())
+            // Apply the same stock cap to loot, crafted items and explicit item overrides.
+            uint32 itemCount = itemEntry.second;
+            if (m_maxItemCount > 0)
             {
-                uint32 count = itemEntry.second - stackCounter > prototype->GetMaxStackSize() ? prototype->GetMaxStackSize() : itemEntry.second - stackCounter;
-                uint32 buyoutPrice = itemValue * count;
+                uint64 const listedCount = listedItemCounts[itemEntry.first];
+                if (listedCount >= m_maxItemCount)
+                    continue;
+                itemCount = std::min(itemCount, uint32(m_maxItemCount - listedCount));
+            }
+
+            uint32 itemValue = ValueWithVariance(iterator != m_itemData.end() ? iterator->second.Value : CalculateBuyoutPrice(prototype, true));
+            if (itemValue == 0)
+                continue; // Do not create items that cannot be priced.
+            for (uint32 stackCounter = 0; stackCounter < itemCount; stackCounter += prototype->GetMaxStackSize())
+            {
+                uint32 count = std::min(itemCount - stackCounter, prototype->GetMaxStackSize());
+                uint32 buyoutPrice = uint32(std::min<uint64>(uint64(itemValue) * count, MAX_MONEY_AMOUNT));
                 Item* item = Item::CreateItem(itemEntry.first, count);
-                if (buyoutPrice == 0 || !item)
-                    continue; // don't put up items we don't know the value of
-                uint32 bidPrice = buyoutPrice * (urand(m_auctionBidMin, m_auctionBidMax)) / 100;
+                if (!item)
+                    continue;
+                uint32 bidPrice = uint32(uint64(buyoutPrice) * urand(m_auctionBidMin, m_auctionBidMax) / 100);
                 if (item)
-                    auctionHouse->AddAuction(sAuctionHouseStore.LookupEntry(houseType == AUCTION_HOUSE_ALLIANCE ? 1 : (houseType == AUCTION_HOUSE_HORDE ? 6 : 7)), item, urand(m_auctionTimeMin, m_auctionTimeMax) * HOUR, bidPrice, buyoutPrice);
+                    auctionHouse->AddAuction(houseEntry, item, urand(m_auctionTimeMin, m_auctionTimeMax) * HOUR, bidPrice, buyoutPrice);
             }
         }
     } else if (m_houseAction >= MAX_AUCTION_HOUSE_TYPE && urand(0, 99) < m_chanceBuy)
@@ -395,7 +426,7 @@ AuctionHouseBotItemData AuctionHouseBot::GetItemData(uint32 item)
     // item data not overridden, set MinAmount/MaxAmount to 0 (those values can normally never be 0) as a means to alert requester that item data is not overridden
     AuctionHouseBotItemData itemData;
     ItemPrototype const* prototype = ObjectMgr::GetItemPrototype(item);
-    itemData.Value = prototype ? CalculateBuyoutPrice(prototype) : 0;
+    itemData.Value = prototype ? CalculateBuyoutPrice(prototype, true) : 0;
     return itemData;
 }
 
@@ -610,16 +641,33 @@ void AuctionHouseBot::AddLootToItemMap(LootStore* store, std::vector<int32>& loo
     }
 }
 
-uint32 AuctionHouseBot::CalculateBuyoutPrice(ItemPrototype const* prototype)
+uint32 AuctionHouseBot::CalculateBuyoutPrice(ItemPrototype const* prototype, bool allowFallback)
 {
-    uint32 buyoutPrice = prototype->BuyPrice;
+    uint64 buyoutPrice = prototype->BuyPrice;
     // test whether we have a buy price or if buy price greatly exceed sell price (causes item to be valued too high, notably arrows/shells do this)
     // if using sell price then price must be multiplied by 4 if white or gray item, 5 if green or better to match expected buy price
     if (buyoutPrice == 0 || (prototype->SellPrice > 0 && buyoutPrice / prototype->SellPrice > 5))
-        buyoutPrice = prototype->SellPrice * (prototype->Quality <= ITEM_QUALITY_NORMAL ? 4 : 5);
+        buyoutPrice = uint64(prototype->SellPrice) * (prototype->Quality <= ITEM_QUALITY_NORMAL ? 4 : 5);
+
+    // Only sell unpriced items at the fallback value; do not use it as a buying budget.
+    bool const useFallback = allowFallback && m_sellUnpricedItems && buyoutPrice == 0 && m_fallbackItemValue > 0;
+    if (useFallback)
+        buyoutPrice = uint64(std::max({uint32(1), prototype->ItemLevel, prototype->RequiredLevel})) * m_fallbackItemValue;
+
+    // Bound the base value before applying a potentially large configured percentage.
+    buyoutPrice = std::min<uint64>(buyoutPrice, MAX_MONEY_AMOUNT);
     // multiply buyoutPrice with item quality price percentage
     // if item is sold by a vendor and vendor value is forced, then multiply by 100 (setting vendor price)
-    buyoutPrice *= (m_vendorValue && m_vendorItems.find(prototype->ItemId) != m_vendorItems.end() ? 100 : m_itemValue[prototype->Quality][prototype->Class]);
-    buyoutPrice /= 100; // since we multiplied with m_itemValue
-    return buyoutPrice;
+    uint32 const valuePercentage = m_vendorValue && m_vendorItems.find(prototype->ItemId) != m_vendorItems.end() ? 100 : m_itemValue[prototype->Quality][prototype->Class];
+    buyoutPrice = buyoutPrice * valuePercentage / 100;
+    if (useFallback && valuePercentage > 0)
+        buyoutPrice = std::max<uint64>(1, buyoutPrice);
+    return uint32(std::min<uint64>(buyoutPrice, MAX_MONEY_AMOUNT));
+}
+
+uint32 AuctionHouseBot::ValueWithVariance(uint32 itemValue)
+{
+    int32 const variance = int32(urand(0, m_valueVariance * 2 + 1)) - int32(m_valueVariance);
+    int64 const value = int64(itemValue) + int64(variance) * (itemValue / 100);
+    return uint32(std::clamp<int64>(value, 0, MAX_MONEY_AMOUNT));
 }

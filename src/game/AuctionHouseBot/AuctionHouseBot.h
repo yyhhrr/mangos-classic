@@ -68,8 +68,8 @@ class AuctionHouseBot
         void CalculateItemLevelCap();
         void ParseItemValueConfig(char const* fieldname, std::vector<uint32>& itemValues);
         void AddLootToItemMap(LootStore* store, std::vector<int32>& lootConfig, std::vector<uint32>& lootTemplates, std::unordered_map<uint32, uint32>& itemMap);
-        uint32 CalculateBuyoutPrice(ItemPrototype const* prototype);
-        uint32 ValueWithVariance(uint32 itemValue) { return (uint32) (itemValue + ((int32) urand(0, m_valueVariance * 2 + 1) - (int32) m_valueVariance) * (int32) (itemValue / 100)); };
+        uint32 CalculateBuyoutPrice(ItemPrototype const* prototype, bool allowFallback = false);
+        uint32 ValueWithVariance(uint32 itemValue);
 
         std::string m_configFileName;
         Config m_ahBotCfg;
@@ -78,6 +78,7 @@ class AuctionHouseBot
 
         uint32 m_chanceSell;
         uint32 m_chanceBuy;
+        uint32 m_maxItemCount = 0;
 
         std::vector<int32> m_creatureLootNormalConfig;
         std::vector<int32> m_creatureLootRareConfig;
@@ -99,6 +100,8 @@ class AuctionHouseBot
 
         std::vector<std::vector<uint32>> m_itemValue = std::vector<std::vector<uint32>>(MAX_ITEM_QUALITY, std::vector<uint32>(MAX_ITEM_CLASS));
         bool m_vendorValue;
+        bool m_sellUnpricedItems = true;
+        uint32 m_fallbackItemValue = 100;
         uint32 m_valueVariance;
         uint32 m_auctionBidMin;
         uint32 m_auctionBidMax;
