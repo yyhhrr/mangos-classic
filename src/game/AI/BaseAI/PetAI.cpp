@@ -572,7 +572,8 @@ bool PetAI::Cast(std::tuple<SpellEntry const*, Unit*, bool> spellWithTarget)
         flags |= TRIGGERED_PET_CAST;
     Spell* spell = new Spell(m_unit, spellInfo, flags);
     SpellCastTargets targets;
-    if (target)
+    // Keep caster-only spells implicit so Phase Shift does not invalidate their self target.
+    if (target && (target != m_unit || !IsOnlySelfTargeting(spellInfo)))
     {
         targets.setUnitTarget(target);
 
