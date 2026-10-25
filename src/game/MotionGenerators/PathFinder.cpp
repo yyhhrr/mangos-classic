@@ -877,7 +877,7 @@ void PathFinder::BuildPointPath(const float* startPoint, const float* endPoint)
                 m_pointPathLimit);    // maximum number of points
         }
 
-        if (pointCount > 2 && sWorld.getConfig(CONFIG_BOOL_PATH_FIND_OPTIMIZE))
+        if (pointCount > 2 && m_optimizePath && sWorld.getConfig(CONFIG_BOOL_PATH_FIND_OPTIMIZE))
         {
             uint32 tempPointCounter = 2;
 

@@ -18,6 +18,8 @@
 
 #include "MotionGenerators/TargetedMovementGenerator.h"
 #include "PathFinder.h"
+#include "PlayerbotFollowSafety.h"
+#include <limits>
 #include "Entities/Unit.h"
 #include "Entities/Creature.h"
 #include "Entities/Player.h"
@@ -28,6 +30,9 @@
 #include "Grids/GridNotifiersImpl.h"
 #include "Entities/Transports.h"
 #include "Maps/SpawnGroup.h"
+#ifdef ENABLE_PLAYERBOTS
+#include "playerbot/PlayerbotAI.h"
+#endif
 #include "Grids/CellImpl.h"
 
 #define IGNORE_M2 true // simple define for avoiding bugs due to different setting across movechase
@@ -41,6 +46,168 @@ const char* ChaseModes[] =
     "CHASE_MODE_DISTANCING",
     "CHASE_MODE_FANNING",
 };
+
+
+namespace
+{
+float GetFollowSafetyHeight(Unit const& owner, float x, float y, float expectedZ)
+{
+    float height = expectedZ;
+    if (owner.GetMap()->GetHeightInRange(x, y, height, PlayerbotFollowSafety::SupportTolerance) &&
+        std::isfinite(height) && std::fabs(height - expectedZ) <= PlayerbotFollowSafety::SupportTolerance)
+        return height;
+
+    // Standable dynamic objects may have no nearby static floor for the bounded query.
+    // The general height query is accepted only when support is still at the expected feet Z.
+    height = owner.GetMap()->GetHeight(x, y, expectedZ);
+    if (std::isfinite(height) && std::fabs(height - expectedZ) <= PlayerbotFollowSafety::SupportTolerance)
+        return height;
+    return std::numeric_limits<float>::quiet_NaN();
+}
+
+float GetFollowPathSupportHeight(Unit const& owner, float x, float y, float expectedZ)
+{
+    const float ground = GetFollowSafetyHeight(owner, x, y, expectedZ);
+    if (std::isfinite(ground))
+        return ground;
+
+    // A complete walking route can cross ordinary swimmable water between two shores.
+    // Do not extend this exception to formation offsets, voids, magma, or slime.
+    if (owner.CanSwim())
+    {
+        GridMapLiquidData liquid{};
+        const uint8 waterTypes = MAP_LIQUID_TYPE_WATER | MAP_LIQUID_TYPE_OCEAN;
+        const GridMapLiquidStatus status = owner.GetTerrain()->getLiquidStatus(x, y, expectedZ,
+            waterTypes, &liquid, owner.GetCollisionHeight());
+        const bool swimming = (status & (LIQUID_MAP_IN_WATER | LIQUID_MAP_UNDER_WATER)) != 0;
+        const bool atSurface = (status & LIQUID_MAP_WATER_WALK) && std::isfinite(liquid.level) &&
+            std::fabs(expectedZ - liquid.level) <= PlayerbotFollowSafety::SupportTolerance;
+        if ((swimming || atSurface) && (liquid.type_flags & waterTypes) &&
+            !(liquid.type_flags & (MAP_LIQUID_TYPE_MAGMA | MAP_LIQUID_TYPE_SLIME)))
+            return expectedZ;
+    }
+    return std::numeric_limits<float>::quiet_NaN();
+}
+
+float GetGroundNearExpected(Unit const& owner, float x, float y, float expectedZ)
+{
+    // Preserve ordinary water support before a nearby bottom can pull the NAV sample down.
+    const float supported = GetFollowPathSupportHeight(owner, x, y, expectedZ);
+    if (std::isfinite(supported))
+        return supported;
+
+    float height = expectedZ;
+    const float tolerance = PlayerbotFollowSafety::NavigationProjectionTolerance;
+    if (owner.GetMap()->GetHeightInRange(x, y, height, tolerance) &&
+        std::isfinite(height) && std::fabs(height - expectedZ) <= tolerance)
+        return height;
+
+    height = owner.GetMap()->GetHeight(x, y, expectedZ);
+    if (std::isfinite(height) && std::fabs(height - expectedZ) <= tolerance)
+        return height;
+
+    // Lifted NAV water samples need the same bounded feet projection as ground samples.
+    // This adapter does not relax strict formation/prediction support or path flags.
+    if (owner.CanSwim())
+    {
+        GridMapLiquidData liquid{};
+        const uint8 waterTypes = MAP_LIQUID_TYPE_WATER | MAP_LIQUID_TYPE_OCEAN;
+        const GridMapLiquidStatus status = owner.GetTerrain()->getLiquidStatus(x, y, expectedZ,
+            waterTypes, &liquid, owner.GetCollisionHeight());
+        if (status != LIQUID_MAP_NO_WATER && (liquid.type_flags & waterTypes) &&
+            !(liquid.type_flags & (MAP_LIQUID_TYPE_MAGMA | MAP_LIQUID_TYPE_SLIME)) &&
+            std::isfinite(liquid.level) && std::fabs(expectedZ - liquid.level) <= tolerance)
+            return liquid.level;
+    }
+    return std::numeric_limits<float>::quiet_NaN();
+}
+}
+
+namespace PlayerbotFollowSafety
+{
+bool NeedsGroundSafety(Unit const& owner, Unit const& target)
+{
+#ifdef ENABLE_PLAYERBOTS
+    Player const* controller = owner.GetControllingPlayer();
+    if (!controller || !controller->GetPlayerbotAI() || controller->isRealPlayer())
+        return false;
+    if (!owner.IsPlayer() && (!owner.IsCreature() || !static_cast<Creature const&>(owner).IsPet()))
+        return false;
+    if (owner.GetTransport() || target.GetTransport() || owner.CanFly() || owner.IsFlying() || target.IsFlying())
+        return false;
+    const MovementFlags excluded = MovementFlags(MOVEFLAG_SWIMMING | MOVEFLAG_JUMPING | MOVEFLAG_FALLINGFAR);
+    if (owner.IsInWater() || target.IsInWater() || owner.m_movementInfo.HasMovementFlag(excluded) ||
+        target.m_movementInfo.HasMovementFlag(excluded))
+        return false;
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool NeedsCombatPositionSafety(Unit const& owner)
+{
+#ifdef ENABLE_PLAYERBOTS
+    if (!NeedsGroundSafety(owner, owner) || !owner.GetMap()->IsDungeon())
+        return false;
+    Player const* controller = owner.GetControllingPlayer();
+    return controller && controller->GetPlayerbotAI()->HasRealPlayerMaster();
+#else
+    return false;
+#endif
+}
+
+bool IsSafeCombatPosition(Unit const& owner, Point destination)
+{
+    if (!NeedsCombatPositionSafety(owner))
+        return true;
+    const Point from{owner.GetPositionX(), owner.GetPositionY(), owner.GetPositionZ()};
+    return IsSafeLocalMove(from, destination, [&](float x, float y, float z)
+    {
+        return GetFollowSafetyHeight(owner, x, y, z);
+    });
+}
+
+bool BuildSupportedGroundPath(Unit const& owner, Point destination, std::vector<Point>& points, bool allowPartial)
+{
+    points.clear();
+    if (owner.GetTransport() || !IsFinite(destination))
+        return false;
+
+    // The XY-only optimizer may remove ramp steps. Keep this query's original NAV samples.
+    // Feet are projected locally below; the world's global Z normalization stays unchanged.
+    PathFinder finder(&owner, true);
+    finder.setOptimizePath(false);
+    if (!finder.calculate(destination.x, destination.y, destination.z))
+        return false;
+
+    const Point from{owner.GetPositionX(), owner.GetPositionY(), owner.GetPositionZ()};
+    if (!BuildGroundedPath(unsigned(finder.getPathType()), finder.getPath(), from, destination, points,
+            [&](float x, float y, float z) { return GetGroundNearExpected(owner, x, y, z); },
+            [&](float x, float y, float z) { return GetFollowPathSupportHeight(owner, x, y, z); }, allowPartial))
+        return false;
+
+    const float height = owner.GetCollisionHeight();
+    for (size_t i = 1; i < points.size(); ++i)
+    {
+        if (!owner.GetMap()->IsInLineOfSight(points[i - 1].x, points[i - 1].y, points[i - 1].z + height,
+                points[i].x, points[i].y, points[i].z + height, true))
+        {
+            points.clear();
+            return false;
+        }
+    }
+    return true;
+}
+
+bool HasSupportedGroundLine(Unit const& owner, Point from, Point to)
+{
+    return HasSupportedLine(from, to, [&](float x, float y, float z)
+    {
+        return GetFollowSafetyHeight(owner, x, y, z);
+    });
+}
+}
 
 //-----------------------------------------------//
 template<class T, typename D>
@@ -498,11 +665,36 @@ bool ChaseMovementGenerator::DispatchSplineToPosition(Unit& owner, float x, floa
     if (!this->i_path)
         this->i_path = new PathFinder(&owner);
 
+#ifdef ENABLE_PLAYERBOTS
+    const bool groundSafety = PlayerbotFollowSafety::NeedsGroundSafety(owner, owner);
+    this->i_path->setOptimizePath(!groundSafety);
+    auto stopUnsafeGroundPath = [&]()
+    {
+        owner.InterruptMoving();
+        _clearUnitStateMove(owner);
+        m_reachable = false;
+        return false;
+    };
+#endif
+
+    // Backpedal/fanning/distancing are optional position changes. A path down
+    // a ramp must not turn an unsafe side step into a trip to another floor.
+#ifdef ENABLE_PLAYERBOTS
+    if (!cutPath && !PlayerbotFollowSafety::IsSafeCombatPosition(owner, {x, y, z}))
+        return stopUnsafeGroundPath();
+#endif
+
     bool gen = false;
     if (owner.IsWithinDist3d(x, y, z, 200.f) && std::abs(owner.GetPositionZ() - z) < 5.f && owner.IsWithinLOS(x, y, z + i_target->GetCollisionHeight()) && !owner.IsInWater() && !i_target->IsInWater())
     {
-        this->i_path->calculate(x, y, z, false, true);
+        const bool calculated = this->i_path->calculate(x, y, z, false, true);
         auto& path = this->i_path->getPath();
+#ifdef ENABLE_PLAYERBOTS
+        if (groundSafety && (!calculated || path.empty()))
+            return stopUnsafeGroundPath();
+#else
+        (void)calculated;
+#endif
         gen = true;
         if (sWorld.getConfig(CONFIG_BOOL_PATH_FIND_NORMALIZE_Z) && (this->i_path->getPathType() & (PATHFIND_NOPATH | PATHFIND_INCOMPLETE)) == 0)
         {
@@ -537,9 +729,21 @@ bool ChaseMovementGenerator::DispatchSplineToPosition(Unit& owner, float x, floa
 
     if (!gen || (this->i_path->getPathType() & (PATHFIND_NOPATH | PATHFIND_INCOMPLETE)))
     {
-        this->i_path->calculate(x, y, z);
+        const bool calculated = this->i_path->calculate(x, y, z);
+#ifdef ENABLE_PLAYERBOTS
+        if (groundSafety && (!calculated || this->i_path->getPath().empty()))
+            return stopUnsafeGroundPath();
+#else
+        (void)calculated;
+#endif
         if (this->i_path->getPathType() & PATHFIND_NOPATH)
+        {
+#ifdef ENABLE_PLAYERBOTS
+            if (groundSafety)
+                return stopUnsafeGroundPath();
+#endif
             return false;
+        }
     }
 
     auto& path = this->i_path->getPath();
@@ -547,10 +751,54 @@ bool ChaseMovementGenerator::DispatchSplineToPosition(Unit& owner, float x, floa
     if (cutPath)
         CutPath(owner, path);
 
+#ifdef ENABLE_PLAYERBOTS
+    G3D::Vector3 plannedReachabilityEnd;
+    if (groundSafety)
+    {
+        if (path.empty())
+            return stopUnsafeGroundPath();
+        plannedReachabilityEnd = path.back();
+
+        // Preserve CutPath's combat endpoint; normalize only the physical route to it.
+        const PlayerbotFollowSafety::Point from{owner.GetPositionX(), owner.GetPositionY(), owner.GetPositionZ()};
+        const PlayerbotFollowSafety::Point endpoint{path.back().x, path.back().y, path.back().z};
+        std::vector<PlayerbotFollowSafety::Point> supported;
+        if (!PlayerbotFollowSafety::BuildGroundedPath(unsigned(this->i_path->getPathType()), path, from, endpoint, supported,
+                [&](float px, float py, float pz) { return GetGroundNearExpected(owner, px, py, pz); },
+                [&](float px, float py, float pz) { return GetFollowPathSupportHeight(owner, px, py, pz); }, false))
+            return stopUnsafeGroundPath();
+
+        const float height = owner.GetCollisionHeight();
+        for (size_t i = 1; i < supported.size(); ++i)
+            if (!owner.GetMap()->IsInLineOfSight(supported[i - 1].x, supported[i - 1].y, supported[i - 1].z + height,
+                    supported[i].x, supported[i].y, supported[i].z + height, true))
+                return stopUnsafeGroundPath();
+
+        // Normal melee approaches may wind around a corner. Ranged stopping
+        // points need edge clearance, without requiring a straight approach.
+        if (cutPath && i_offset > ATTACK_DISTANCE && PlayerbotFollowSafety::NeedsCombatPositionSafety(owner) &&
+            !PlayerbotFollowSafety::HasGroundClearance(supported.back(), [&](float px, float py, float pz)
+                { return GetFollowSafetyHeight(owner, px, py, pz); }))
+            return stopUnsafeGroundPath();
+
+        path.clear();
+        path.reserve(supported.size());
+        for (const auto& point : supported)
+            path.emplace_back(point.x, point.y, point.z);
+    }
+#endif
+
     if (checkReachable)
     {
         auto& lastPoint = path[path.size() - 1];
-        if (!IsReachablePositionToTarget(owner, lastPoint.x, lastPoint.y, lastPoint.z, *this->i_target.getTarget()))
+#ifdef ENABLE_PLAYERBOTS
+        // The safe spline can be a 100-yard prefix of a complete route. Test the original
+        // planned combat endpoint, not that temporary movement chunk, for reachability.
+        const auto& reachabilityPoint = groundSafety ? plannedReachabilityEnd : lastPoint;
+#else
+        const auto& reachabilityPoint = lastPoint;
+#endif
+        if (!IsReachablePositionToTarget(owner, reachabilityPoint.x, reachabilityPoint.y, reachabilityPoint.z, *this->i_target.getTarget()))
         {
             m_reachable = false;
             return false;
@@ -860,12 +1108,47 @@ bool FollowMovementGenerator::Move(Unit& owner, float x, float y, float z)
     if (!owner.movespline->Finalized())
         owner.UpdateSplinePosition(true);
 
+#ifdef ENABLE_PLAYERBOTS
+    if (PlayerbotFollowSafety::NeedsGroundSafety(owner, *i_target.getTarget()))
+    {
+        using PlayerbotFollowSafety::Point;
+        std::vector<Point> supported;
+        if (!PlayerbotFollowSafety::BuildSupportedGroundPath(owner, {x, y, z}, supported, true))
+        {
+            const Point leader{i_target->GetPositionX(), i_target->GetPositionY(), i_target->GetPositionZ()};
+            if (!PlayerbotFollowSafety::BuildSupportedGroundPath(owner, leader, supported, true))
+            {
+                owner.InterruptMoving();
+                _clearUnitStateMove(owner);
+                return false;
+            }
+        }
+
+        PointsArray path;
+        path.reserve(supported.size());
+        for (const Point& point : supported)
+            path.emplace_back(point.x, point.y, point.z);
+
+        _addUnitStateMove(owner);
+        Movement::MoveSplineInit init(owner);
+        init.MovebyPath(path);
+        init.SetWalk(EnableWalking());
+        init.SetVelocity(GetSpeed(owner));
+        if (!i_target->IsMoving())
+            init.SetFacing(i_target->GetOrientation());
+        init.Launch();
+        return true;
+    }
+#endif
+
     if (!i_path)
         i_path = new PathFinder(&owner);
 
     bool unstuck = false;
 
     i_path->calculate(x, y, z);
+
+
 
     auto& path = i_path->getPath();
 
@@ -966,6 +1249,11 @@ bool FollowMovementGenerator::_getLocation(Unit& owner, float& x, float& y, floa
 
     float to = i_target->GetOrientation();
 
+#ifdef ENABLE_PLAYERBOTS
+    const bool groundSafety = PlayerbotFollowSafety::NeedsGroundSafety(owner, *i_target.getTarget());
+    const PlayerbotFollowSafety::Point anchor{tx, ty, tz};
+#endif
+
     // Server-controlled moving unit: use destination
     if (!i_target->movespline->Finalized() && movingNow)
     {
@@ -998,11 +1286,50 @@ bool FollowMovementGenerator::_getLocation(Unit& owner, float& x, float& y, floa
         }
     }
 
+#ifdef ENABLE_PLAYERBOTS
+    if (groundSafety && !PlayerbotFollowSafety::HasSupportedGroundLine(owner, anchor, {tx, ty, tz}))
+    {
+        tx = anchor.x;
+        ty = anchor.y;
+        tz = anchor.z;
+    }
+#endif
+
     const float radius = owner.GetObjectBoundingRadius();
     const float range = GetDynamicTargetDistance(owner, false);
     const float angle = (to + GetAngle());
 
     i_target->GetNearPointAt(tx, ty, tz, &owner, x, y, z, radius, range, angle);
+
+#ifdef ENABLE_PLAYERBOTS
+    if (groundSafety)
+    {
+        auto supported = [&]()
+        {
+            return PlayerbotFollowSafety::HasSupportedGroundLine(owner, anchor, {x, y, z}) &&
+                i_target->IsWithinLOS(x, y, z + owner.GetCollisionHeight(), true);
+        };
+        if (supported())
+            return true;
+
+        // Narrow the formation around the actual leader before trying a short rear queue.
+        for (float factor : {0.5f, 0.25f})
+        {
+            i_target->GetNearPointAt(anchor.x, anchor.y, anchor.z, &owner, x, y, z, radius, range * factor, angle);
+            if (supported())
+                return true;
+        }
+        i_target->GetNearPointAt(anchor.x, anchor.y, anchor.z, &owner, x, y, z, radius,
+            std::min(range, 1.5f), to + M_PI_F);
+        if (supported())
+            return true;
+
+        x = anchor.x;
+        y = anchor.y;
+        z = anchor.z;
+        return PlayerbotFollowSafety::HasSupportedGroundLine(owner, anchor, anchor);
+    }
+#endif
     return true;
 }
 
@@ -1029,7 +1356,20 @@ void FollowMovementGenerator::_setLocation(Unit& owner, bool movingNow)
 
     float x, y, z;
 
-    _getLocation(owner, x, y, z, movingNow);
+    if (!_getLocation(owner, x, y, z, movingNow))
+    {
+#ifdef ENABLE_PLAYERBOTS
+        if (PlayerbotFollowSafety::NeedsGroundSafety(owner, *i_target.getTarget()))
+        {
+            owner.InterruptMoving();
+            _clearUnitStateMove(owner);
+        }
+#endif
+        i_targetReached = false;
+        i_speedChanged = false;
+        m_targetFaced = false;
+        return;
+    }
 
     i_targetReached = !Move(owner, x, y, z);
     i_speedChanged = false;
