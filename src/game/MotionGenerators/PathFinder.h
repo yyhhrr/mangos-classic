@@ -87,9 +87,6 @@ class PathFinder
         void setUseStrightPath(bool useStraightPath) { m_useStraightPath = useStraightPath; };
         void setPathLengthLimit(float distance) { m_pointPathLimit = std::min<uint32>(uint32(distance / SMOOTH_PATH_STEP_SIZE * 1.25f), MAX_POINT_PATH_LENGTH); };
 
-        // Optional per-query override; ordinary callers retain the configured optimizer.
-        void setOptimizePath(bool optimize) { m_optimizePath = optimize; }
-
         // result getters
         Vector3 getStartPosition()      const { return m_startPosition; }
         Vector3 getEndPosition()        const { return m_endPosition; }
@@ -115,7 +112,6 @@ class PathFinder
         bool           m_useStraightPath;  // type of path will be generated
         bool           m_forceDestination; // when set, we will always arrive at given point
         bool           m_straightLine;     // use raycast if true for a straight line path
-        bool           m_optimizePath = true; // preserve detailed samples only for explicit callers
         uint32         m_pointPathLimit;   // limit point path size; min(this, MAX_POINT_PATH_LENGTH)
         std::vector<float> m_cachedPoints; // caching for BuildPointPath - must be after m_pointPathLimit
 
