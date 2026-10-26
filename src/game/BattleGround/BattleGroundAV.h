@@ -21,6 +21,7 @@
 
 #include "Common.h"
 #include "BattleGround.h"
+#include "BattleGroundAVSupport.h"
 
 enum AVTimers
 {
@@ -601,13 +602,29 @@ class BattleGroundAV : public BattleGround
         void HandleKillPlayer(Player* player, Player* killer) override;
         void HandleKillUnit(Creature* creature, Player* killer) override;
 
+        // Called by Player::RewardQuest after a validated NPC turn-in is committed.
+        void HandleQuestRewarded(uint32 questid, Player* player);
+
+        uint32 GetSupportProgress(PvpTeamIndex team, AVSupportResource resource) const;
+        uint32 GetSupportRequirement(AVSupportResource resource) const;
+        AVSupportStage GetSupportStage(PvpTeamIndex team, AVSupportType type) const;
+        bool IsSupportReady(PvpTeamIndex team, AVSupportType type) const;
+        bool IsSupportActive(PvpTeamIndex team, AVSupportType type) const;
+        bool TryBeginSupport(PvpTeamIndex team, AVSupportType type);
+        void FinishSupport(PvpTeamIndex team, AVSupportType type, bool success);
+        bool NotifyCommanderRescued(uint32 entry);
+        bool IsCommanderRescued(uint32 entry) const;
+        bool RegisterSupportCreature(PvpTeamIndex team, AVSupportType type, Creature* creature);
+        bool RegisterSupportGameObject(PvpTeamIndex team, AVSupportType type, GameObject* object);
+        bool RegisterCommanderEscort(Creature* creature);
+        bool RegisterTamedCreature(Creature* creature);
+
         // Conditions
         bool IsConditionFulfilled(Player const* source, uint32 conditionId, WorldObject const* conditionSource, uint32 conditionSourceType) override;
 
     private:
         // Score and quest functions
         void UpdateScore(PvpTeamIndex teamIdx, int32 points);
-        void HandleQuestComplete(uint32 questid, Player* player);
         bool CanPlayerDoMineQuest(uint32 gameobjectEntry, Team team);
 
         // Battleground node functions
@@ -633,7 +650,14 @@ class BattleGroundAV : public BattleGround
         // Herald announcements
         void DoSendYellToTeam(PvpTeamIndex teamIdx, int32 textId, uint8 nodeId, bool useNode = true, int32 mineLangId = 0);
 
-        uint32 m_teamQuestStatus[PVP_TEAM_COUNT][9];       // [x][y] x=team y=questcounter
+        void CleanupSupportActors();
+        bool IsSupportAvailable() const;
+        AVSupport::State m_supportState;
+        GuidVector m_supportCreatures[PVP_TEAM_COUNT][AV_SUPPORT_MAX];
+        GuidVector m_supportGameObjects[PVP_TEAM_COUNT][AV_SUPPORT_MAX];
+        GuidVector m_commanderEscorts;
+        GuidVector m_tamedCreatures;
+        bool m_ending;
 
         AVNodeInfo m_nodes[BG_AV_MAX_NODES];
 

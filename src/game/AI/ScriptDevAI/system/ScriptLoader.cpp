@@ -6,6 +6,7 @@
 
 // battlegrounds
 extern void AddSC_battleground();
+extern void AddSC_alterac_valley();
 
 // custom
 
@@ -211,6 +212,7 @@ void AddScripts()
 {
     // battlegrounds
     AddSC_battleground();
+    AddSC_alterac_valley();
 
     // custom
 

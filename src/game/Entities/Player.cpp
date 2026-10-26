@@ -48,6 +48,7 @@
 #include "Entities/Transports.h"
 #include "Weather/Weather.h"
 #include "BattleGround/BattleGround.h"
+#include "BattleGround/BattleGroundAV.h"
 #include "BattleGround/BattleGroundMgr.h"
 #include "OutdoorPvP/OutdoorPvP.h"
 #include "Chat/Chat.h"
@@ -12873,6 +12874,14 @@ void Player::RewardQuest(Quest const* pQuest, uint32 reward, Object* questGiver,
 {
     uint32 quest_id = pQuest->GetQuestId();
 
+    // Snapshot eligibility before items are consumed; CompleteQuest and gossip never contribute.
+    BattleGroundAV* avQuestBattleground = nullptr;
+    if (questGiver && questGiver->GetTypeId() == TYPEID_UNIT &&
+        static_cast<Creature*>(questGiver)->HasInvolvedQuest(quest_id))
+        if (BattleGround* bg = GetBattleGround())
+            if (bg->GetTypeId() == BATTLEGROUND_AV && CanRewardQuest(pQuest, false))
+                avQuestBattleground = static_cast<BattleGroundAV*>(bg);
+
     for (int i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
     {
         if (pQuest->ReqItemId[i])
@@ -12944,6 +12953,10 @@ void Player::RewardQuest(Quest const* pQuest, uint32 reward, Object* questGiver,
     q_status.m_rewarded = true;
     if (q_status.uState != QUEST_NEW)
         q_status.uState = QUEST_CHANGED;
+
+    // Commit exactly once after the real reward, before NPC callbacks can start another quest.
+    if (avQuestBattleground)
+        avQuestBattleground->HandleQuestRewarded(quest_id, this);
 
     if (announce)
         SendQuestReward(pQuest, xp);
