@@ -35,6 +35,7 @@ instance_scarlet_monastery::instance_scarlet_monastery(Map* pMap) : ScriptedInst
 void instance_scarlet_monastery::Initialize()
 {
     memset(&m_auiEncounter, 0, sizeof(m_auiEncounter));
+    m_defeatedBosses = 0;
 }
 
 void instance_scarlet_monastery::OnCreatureCreate(Creature* pCreature)
@@ -44,121 +45,154 @@ void instance_scarlet_monastery::OnCreatureCreate(Creature* pCreature)
         case NPC_SORCERER:
         case NPC_MYRMIDON:
         case NPC_DEFENDER:
-        case NPC_CHAPLAIN: 
+        case NPC_CHAPLAIN:
         case NPC_WIZARD:
         case NPC_CENTURION:
-        case NPC_CHAMPION: 
-        case NPC_ABBOT:    
+        case NPC_CHAMPION:
+        case NPC_ABBOT:
         case NPC_MONK:
         case NPC_FAIRBANKS:
             m_sAshbringerFriendlyGuids.insert(pCreature->GetObjectGuid());
             break;
-        case NPC_WHITEMANE:
-            m_npcEntryGuidStore[pCreature->GetEntry()] = pCreature->GetObjectGuid();
-            break;
         case NPC_MOGRAINE:
-            m_npcEntryGuidStore[pCreature->GetEntry()] = pCreature->GetObjectGuid();
             m_sAshbringerFriendlyGuids.insert(pCreature->GetObjectGuid());
-            break;
+            // fall through
+        case NPC_WHITEMANE:
         case NPC_VORREL:
             m_npcEntryGuidStore[pCreature->GetEntry()] = pCreature->GetObjectGuid();
             break;
     }
+    // Creature creation can happen after the event has already finished.
+    // Despawning Whitemane is deferred to OnCreatureRespawn, after world creation.
+    if (pCreature->GetEntry() != NPC_WHITEMANE)
+        ApplyAshbringerState(pCreature);
 }
+
 
 void instance_scarlet_monastery::OnCreatureDeath(Creature* pCreature)
 {
     if (pCreature->GetEntry() == NPC_INTERROGATOR_VISHAS)
     {
-        // Any other actions to do with Vorrel? setStandState?
         if (Creature* pVorrel = GetSingleCreatureFromStorage(NPC_VORREL))
             DoScriptText(SAY_TRIGGER_VORREL, pVorrel);
     }
+    else if (!pCreature->IsAlive() && (pCreature->GetEntry() == NPC_MOGRAINE || pCreature->GetEntry() == NPC_WHITEMANE))
+    {
+        // Only Unit::Kill reports a real death here; ForcedDespawn does not.
+        m_defeatedBosses |= pCreature->GetEntry() == NPC_MOGRAINE ? 1u : 2u;
+        if (m_defeatedBosses == 3u)
+            SetData(TYPE_MOGRAINE_AND_WHITE_EVENT, DONE);
+    }
 }
+
 
 void instance_scarlet_monastery::OnObjectCreate(GameObject* pGo)
 {
     if (pGo->GetEntry() == GO_WHITEMANE_DOOR)
+    {
         m_goEntryGuidStore[GO_WHITEMANE_DOOR] = pGo->GetObjectGuid();
+        pGo->SetGoState(GetData(TYPE_MOGRAINE_AND_WHITE_EVENT) == NOT_STARTED ? GO_STATE_READY : GO_STATE_ACTIVE);
+    }
     else if (pGo->GetEntry() == GO_CHAPEL_DOOR)
+    {
         m_goEntryGuidStore[GO_CHAPEL_DOOR] = pGo->GetObjectGuid();
+        if (IsAshbringerActive())
+            pGo->SetGoState(GO_STATE_ACTIVE);
+    }
+}
+
+
+bool instance_scarlet_monastery::IsBossDefeated(uint32 entry) const
+{
+    const uint32 flag = entry == NPC_MOGRAINE ? 1u : (entry == NPC_WHITEMANE ? 2u : 0u);
+    return (m_defeatedBosses & flag) != 0;
+}
+
+bool instance_scarlet_monastery::IsAshbringerActive() const
+{
+    return GetData(TYPE_ASHBRINGER_EVENT) == IN_PROGRESS || GetData(TYPE_ASHBRINGER_EVENT) == DONE;
+}
+
+void instance_scarlet_monastery::ApplyAshbringerState(Creature* creature)
+{
+    if (!IsAshbringerActive() || !creature->IsAlive() || creature->IsInCombat())
+        return;
+    if (creature->GetEntry() == NPC_WHITEMANE)
+        creature->ForcedDespawn();
+    else if (m_sAshbringerFriendlyGuids.find(creature->GetObjectGuid()) != m_sAshbringerFriendlyGuids.end())
+        creature->setFaction(35);
 }
 
 void instance_scarlet_monastery::OnCreatureRespawn(Creature* creature)
 {
-    if (GetData(TYPE_ASHBRINGER_EVENT) == IN_PROGRESS)
-        if (creature->IsAlive() && !creature->IsInCombat() && creature->GetFaction() != 35)
-            if (m_sAshbringerFriendlyGuids.find(creature->GetObjectGuid()) != m_sAshbringerFriendlyGuids.end())
-                creature->setFaction(35);
+    ApplyAshbringerState(creature);
+}
+
+
+void instance_scarlet_monastery::UpdateDoorStates()
+{
+    DoUseOpenableObject(GO_WHITEMANE_DOOR, GetData(TYPE_MOGRAINE_AND_WHITE_EVENT) != NOT_STARTED);
+    if (IsAshbringerActive())
+        DoUseOpenableObject(GO_CHAPEL_DOOR, true);
 }
 
 void instance_scarlet_monastery::OnObjectSpawn(GameObject* go)
 {
-    if (go->GetEntry() == GO_CHAPEL_DOOR)
-        if (GetData(TYPE_ASHBRINGER_EVENT) == IN_PROGRESS)
-            DoUseDoorOrButton(GO_CHAPEL_DOOR);
+    if (go->GetEntry() == GO_WHITEMANE_DOOR || go->GetEntry() == GO_CHAPEL_DOOR)
+        UpdateDoorStates();
 }
+
 
 void instance_scarlet_monastery::SetData(uint32 uiType, uint32 uiData)
 {
     if (uiType == TYPE_MOGRAINE_AND_WHITE_EVENT)
     {
-        if (uiData == IN_PROGRESS)
-            DoUseDoorOrButton(GO_WHITEMANE_DOOR);
+        // Truly killed bosses and their corpses must never be recreated by a late evade.
+        if (m_auiEncounter[0] == DONE || m_auiEncounter[0] == uiData)
+            return;
+        if (uiData == DONE && m_defeatedBosses != 3u)
+            return;
         if (uiData == FAIL)
-            {
-                Creature* pWhitemane = GetSingleCreatureFromStorage(NPC_WHITEMANE);
-                if(!pWhitemane)
-                    return;
-                Creature* pMograine = GetSingleCreatureFromStorage(NPC_MOGRAINE);
-                if(!pMograine)
-                    return;
-                if(pWhitemane->IsAlive() && pMograine->IsAlive())
-                {
-                    pWhitemane->SetRespawnDelay(30, true);
-                    pWhitemane->ForcedDespawn();
-                    pMograine->SetRespawnDelay(30, true);
-                    pMograine->ForcedDespawn();
-                    DoUseDoorOrButton(GO_WHITEMANE_DOOR);
-                    m_auiEncounter[0] = NOT_STARTED;
-                    return;
-                }
-                if(!pMograine->IsAlive() && pWhitemane->IsAlive())
-                {
-                    pWhitemane->SetRespawnDelay(30, true);
-                    pWhitemane->ForcedDespawn();
-                    DoUseDoorOrButton(GO_WHITEMANE_DOOR);
-                    m_auiEncounter[0] = uiData;
-                    return;
-                }
-                if(!pWhitemane->IsAlive() && pMograine->IsAlive())
-                {
-                    pMograine->ForcedDespawn();
-                    m_auiEncounter[0] = uiData;
-                    return;
-                }
-            }
-
+        {
+            if (m_auiEncounter[0] == NOT_STARTED)
+                return;
+            Creature* whitemane = GetSingleCreatureFromStorage(NPC_WHITEMANE, true);
+            Creature* mograine = GetSingleCreatureFromStorage(NPC_MOGRAINE, true);
+            const bool whiteDead = IsBossDefeated(NPC_WHITEMANE);
+            const bool mograineDead = IsBossDefeated(NPC_MOGRAINE);
+            // Commit before ForcedDespawn callbacks can request another reset.
+            m_auiEncounter[0] = whiteDead && mograineDead ? DONE :
+                (whiteDead || mograineDead ? FAIL : NOT_STARTED);
+            UpdateDoorStates();
+            if (m_auiEncounter[0] != DONE)
+                for (Creature* boss : {whitemane, mograine})
+                    if (boss && boss->IsAlive() && !IsBossDefeated(boss->GetEntry()))
+                    {
+                        boss->SetRespawnDelay(30, true);
+                        boss->ForcedDespawn();
+                    }
+            return;
+        }
         m_auiEncounter[0] = uiData;
+        UpdateDoorStates();
     }
     else if (uiType == TYPE_ASHBRINGER_EVENT)
     {
-        if (uiData == IN_PROGRESS)
-        {
-            DoUseDoorOrButton(GO_CHAPEL_DOOR);
-
-            Creature* whitemane = GetSingleCreatureFromStorage(NPC_WHITEMANE, true);
-            if (whitemane && whitemane->IsAlive() && !whitemane->IsInCombat())
-                whitemane->ForcedDespawn();
-
-            for (auto scarletCathedralNpcGuid : m_sAshbringerFriendlyGuids)
-                if (Creature* scarletNpc = instance->GetCreature(scarletCathedralNpcGuid))
-                    if (scarletNpc->IsAlive() && !scarletNpc->IsInCombat())
-                        scarletNpc->setFaction(35);
-        }
+        if (m_auiEncounter[1] == DONE || m_auiEncounter[1] == uiData)
+            return;
         m_auiEncounter[1] = uiData;
+        if (IsAshbringerActive())
+        {
+            UpdateDoorStates();
+            if (Creature* whitemane = GetSingleCreatureFromStorage(NPC_WHITEMANE, true))
+                ApplyAshbringerState(whitemane);
+            for (ObjectGuid guid : m_sAshbringerFriendlyGuids)
+                if (Creature* creature = instance->GetCreature(guid))
+                    ApplyAshbringerState(creature);
+        }
     }
 }
+
 
 uint32 instance_scarlet_monastery::GetData(uint32 uiData) const
 {
@@ -191,7 +225,7 @@ bool instance_scarlet_monastery::DoHandleAreaTrigger(AreaTriggerEntry const* are
 
 bool AreaTrigger_at_cathedral_entrance(Player* player, AreaTriggerEntry const* areaTrigger)
 {
-    if (player->IsGameMaster() || !player->IsAlive() || !player->HasItemCount(ITEM_CORRUPTED_ASHRBRINGER, 1))
+    if (player->IsGameMaster() || !player->IsAlive() || !player->HasAura(SPELL_CORRUPTED_ASHBRINGER_AURA))
         return false;
 
     if (auto* instance = (instance_scarlet_monastery*)player->GetInstanceData())

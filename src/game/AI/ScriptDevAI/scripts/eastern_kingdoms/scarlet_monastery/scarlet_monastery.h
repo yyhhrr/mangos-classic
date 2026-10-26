@@ -23,6 +23,7 @@ enum
     SAY_TRIGGER_VORREL              = -1189015,
 
     ITEM_CORRUPTED_ASHRBRINGER      = 22691,
+    SPELL_CORRUPTED_ASHBRINGER_AURA = 28282,
     SAY_ASHBRINGER_ENTRANCE         = -1189036,
     AREATRIGGER_CATHEDRAL_ENTRANCE  = 4089, // used to trigger Corrupted Ashbringer event
     // these npcs are tracked for purposes of turning them friendly during the Corrupted Ashbringer event
@@ -55,10 +56,16 @@ class instance_scarlet_monastery : public ScriptedInstance
         uint32 GetData(uint32 uiData) const override;
 
         bool DoHandleAreaTrigger(AreaTriggerEntry const* areaTrigger);
+        bool IsBossDefeated(uint32 entry) const;
 
     private:
+        bool IsAshbringerActive() const;
+        void ApplyAshbringerState(Creature* creature);
+        void UpdateDoorStates();
+
         GuidSet m_sAshbringerFriendlyGuids;
         uint32 m_auiEncounter[MAX_ENCOUNTER];
+        uint32 m_defeatedBosses;
 };
 
 #endif
