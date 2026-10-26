@@ -16,18 +16,17 @@
 
 /* ScriptData
 SDName: instance_razorfen_downs
-SD%Complete: 90%
-SDComment: Spawns coords can be improved
+SD%Complete: 100
 SDCategory: Razorfen Downs
-EndScriptData
-
-*/
+EndScriptData */
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "razorfen_downs.h"
+#include <ctime>
+#include <sstream>
+#include <vector>
 
-instance_razorfen_downs::instance_razorfen_downs(Map* pMap) : ScriptedInstance(pMap),
-    m_uiWaveCounter(0)
+instance_razorfen_downs::instance_razorfen_downs(Map* pMap) : ScriptedInstance(pMap)
 {
     Initialize();
 }
@@ -35,174 +34,333 @@ instance_razorfen_downs::instance_razorfen_downs(Map* pMap) : ScriptedInstance(p
 void instance_razorfen_downs::Initialize()
 {
     memset(&m_auiEncounter, 0, sizeof(m_auiEncounter));
+    m_uiWaveCounter = 0;
+    m_activeWaveIndex = 0;
+    m_retryWaveMembers = 0;
+    m_creatingWave = m_cleaningWave = m_pendingWaveReset = m_gongBossKilled = false;
+    m_idolCompletedAt = 0;
+    m_worldStateTimer = 1000;
+    m_activeWaveGuids.clear();
+    m_idolFireGuids.clear();
 }
 
-void instance_razorfen_downs::OnCreatureCreate(Creature* pCreature)
+void instance_razorfen_downs::OnCreatureCreate(Creature* /*creature*/)
 {
-    switch (pCreature->GetEntry())
+    // Wave ownership is committed by DoSpawnWaveIfCan, never inferred from entry.
+}
+
+void instance_razorfen_downs::OnObjectCreate(GameObject* go)
+{
+    switch (go->GetEntry())
     {
-        case NPC_TOMB_FIEND:
-        case NPC_TOMB_REAVER:
-            m_lSpawnedMobsList.push_back(pCreature->GetObjectGuid());
-    }
-}
-
-void instance_razorfen_downs::OnObjectCreate(GameObject* pGo)
-{
-    if (pGo->GetEntry() == GO_GONG)
-        m_goEntryGuidStore[GO_GONG] = pGo->GetObjectGuid();
-}
-
-void instance_razorfen_downs::SetData(uint32 uiType, uint32 uiData)
-{
-    switch (uiType)
-    {
-        case TYPE_TUTEN_KASH:
-            m_auiEncounter[uiType] = uiData;
-            if (uiData == IN_PROGRESS)
-                ++m_uiWaveCounter;
+        case GO_GONG:
+            m_goEntryGuidStore[GO_GONG] = go->GetObjectGuid();
+            SyncGong(go);
+            break;
+        case GO_IDOL_BRAZIER:
+            m_goEntryGuidStore[GO_IDOL_BRAZIER] = go->GetObjectGuid();
+            break; // Negative spawn metadata is loaded after this callback.
+        case GO_IDOL_FIRE_OVEN:
+        case GO_IDOL_FIRE_CUP:
+        case GO_IDOL_FIRE_MOUTH:
+            m_idolFireGuids.insert(go->GetObjectGuid());
             break;
     }
+}
 
-    if (uiData == DONE)
+void instance_razorfen_downs::OnObjectSpawn(GameObject* go)
+{
+    if (go->GetEntry() == GO_GONG)
+        SyncGong(go);
+    else
+        ApplyIdolState(go);
+}
+
+void instance_razorfen_downs::SaveState()
+{
+    // The first field preserves compatibility with the old one-integer format.
+    std::ostringstream stream;
+    stream << m_auiEncounter[TYPE_TUTEN_KASH] << ' ' << m_auiEncounter[TYPE_IDOL_EVENT] << ' ' << m_idolCompletedAt;
+    m_strInstData = stream.str();
+    SaveToDB();
+}
+
+void instance_razorfen_downs::SetData(uint32 type, uint32 state)
+{
+    if (type >= MAX_ENCOUNTER)
+        return;
+    if (type == TYPE_IDOL_EVENT)
     {
-        OUT_SAVE_INST_DATA;
+        if (state == DONE)
+            CompleteIdolEvent();
+        return; // Starting another escort never restores extinguished fires.
+    }
+    if (m_auiEncounter[TYPE_TUTEN_KASH] == DONE)
+        return;
+    if (state == DONE)
+    {
+        if (!m_gongBossKilled)
+            return;
+        m_auiEncounter[type] = DONE;
+        m_uiWaveCounter = MAX_WAVES;
+        SyncGong();
+        SaveState();
+    }
+    else if (state == FAIL)
+        m_pendingWaveReset = !m_activeWaveGuids.empty();
+    // Wave progression is owned by the successful summon commit, not SetData.
+}
 
-        std::ostringstream saveStream;
+uint32 instance_razorfen_downs::GetData(uint32 type) const
+{
+    return type < MAX_ENCOUNTER ? m_auiEncounter[type] : 0;
+}
 
-        saveStream << m_auiEncounter[0];
+void instance_razorfen_downs::Load(const char* input)
+{
+    if (!input)
+        return;
+    uint32 gong = NOT_STARTED, idol = NOT_STARTED;
+    uint64 completed = 0;
+    std::istringstream stream(input);
+    if (!(stream >> gong))
+        return;
+    // Old saves contain only the gong encounter. Missing optional fields are safe.
+    if (stream >> idol)
+        if (!(stream >> completed))
+            completed = 0;
+    m_auiEncounter[TYPE_TUTEN_KASH] = gong == DONE ? DONE : NOT_STARTED;
+    m_auiEncounter[TYPE_IDOL_EVENT] = idol == DONE ? DONE : NOT_STARTED;
+    const uint64 now = uint64(time(nullptr));
+    m_idolCompletedAt = idol == DONE && completed <= now ? completed : 0;
+    m_uiWaveCounter = gong == DONE ? MAX_WAVES : 0;
+    m_activeWaveIndex = m_retryWaveMembers = 0;
+    m_creatingWave = m_cleaningWave = m_pendingWaveReset = m_gongBossKilled = false;
+    m_activeWaveGuids.clear();
+    SyncGong();
+    UpdateIdolObjects();
+    // Normalize old/partial saves for Save() without issuing another DB write.
+    std::ostringstream restored;
+    restored << m_auiEncounter[TYPE_TUTEN_KASH] << ' ' << m_auiEncounter[TYPE_IDOL_EVENT] << ' ' << m_idolCompletedAt;
+    m_strInstData = restored.str();
+}
 
-        m_strInstData = saveStream.str();
-        SaveToDB();
-        OUT_SAVE_INST_DATA_COMPLETE;
+void instance_razorfen_downs::SyncGong(GameObject* go)
+{
+    if (!go)
+        go = GetSingleGameObjectFromStorage(GO_GONG, true);
+    if (!go)
+        return;
+    if (m_auiEncounter[TYPE_TUTEN_KASH] == DONE || m_creatingWave || m_pendingWaveReset || !m_activeWaveGuids.empty())
+        go->SetFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
+    else
+    {
+        go->RemoveFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
+        go->Respawn(); // Existing workaround for the goober's action despawn.
     }
 }
 
-uint32 instance_razorfen_downs::GetData(uint32 uiType) const
+void instance_razorfen_downs::OnCreatureDeath(Creature* creature)
 {
-    if (uiType < MAX_ENCOUNTER)
-        return m_auiEncounter[uiType];
-
-    return 0;
+    if (m_creatingWave || m_cleaningWave || m_activeWaveGuids.erase(creature->GetObjectGuid()) == 0)
+        return;
+    // Only the real kill callback can complete the final wave.
+    if (creature->GetEntry() == NPC_TUTEN_KASH && m_activeWaveIndex == MAX_WAVES - 1)
+    {
+        m_gongBossKilled = true;
+        m_pendingWaveReset = false;
+        SetData(TYPE_TUTEN_KASH, DONE);
+    }
+    else if (m_activeWaveGuids.empty())
+    {
+        m_pendingWaveReset = false;
+        SyncGong();
+    }
 }
 
-void instance_razorfen_downs::Load(const char* chrIn)
+void instance_razorfen_downs::OnCreatureEvade(Creature* creature)
 {
-    if (!chrIn)
+    if (!m_creatingWave && !m_cleaningWave && m_activeWaveGuids.count(creature->GetObjectGuid()))
+        m_pendingWaveReset = true;
+    // Defer cleanup until the AI's evade callback has returned.
+}
+
+void instance_razorfen_downs::OnCreatureDespawn(Creature* creature)
+{
+    if (!m_creatingWave && !m_cleaningWave && m_activeWaveGuids.count(creature->GetObjectGuid()))
+        m_pendingWaveReset = true;
+    // Killed actors were removed in OnCreatureDeath; unexpected despawn is a failure.
+}
+
+void instance_razorfen_downs::AbortWave()
+{
+    if (m_cleaningWave || m_activeWaveGuids.empty() || m_auiEncounter[TYPE_TUTEN_KASH] == DONE)
     {
-        OUT_LOAD_INST_DATA_FAIL;
+        m_pendingWaveReset = false;
         return;
     }
-
-    OUT_LOAD_INST_DATA(chrIn);
-
-    std::istringstream loadStream(chrIn);
-    loadStream >> m_auiEncounter[0];
-
-    for (uint32& i : m_auiEncounter)
-    {
-        if (i == IN_PROGRESS)
-            i = NOT_STARTED;
-    }
-
-    OUT_LOAD_INST_DATA_COMPLETE;
+    m_cleaningWave = true;
+    GuidSet actors;
+    actors.swap(m_activeWaveGuids); // Despawn callbacks cannot mutate this iteration.
+    m_retryWaveMembers = uint8(actors.size()); // Do not recreate already killed, rewarded actors.
+    m_uiWaveCounter = m_activeWaveIndex;
+    m_auiEncounter[TYPE_TUTEN_KASH] = NOT_STARTED;
+    m_pendingWaveReset = false;
+    for (ObjectGuid guid : actors)
+        if (Creature* creature = instance->GetCreature(guid))
+            if (creature->IsAlive())
+                creature->ForcedDespawn();
+    m_cleaningWave = false;
+    SyncGong();
 }
 
-void instance_razorfen_downs::OnCreatureDeath(Creature* pCreature)
+void instance_razorfen_downs::DoSpawnWaveIfCan(GameObject* go)
 {
-    // Only use this function if gong event is in progress
-    if (GetData(TYPE_TUTEN_KASH) != IN_PROGRESS)
+    if (!go || go->GetEntry() != GO_GONG || go->GetMap() != instance ||
+        m_auiEncounter[TYPE_TUTEN_KASH] == DONE || m_creatingWave || m_cleaningWave ||
+        m_pendingWaveReset || !m_activeWaveGuids.empty() || m_uiWaveCounter >= MAX_WAVES)
         return;
-
-    switch (pCreature->GetEntry())
+    m_creatingWave = true;
+    const auto& wave = aWaveSummonInformation[m_uiWaveCounter];
+    const uint8 count = m_retryWaveMembers ? m_retryWaveMembers : wave.m_uiNPCperWave;
+    GuidVector created;
+    for (uint8 i = 0; i < count; ++i)
     {
-        case NPC_TOMB_FIEND:
-        case NPC_TOMB_REAVER:
-            m_lSpawnedMobsList.remove(pCreature->GetObjectGuid());
-
-            // No more wave-mobs around, enable the gong for the next wave
-            if (m_lSpawnedMobsList.empty())
+        const uint8 position = i % MAX_COUNT_POS;
+        float x, y, z;
+        go->GetRandomPoint(aSpawnLocations[position].x, aSpawnLocations[position].y,
+            aSpawnLocations[position].z, 5.0f, x, y, z);
+        Creature* creature = go->SummonCreature(wave.m_uiNpcEntry, x, y, z,
+            aSpawnLocations[position].o, TEMPSPAWN_DEAD_DESPAWN, 0);
+        if (!creature)
+            break;
+        created.push_back(creature->GetObjectGuid());
+        if (!creature->IsAlive())
+            break;
+    }
+    bool ready = created.size() == count;
+    for (ObjectGuid guid : created)
+    {
+        Creature* creature = instance->GetCreature(guid);
+        if (!creature || !creature->IsAlive())
+            ready = false;
+    }
+    if (!ready)
+    {
+        // No committed wave, no progression, no repeatable reward from partial setup.
+        for (ObjectGuid guid : created)
+            if (Creature* creature = instance->GetCreature(guid))
             {
-                if (GameObject* pGo = GetSingleGameObjectFromStorage(GO_GONG))
-                {
-                    pGo->RemoveFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
-
-                    // Workaround - GO need to be respawned - requires core fix, GO shouldn't despawn in the first place
-                    pGo->Respawn();
-                }
+                creature->SetNoRewards();
+                creature->ForcedDespawn();
             }
-            break;
-        case NPC_TUTEN_KASH:
-            SetData(TYPE_TUTEN_KASH, DONE);
-            break;
+        m_creatingWave = false;
+        SyncGong(go);
+        return;
     }
+    m_activeWaveGuids.insert(created.begin(), created.end());
+    m_activeWaveIndex = m_uiWaveCounter++;
+    m_retryWaveMembers = 0;
+    m_auiEncounter[TYPE_TUTEN_KASH] = IN_PROGRESS;
+    m_creatingWave = false;
+    SyncGong(go);
+    go->SendGameObjectCustomAnim(go->GetObjectGuid());
+    for (ObjectGuid guid : created)
+        if (Creature* creature = instance->GetCreature(guid))
+        {
+            float x, y, z;
+            go->GetContactPoint(creature, x, y, z);
+            creature->SetWalk(false);
+            creature->GetMotionMaster()->MovePoint(0, x, y, z);
+        }
 }
 
-void instance_razorfen_downs::DoSpawnWaveIfCan(GameObject* pGo)
+void instance_razorfen_downs::CompleteIdolEvent()
 {
-    // safety checks
-    if (GetData(TYPE_TUTEN_KASH) == DONE)
+    m_auiEncounter[TYPE_IDOL_EVENT] = DONE;
+    m_idolCompletedAt = uint64(time(nullptr));
+    UpdateIdolObjects();
+    SaveState();
+}
+
+void instance_razorfen_downs::ApplyIdolState(GameObject* go)
+{
+    if (!go || m_auiEncounter[TYPE_IDOL_EVENT] != DONE)
         return;
-
-    if (!m_lSpawnedMobsList.empty())
-        return;
-
-    pGo->SendGameObjectCustomAnim(pGo->GetObjectGuid());
-
-    if (m_uiWaveCounter >= MAX_WAVES)
-        return;
-
-    for (uint8 i = 0; i < aWaveSummonInformation[m_uiWaveCounter].m_uiNPCperWave; ++i)
+    switch (go->GetEntry())
     {
-        uint8 uiPos = i % 2;                                        // alternate spawn between the left and right corridor
-        float fPosX, fPosY, fPosZ;
-        float fTargetPosX, fTargetPosY, fTargetPosZ;
-
-        pGo->GetRandomPoint(aSpawnLocations[uiPos].x, aSpawnLocations[uiPos].y, aSpawnLocations[uiPos].z, 5.0f, fPosX, fPosY, fPosZ);
-
-        // move the summoned NPC toward the gong
-        if (Creature* pSummoned = pGo->SummonCreature(aWaveSummonInformation[m_uiWaveCounter].m_uiNpcEntry, fPosX, fPosY, fPosZ, aSpawnLocations[uiPos].o, TEMPSPAWN_DEAD_DESPAWN, 0))
+        case GO_IDOL_FIRE_OVEN:
+        case GO_IDOL_FIRE_CUP:
+        case GO_IDOL_FIRE_MOUTH:
+            if (go->IsSpawned())
+                go->SetLootState(GO_JUST_DEACTIVATED);
+            break;
+        case GO_IDOL_BRAZIER:
         {
-            pSummoned->SetWalk(false);
-            pGo->GetContactPoint(pSummoned, fTargetPosX, fTargetPosY, fTargetPosZ);
-            pSummoned->GetMotionMaster()->MovePoint(0, fTargetPosX, fTargetPosY, fTargetPosZ);
+            const uint64 now = uint64(time(nullptr));
+            const uint64 expires = m_idolCompletedAt + HOUR;
+            if (m_idolCompletedAt && expires > now)
+            {
+                const bool wasSpawned = go->IsSpawned();
+                if (go->GetRespawnTime() != time_t(expires))
+                    go->SetRespawnTime(time_t(expires - now)); // Seconds, never milliseconds.
+                if (!wasSpawned)
+                    go->Refresh(); // May re-enter OnObjectSpawn; the timer is already installed.
+            }
+            else if (go->IsSpawned())
+                go->SetLootState(GO_JUST_DEACTIVATED);
+            break;
         }
     }
-
-    // Will increase m_uiWaveCounter, hence after the wave is summoned
-    SetData(TYPE_TUTEN_KASH, IN_PROGRESS);
-    pGo->SetFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
 }
 
-InstanceData* GetInstanceData_instance_razorfen_downs(Map* pMap)
+void instance_razorfen_downs::UpdateIdolObjects()
 {
-    return new instance_razorfen_downs(pMap);
+    if (GameObject* brazier = GetSingleGameObjectFromStorage(GO_IDOL_BRAZIER, true))
+        ApplyIdolState(brazier);
+    for (ObjectGuid guid : m_idolFireGuids)
+        if (GameObject* fire = instance->GetGameObject(guid))
+            ApplyIdolState(fire);
 }
 
-bool ProcessEventId_event_go_tutenkash_gong(uint32 /*uiEventId*/, Object* pSource, Object* pTarget, bool /*bIsStart*/)
+void instance_razorfen_downs::Update(uint32 diff)
 {
-    if (pSource->GetTypeId() == TYPEID_PLAYER && pTarget->GetTypeId() == TYPEID_GAMEOBJECT)
+    if (m_pendingWaveReset)
+        AbortWave();
+    if (m_worldStateTimer > diff)
+        m_worldStateTimer -= diff;
+    else
     {
-        instance_razorfen_downs* pInstance = (instance_razorfen_downs*)((Player*)pSource)->GetInstanceData();
-        if (!pInstance)
-            return true;
-
-        pInstance->DoSpawnWaveIfCan((GameObject*)pTarget);
-        return true;
+        m_worldStateTimer = 1000;
+        if (m_auiEncounter[TYPE_IDOL_EVENT] == DONE)
+            UpdateIdolObjects();
     }
+}
 
-    return false;
+InstanceData* GetInstanceData_instance_razorfen_downs(Map* map)
+{
+    return new instance_razorfen_downs(map);
+}
+
+bool ProcessEventId_event_go_tutenkash_gong(uint32 /*eventId*/, Object* source, Object* target, bool isStart)
+{
+    if (!source || !target || source->GetTypeId() != TYPEID_PLAYER || target->GetTypeId() != TYPEID_GAMEOBJECT)
+        return false;
+    if (!isStart)
+        return true;
+    if (auto data = dynamic_cast<instance_razorfen_downs*>(static_cast<Player*>(source)->GetInstanceData()))
+        data->DoSpawnWaveIfCan(static_cast<GameObject*>(target));
+    return true;
 }
 
 void AddSC_instance_razorfen_downs()
 {
-    Script* pNewScript = new Script;
-    pNewScript->Name = "instance_razorfen_downs";
-    pNewScript->GetInstanceData = &GetInstanceData_instance_razorfen_downs;
-    pNewScript->RegisterSelf();
-
-    pNewScript = new Script;
-    pNewScript->Name = "event_go_tutenkash_gong";
-    pNewScript->pProcessEventId = &ProcessEventId_event_go_tutenkash_gong;
-    pNewScript->RegisterSelf();
+    Script* script = new Script;
+    script->Name = "instance_razorfen_downs";
+    script->GetInstanceData = &GetInstanceData_instance_razorfen_downs;
+    script->RegisterSelf();
+    script = new Script;
+    script->Name = "event_go_tutenkash_gong";
+    script->pProcessEventId = &ProcessEventId_event_go_tutenkash_gong;
+    script->RegisterSelf();
 }

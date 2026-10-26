@@ -29,6 +29,7 @@
 #include "Chat/Chat.h"
 #include "Tools/Language.h"
 #include "Entities/TemporarySpawn.h"
+#include "Entities/GameObject.h"
 #include "Spells/Spell.h"
 #include "MotionGenerators/MovementGenerator.h"
 
@@ -1545,6 +1546,37 @@ void CreatureEventAI::JustReachedHome()
     Reset();
 }
 
+
+void CreatureEventAI::DespawnAggregatedSummons()
+{
+    if ((m_despawnAggregationMask & AGGREGATION_ONLY_ALIVE) == 0)
+    {
+        DespawnGuids(m_despawnGuids); // Preserve existing aggregation policies.
+        return;
+    }
+
+    // Detach before despawn callbacks can alter the owner's tracking vector.
+    GuidVector spawns;
+    spawns.swap(m_despawnGuids);
+    for (ObjectGuid guid : spawns)
+    {
+        if (guid.IsAnyTypeCreature())
+        {
+            if (Creature* summoned = m_creature->GetMap()->GetAnyTypeCreature(guid))
+                if (summoned->IsAlive())
+                    summoned->ForcedDespawn();
+        }
+        else if (guid.IsGameObject())
+        {
+            if (GameObject* summoned = m_creature->GetMap()->GetGameObject(guid))
+            {
+                summoned->SetLootState(GO_JUST_DEACTIVATED);
+                summoned->SetForcedDespawn();
+            }
+        }
+    }
+}
+
 void CreatureEventAI::EnterEvadeMode()
 {
     UnitAI::EnterEvadeMode();
@@ -1559,7 +1591,7 @@ void CreatureEventAI::EnterEvadeMode()
     ProcessEvents();
 
     if ((m_despawnAggregationMask & AGGREGATION_EVADE) != 0)
-        DespawnGuids(m_despawnGuids);
+        DespawnAggregatedSummons();
 }
 
 void CreatureEventAI::JustDied(Unit* killer)
@@ -1583,7 +1615,7 @@ void CreatureEventAI::JustDied(Unit* killer)
     m_Phase = 0;
 
     if ((m_despawnAggregationMask & AGGREGATION_DEATH) != 0)
-        DespawnGuids(m_despawnGuids);
+        DespawnAggregatedSummons();
 }
 
 void CreatureEventAI::KilledUnit(Unit* victim)
@@ -1652,7 +1684,7 @@ void CreatureEventAI::CorpseRemoved(uint32& respawnDelay)
     CreatureAI::CorpseRemoved(respawnDelay);
     // can happen due to forced despawn of allies
     if ((m_despawnAggregationMask & AGGREGATION_EVADE) != 0)
-        DespawnGuids(m_despawnGuids);
+        DespawnAggregatedSummons();
 }
 
 void CreatureEventAI::OnSpellCast(SpellEntry const* spellInfo, Unit* target)

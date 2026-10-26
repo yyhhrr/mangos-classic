@@ -240,6 +240,7 @@ enum DespawnAggregation : uint32
     AGGREGATION_ENABLED = 0x1,
     AGGREGATION_EVADE   = 0x2,
     AGGREGATION_DEATH   = 0x4,
+    AGGREGATION_ONLY_ALIVE = 0x8, // opt-in: keep already killed summons and their lootable corpses
 };
 
 enum ChangeMovementFlags : uint32
@@ -945,6 +946,7 @@ class CreatureEventAI : public CreatureAI
         uint32 m_throwAIEventStep;                          // Used for damage taken/ received heal
         float m_LastSpellMaxRange;                          // Maximum spell range that was cast during dynamic movement
 
+        void DespawnAggregatedSummons();
         uint32 m_despawnAggregationMask;
         std::set<uint32> m_entriesForDespawn;
         GuidVector m_despawnGuids;

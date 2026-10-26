@@ -52,7 +52,7 @@ struct npc_escortAI : public ScriptedAI
         // update current point
         void SetCurrentWaypoint(uint32 pointId);
 
-        void FailQuestForPlayerAndGroup();
+        virtual void FailQuestForPlayerAndGroup();
 
         bool AssistPlayerInCombat(Unit* who) override;
 
