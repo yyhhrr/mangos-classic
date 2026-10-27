@@ -46,7 +46,7 @@ struct boss_archaedasAI : public ScriptedAI
 {
     boss_archaedasAI(Creature* pCreature) : ScriptedAI(pCreature)
     {
-        m_pInstance = (instance_uldaman*)pCreature->GetInstanceData();
+        m_pInstance = dynamic_cast<instance_uldaman*>(pCreature->GetInstanceData());
         Reset();
     }
 
@@ -97,11 +97,20 @@ struct boss_archaedasAI : public ScriptedAI
             m_pInstance->SetData(TYPE_ARCHAEDAS, FAIL);
     }
 
+    void AbortAwakening()
+    {
+        m_pInstance->SetData(TYPE_ARCHAEDAS, FAIL);
+        EnterEvadeMode();
+        // The intro can fail before combat, when returning home is unnecessary.
+        // Restore its frozen state immediately and allow the altar to retry.
+        Reset();
+    }
+
     void UpdateAI(const uint32 uiDiff) override
     {
         // so many things are based in this script on instance data
         // so if we don't have access to it better do nothing
-        if (!m_pInstance)
+        if (!m_pInstance || !m_creature->IsAlive())
             return;
 
         // OOC Intro part triggered by Altar activation
@@ -112,7 +121,11 @@ struct boss_archaedasAI : public ScriptedAI
                 switch (m_uiSubevent)
                 {
                     case 0:
-                        DoCastSpellIfCan(m_creature, SPELL_ARCHAEDAS_AWAKEN_VISUAL);
+                        if (DoCastSpellIfCan(m_creature, SPELL_ARCHAEDAS_AWAKEN_VISUAL) != CAST_OK)
+                        {
+                            m_uiAwakeningTimer = 500;
+                            return;
+                        }
                         m_uiAwakeningTimer = 2000;
                         break;
                     case 1:
@@ -120,18 +133,32 @@ struct boss_archaedasAI : public ScriptedAI
                         m_uiAwakeningTimer = 3000;
                         break;
                     case 2:
-                        DoScriptText(SAY_AGGRO, m_creature);
+                    {
+                        // The altar starter may have died or left during the intro.
+                        Player* player = m_pInstance->SelectEventTarget(m_creature);
+                        if (!player)
+                        {
+                            AbortAwakening();
+                            return;
+                        }
+
                         m_creature->RemoveAurasDueToSpell(SPELL_FREEZE_ANIM);
                         m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE);
+                        AttackStart(player);
+                        if (!m_creature->GetVictim())
+                        {
+                            AbortAwakening();
+                            return;
+                        }
 
-                        // Attack player
-                        if (Player* pPlayer = m_creature->GetMap()->GetPlayer(m_pInstance->GetGuid(DATA_EVENT_STARTER)))
-                            AttackStart(pPlayer);
-                        else
-                            EnterEvadeMode();
+                        DoScriptText(SAY_AGGRO, m_creature);
+                        m_pInstance->SetData(TYPE_ARCHAEDAS, IN_PROGRESS);
                         break;
+                    }
                     default:
-                        break;
+                        // An incomplete attack must not leave SPECIAL spinning forever.
+                        AbortAwakening();
+                        return;
                 }
 
                 ++m_uiSubevent;
@@ -144,7 +171,7 @@ struct boss_archaedasAI : public ScriptedAI
             return;
 
         // Phase switch
-        if (m_creature->GetHealthPercent() < 100.0f - 33.4f * (float)m_uiHpPhaseCheck)
+        if (m_uiHpPhaseCheck <= 2 && m_creature->GetHealthPercent() < 100.0f - 33.4f * (float)m_uiHpPhaseCheck)
         {
             if (DoCastSpellIfCan(m_creature, m_uiHpPhaseCheck == 1 ? SPELL_AWAKEN_EARTHEN_GUARDIAN : SPELL_AWAKEN_VAULT_WARDER) == CAST_OK)
             {
@@ -187,20 +214,73 @@ UnitAI* GetAI_boss_archaedas(Creature* pCreature)
     return new boss_archaedasAI(pCreature);
 }
 
-// 10258 - Awaken Vault Warder
+namespace
+{
+// Both awakening spells and aura applications must belong to the active boss.
+// In particular an aura's removal during an encounter reset must never wake it.
+Unit* GetArchaedasAwakeningVictim(Unit* caster, Unit* target, uint32 spellId)
+{
+    if (!caster || !target || !caster->IsCreature() || !target->IsCreature() ||
+        !caster->IsInWorld() || !target->IsInWorld() || !caster->IsAlive() || !target->IsAlive() ||
+        caster->GetMap() != target->GetMap() || !target->HasAura(SPELL_STONED) || !target->AI())
+        return nullptr;
+
+    switch (spellId)
+    {
+        case SPELL_AWAKEN_EARTHEN_GUARDIAN:
+            if (target->GetEntry() != NPC_GUARDIAN)
+                return nullptr;
+            break;
+        case SPELL_AWAKEN_EARTHEN_DWARF:
+            if (target->GetEntry() != NPC_CUSTODIAN && target->GetEntry() != NPC_HALLSHAPER)
+                return nullptr;
+            break;
+        case SPELL_AWAKEN_VAULT_WARDER:
+            if (target->GetEntry() != NPC_VAULT_WARDER)
+                return nullptr;
+            break;
+        default:
+            return nullptr;
+    }
+
+    instance_uldaman* instance = dynamic_cast<instance_uldaman*>(target->GetInstanceData());
+    if (!instance || caster->GetInstanceData() != instance || instance->GetData(TYPE_ARCHAEDAS) != IN_PROGRESS)
+        return nullptr;
+
+    Creature* archaedas = instance->GetSingleCreatureFromStorage(NPC_ARCHAEDAS);
+    if (!archaedas || archaedas != caster || !archaedas->IsAlive())
+        return nullptr;
+
+    Unit* victim = archaedas->GetVictim();
+    if (victim && victim->IsInWorld() && victim->IsAlive() && !victim->IsFeigningDeath() &&
+        victim->GetMap() == archaedas->GetMap() && victim->GetInstanceData() == instance &&
+        (!victim->IsPlayer() || !static_cast<Player*>(victim)->IsGameMaster()) &&
+        archaedas->CanAttackInCombat(victim, false, false))
+        return victim;
+
+    return instance->SelectEventTarget(archaedas);
+}
+
+void AwakenArchaedasMinion(Unit* caster, Unit* target, uint32 spellId)
+{
+    if (Unit* victim = GetArchaedasAwakeningVictim(caster, target, spellId))
+    {
+        target->RemoveAurasDueToSpell(SPELL_STONED);
+        target->AI()->AttackStart(victim);
+        // A failed attack leaves this minion available for the next activation.
+        if (!target->GetVictim())
+            target->CastSpell(target, SPELL_STONED, TRIGGERED_OLD_TRIGGERED);
+    }
+}
+}
+
+// 10258 - Awaken Vault Warder (the database keeps its two-target limit)
 struct AwakenVaultWarder : public SpellScript
 {
-    void OnEffectExecute(Spell* spell, SpellEffectIndex /*effIdx*/) const override
+    void OnEffectExecute(Spell* spell, SpellEffectIndex effIdx) const override
     {
-        Unit* target = spell->GetUnitTarget();
-        target->RemoveAurasDueToSpell(SPELL_STONED);
-
-        ScriptedInstance* instance = static_cast<ScriptedInstance*>(target->GetInstanceData());
-        if (!instance)
-            return;
-
-        if (Creature* archaedas = instance->GetSingleCreatureFromStorage(NPC_ARCHAEDAS))
-            target->AI()->AttackStart(archaedas->GetVictim());
+        if (effIdx == EFFECT_INDEX_0)
+            AwakenArchaedasMinion(spell->GetCaster(), spell->GetUnitTarget(), SPELL_AWAKEN_VAULT_WARDER);
     }
 };
 
@@ -208,20 +288,12 @@ struct AwakenVaultWarder : public SpellScript
 // 10259 - Awaken Earthen Dwarf
 struct AwakenEarthenArchaedas : public AuraScript
 {
-    void OnApply(Aura* aura, bool /*apply*/) const override
+    void OnApply(Aura* aura, bool apply) const override
     {
-        if (aura->GetEffIndex() != EFFECT_INDEX_0)
+        if (!apply || aura->GetEffIndex() != EFFECT_INDEX_0)
             return;
 
-        Unit* target = aura->GetTarget();
-        target->RemoveAurasDueToSpell(SPELL_STONED);
-
-        ScriptedInstance* pInstance = static_cast<ScriptedInstance*>(target->GetInstanceData());
-        if (!pInstance)
-            return;
-
-        if (Creature* archaedas = pInstance->GetSingleCreatureFromStorage(NPC_ARCHAEDAS))
-            target->AI()->AttackStart(archaedas->GetVictim());
+        AwakenArchaedasMinion(aura->GetCaster(), aura->GetTarget(), aura->GetId());
     }
 };
 

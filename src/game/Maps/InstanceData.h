@@ -149,6 +149,11 @@ class InstanceData
         std::vector<uint32> TakeBossLootItems(uint32 gameObjectEntry);
         void ClearBossLootItems(uint32 gameObjectEntry);
 
+        // Opt-in reward chests can retain their generated contents across instance reloads.
+        // An empty snapshot means the first normal roll has not happened yet.
+        virtual bool GetGameObjectLootSnapshot(uint32 /*entry*/, std::string& /*snapshot*/) const { return false; }
+        virtual void OnGameObjectLootSnapshot(uint32 /*entry*/, std::string const& /*snapshot*/, bool /*exhausted*/) {}
+
         // Condition criteria additional requirements check
         // This is used for such things are heroic loot
         // See ObjectMgr.h enum ConditionSource for possible values of conditionSourceType

@@ -33,6 +33,8 @@
 #include "Maps/InstanceData.h"
 #include <sstream>
 #include <iomanip>
+#include <memory>
+#include <cstdint>
 
 INSTANTIATE_SINGLETON_1(LootMgr);
 
@@ -1281,6 +1283,132 @@ bool Loot::FillLoot(uint32 loot_id, LootStore const& store, Player* lootOwner, b
     return true;
 }
 
+
+// Only explicitly opted-in, non-group-rule reward chests use this format. Store
+// the actual rolled rows and claimed GUIDs, including legitimate duplicate items.
+std::string Loot::SerializeInstanceSnapshot() const
+{
+    if (!m_isChest || m_lootMethod != NOT_GROUP_TYPE_LOOT || !m_roll.empty() ||
+        m_lootItems.size() > MAX_NR_LOOT_ITEMS || m_maxSlot > MAX_NR_LOOT_ITEMS)
+        return {};
+
+    std::ostringstream stream;
+    stream << "L1 " << m_gold << ' ' << m_maxSlot << ' ' << m_lootItems.size();
+    for (LootItem const* item : m_lootItems)
+    {
+        if (!item || !item->itemProto || item->allowedGuid.size() > 40 || item->isBlocked)
+            return {};
+        uint32 flags = (item->freeForAll ? 1u : 0u) | (item->isUnderThreshold ? 2u : 0u) |
+                       (item->currentLooterPass ? 4u : 0u) | (item->isReleased ? 8u : 0u);
+        stream << ' ' << item->itemId << ' ' << uint32(item->count) << ' ' << item->randomSuffix
+               << ' ' << item->randomPropertyId << ' ' << item->lootSlot << ' ' << uint32(item->lootItemType)
+               << ' ' << uint32(item->conditionId) << ' ' << flags << ' ' << item->allowedGuid.size();
+        for (ObjectGuid guid : item->allowedGuid)
+            stream << ' ' << guid.GetRawValue();
+    }
+    std::string plain = stream.str();
+    if (plain.size() > 16384)
+        return {};
+    static char const digits[] = "0123456789abcdef";
+    std::string encoded = "IL1";
+    encoded.reserve(3 + plain.size() * 2);
+    for (unsigned char c : plain)
+    {
+        encoded += digits[c >> 4];
+        encoded += digits[c & 15];
+    }
+    return encoded;
+}
+
+bool Loot::RestoreInstanceSnapshot(std::string const& snapshot)
+{
+    if (!m_isChest || m_lootMethod != NOT_GROUP_TYPE_LOOT || !m_lootItems.empty() ||
+        !m_roll.empty() || snapshot.size() < 5 || snapshot.size() > 32771 ||
+        snapshot.compare(0, 3, "IL1") || (snapshot.size() - 3) % 2)
+        return false;
+
+    auto hex = [](char c) -> int
+    {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    };
+    std::string plain;
+    plain.reserve((snapshot.size() - 3) / 2);
+    for (size_t i = 3; i < snapshot.size(); i += 2)
+    {
+        int high = hex(snapshot[i]), low = hex(snapshot[i + 1]);
+        if (high < 0 || low < 0)
+            return false;
+        plain += char(high * 16 + low);
+    }
+    std::istringstream stream(plain);
+    std::string version;
+    uint64 gold, maxSlot, itemCount;
+    if (!(stream >> version >> gold >> maxSlot >> itemCount) || version != "L1" ||
+        gold > UINT32_MAX || maxSlot > MAX_NR_LOOT_ITEMS || itemCount > maxSlot)
+        return false;
+
+    std::vector<std::unique_ptr<LootItem>> items;
+    std::set<uint32> slots;
+    for (uint64 i = 0; i < itemCount; ++i)
+    {
+        uint64 id, count, suffix, slot, type, condition, flags, claimed;
+        int64 property;
+        if (!(stream >> id >> count >> suffix >> property >> slot >> type >> condition >> flags >> claimed) ||
+            !id || id > UINT32_MAX || !count || count > UINT8_MAX || suffix > UINT32_MAX ||
+            property < INT32_MIN || property > INT32_MAX || slot >= maxSlot ||
+            type < LOOTITEM_TYPE_NORMAL || type > LOOTITEM_TYPE_CONDITIONNAL ||
+            condition > UINT16_MAX || flags > 15 || claimed > 40 ||
+            !slots.insert(uint32(slot)).second || !ObjectMgr::GetItemPrototype(uint32(id)))
+            return false;
+
+        std::unique_ptr<LootItem> item(new LootItem(uint32(id), uint32(count), uint32(suffix), int32(property), uint32(slot)));
+        item->lootItemType = LootItemType(type);
+        item->conditionId = uint16(condition);
+        item->freeForAll = (flags & 1) != 0;
+        item->isUnderThreshold = (flags & 2) != 0;
+        item->currentLooterPass = (flags & 4) != 0;
+        item->isReleased = (flags & 8) != 0;
+        for (uint64 n = 0; n < claimed; ++n)
+        {
+            uint64 raw;
+            if (!(stream >> raw))
+                return false;
+            ObjectGuid guid(raw);
+            if (!guid.IsPlayer() || !item->allowedGuid.insert(guid).second)
+                return false;
+        }
+        items.push_back(std::move(item));
+    }
+    stream >> std::ws;
+    if (!stream.eof())
+        return false;
+
+    m_gold = uint32(gold);
+    m_maxSlot = uint32(maxSlot);
+    for (auto& item : items)
+        m_lootItems.push_back(item.release());
+    return true;
+}
+
+void Loot::PersistForInstance()
+{
+    if (!m_isChest || !m_lootTarget || !m_guidTarget.IsGameObject() ||
+        m_lootMethod != NOT_GROUP_TYPE_LOOT)
+        return;
+    GameObject* go = static_cast<GameObject*>(m_lootTarget);
+    if (go->GetGOInfo()->chest.groupLootRules)
+        return;
+    InstanceData* instance = go->GetMap()->GetInstanceData();
+    std::string previous;
+    if (!instance || !instance->GetGameObjectLootSnapshot(go->GetEntry(), previous))
+        return;
+    std::string snapshot = SerializeInstanceSnapshot();
+    if (!snapshot.empty())
+        instance->OnGameObjectLootSnapshot(go->GetEntry(), snapshot, go->GetLootState() == GO_JUST_DEACTIVATED);
+}
+
 // Get loot status for a specified player
 uint32 Loot::GetLootStatusFor(Player const* player) const
 {
@@ -1575,6 +1703,7 @@ void Loot::Release(Player* player)
                     go->SetLootState(GO_JUST_DEACTIVATED);
                     break;
             }
+            PersistForInstance();
             break;
         }
         case HIGHGUID_CORPSE:                               // ONLY remove insignia at BG
@@ -2093,12 +2222,28 @@ Loot::Loot(Player* player, GameObject* gameObject, LootType type) :
                         m_isChest = true;
 
                     SetGroupLootRight(player);
-                    std::vector<uint32> guaranteedItemIds;
-                    if (m_isChest)
-                        if (InstanceData* instance = gameObject->GetMap()->GetInstanceData())
+                    std::string snapshot;
+                    InstanceData* instance = gameObject->GetMap()->GetInstanceData();
+                    bool const persistent = m_isChest && !gameObject->GetGOInfo()->chest.groupLootRules &&
+                                            instance && instance->GetGameObjectLootSnapshot(gameObject->GetEntry(), snapshot);
+                    if (persistent && !snapshot.empty())
+                    {
+                        // A damaged/closed snapshot must never silently create another random reward.
+                        if (!RestoreInstanceSnapshot(snapshot))
+                        {
+                            sLog.outError("Cannot restore instance reward loot for gameobject %u; refusing a new roll", gameObject->GetEntry());
+                            gameObject->SetLootState(GO_JUST_DEACTIVATED);
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        std::vector<uint32> guaranteedItemIds;
+                        if (m_isChest && instance)
                             guaranteedItemIds = instance->TakeBossLootItems(gameObject->GetEntry());
-                    FillLoot(lootid, LootTemplates_Gameobject, player, false, false, guaranteedItemIds);
-                    GenerateMoneyLoot(gameObject->GetGOInfo()->MinMoneyLoot, gameObject->GetGOInfo()->MaxMoneyLoot);
+                        FillLoot(lootid, LootTemplates_Gameobject, player, false, false, guaranteedItemIds);
+                        GenerateMoneyLoot(gameObject->GetGOInfo()->MinMoneyLoot, gameObject->GetGOInfo()->MaxMoneyLoot);
+                    }
 
                     if (m_lootType == LOOT_FISHINGHOLE)
                         m_clientLootType = CLIENT_LOOT_FISHING;
@@ -2109,6 +2254,7 @@ Loot::Loot(Player* player, GameObject* gameObject, LootType type) :
             }
         }
         gameObject->SetLootState(GO_ACTIVATED);
+        PersistForInstance();
     }
     return;
 }
@@ -2361,6 +2507,8 @@ InventoryResult Loot::SendItem(Player* target, LootItem* lootItem, bool sendErro
             SendReleaseFor(target);
         ForceLootAnimationClientUpdate();
     }
+    if (playerGotItem)
+        PersistForInstance();
     return msg;
 }
 
@@ -2566,6 +2714,7 @@ void Loot::SendGold(Player* player)
         }
     }
     m_gold = 0;
+    PersistForInstance();
 
     // animation update is done in Release if needed.
     if (IsLootedFor(player))

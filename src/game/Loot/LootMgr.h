@@ -435,6 +435,9 @@ class Loot
         bool ApplyGuaranteedItems(std::vector<uint32> const& itemIds, LootTemplate const& lootTemplate, Player* lootOwner);
         void ReserveGuaranteedItems(std::vector<uint32> const& itemIds, LootTemplate const& lootTemplate, Player* lootOwner);
         void ClearGuaranteedItems();
+        std::string SerializeInstanceSnapshot() const;
+        bool RestoreInstanceSnapshot(std::string const& snapshot);
+        void PersistForInstance();
         void ForceLootAnimationClientUpdate() const;
         void SetPlayerIsLooting(Player* player);
         void SetPlayerIsNotLooting(Player* player);
