@@ -40,9 +40,21 @@ struct boss_noxxionAI : public ScriptedAI
     uint32 m_uiToxicVolleyTimer;
     uint32 m_uiUppercutTimer;
     uint32 m_uiSummonTimer;
+    GuidVector m_spawns;
+
+    void CleanupSpawns()
+    {
+        GuidVector spawns;
+        spawns.swap(m_spawns);
+        for (ObjectGuid guid : spawns)
+            if (Creature* spawn = m_creature->GetMap()->GetAnyTypeCreature(guid))
+                if (spawn->IsAlive())
+                    spawn->ForcedDespawn();
+    }
 
     void Reset() override
     {
+        CleanupSpawns();
         m_uiToxicVolleyTimer   = 7000;
         m_uiUppercutTimer      = 16000;
         m_uiSummonTimer         = 19000;
@@ -50,8 +62,27 @@ struct boss_noxxionAI : public ScriptedAI
 
     void JustSummoned(Creature* pSummoned) override
     {
+        if (pSummoned->GetEntry() == 13456)
+            m_spawns.push_back(pSummoned->GetObjectGuid());
         if (Unit* pTarget = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0))
             pSummoned->AI()->AttackStart(pTarget);
+    }
+
+    void EnterEvadeMode() override
+    {
+        CleanupSpawns();
+        ScriptedAI::EnterEvadeMode();
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        CleanupSpawns();
+        ScriptedAI::JustDied(killer);
+    }
+
+    void SummonedCreatureDespawn(Creature* summon) override
+    {
+        m_spawns.erase(std::remove(m_spawns.begin(), m_spawns.end(), summon->GetObjectGuid()), m_spawns.end());
     }
 
     void UpdateAI(const uint32 diff) override
