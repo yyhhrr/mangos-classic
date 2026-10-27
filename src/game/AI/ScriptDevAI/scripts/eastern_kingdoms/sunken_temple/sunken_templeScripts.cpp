@@ -43,17 +43,17 @@ enum
 
 bool AreaTrigger_at_shade_of_eranikus(Player* pPlayer, AreaTriggerEntry const* /*pAt*/)
 {
-    if (ScriptedInstance* pInstance = (ScriptedInstance*)pPlayer->GetInstanceData())
+    if (instance_sunken_temple* pInstance = (instance_sunken_temple*)pPlayer->GetInstanceData())
     {
         // Only do stuff, if the player has finished the PreQuest
         if (pPlayer->GetQuestRewardStatus(QUEST_THE_CHARGE_OF_DRAGONFLIGHTS) &&
                 !pPlayer->GetQuestRewardStatus(QUEST_ERANIKUS_TYRANT_OF_DREAMS) &&
                 pPlayer->GetQuestStatus(QUEST_ERANIKUS_TYRANT_OF_DREAMS) != QUEST_STATUS_COMPLETE)
         {
-            if (pInstance->GetData(TYPE_MALFURION) != IN_PROGRESS)
+            if (!pInstance->HasMalfurion())
             {
-                pPlayer->SummonCreature(NPC_MALFURION, aSunkenTempleLocation[2].m_fX, aSunkenTempleLocation[2].m_fY, aSunkenTempleLocation[2].m_fZ, aSunkenTempleLocation[2].m_fO, TEMPSPAWN_DEAD_DESPAWN, 0);
-                pInstance->SetData(TYPE_MALFURION, IN_PROGRESS);
+                if (pPlayer->SummonCreature(NPC_MALFURION, aSunkenTempleLocation[2].m_fX, aSunkenTempleLocation[2].m_fY, aSunkenTempleLocation[2].m_fZ, aSunkenTempleLocation[2].m_fO, TEMPSPAWN_DEAD_DESPAWN, 0))
+                    pInstance->SetData(TYPE_MALFURION, IN_PROGRESS);
             }
         }
     }
@@ -218,36 +218,35 @@ bool GOUse_go_eternal_flame(Player* /*pPlayer*/, GameObject* pGo)
     if (!pInstance)
         return false;
 
-    if (pInstance->GetData(TYPE_AVATAR) != IN_PROGRESS)
-        return false;
-
-    // Set data to special when flame is used
-    pInstance->SetData(TYPE_AVATAR, SPECIAL);
-    pGo->SetFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
-
-    return true;
+    return pInstance->DouseFlame(pGo);
 }
 
 struct SummonHakkar : public SpellScript
 {
     void OnEffectExecute(Spell* spell, SpellEffectIndex effIdx) const override
     {
-        if (effIdx == EFFECT_INDEX_0)
-        {
-            if (Unit* caster = spell->GetCaster())
-            {
-                // Update entry to Avatar of Hakkar
-                if (caster->GetTypeId() != TYPEID_UNIT)
-                    return;
-                ((Creature*)caster)->UpdateEntry(NPC_AVATAR_OF_HAKKAR);
-                ((Creature*)caster)->AIM_Initialize();
-                DoScriptText(SAY_AVATAR_SPAWN, caster);
-            }
+        if (effIdx != EFFECT_INDEX_0)
             return;
-        }
+        Unit* caster = spell->GetCaster();
+        if (!caster || caster->GetTypeId() != TYPEID_UNIT || caster->GetMapId() != 109)
+            return;
+        if (instance_sunken_temple* instance = (instance_sunken_temple*)caster->GetInstanceData())
+            instance->SummonAvatar((Creature*)caster);
     }
 };
 
+struct HakkarSuppression : public AuraScript
+{
+    void OnApply(Aura* aura, bool apply) const override
+    {
+        Unit* target = aura->GetTarget();
+        if (target->GetTypeId() != TYPEID_UNIT || target->GetMapId() != 109)
+            return;
+        if (instance_sunken_temple* instance = (instance_sunken_temple*)target->GetInstanceData())
+            instance->SuppressionChanged((Creature*)target, aura->GetCasterGuid(), apply,
+                !apply && aura->GetRemoveMode() == AURA_REMOVE_BY_STACK);
+    }
+};
 struct HakkarSummoned : public SpellScript
 {
     void OnEffectExecute(Spell* spell, SpellEffectIndex effIdx) const override
@@ -312,6 +311,7 @@ void AddSC_sunken_temple()
     pNewScript->RegisterSelf();
 
     RegisterSpellScript<SummonHakkar>("spell_summon_hakkar");
+    RegisterSpellScript<HakkarSuppression>("spell_hakkar_suppression");
     RegisterSpellScript<HakkarSummoned>("spell_hakkar_summoned");
     RegisterSpellScript<HexOfJammalanAura>("spell_hex_of_jammalan");
 }

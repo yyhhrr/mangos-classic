@@ -95,6 +95,7 @@ class instance_uldaman : public ScriptedInstance
         bool m_resettingKeepers;
         bool m_pendingKeeperReset;
         bool m_annoraUnlocked;
+        bool m_restoreAnnoraKills;
         std::set<uint32> m_annoraScorpionDbGuids;
         std::set<uint32> m_annoraDeadScorpionDbGuids;
         ObjectGuid m_ironayaGuid;

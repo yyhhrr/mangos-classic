@@ -117,42 +117,81 @@ class instance_sunken_temple : public ScriptedInstance
         ~instance_sunken_temple() {}
 
         void Initialize() override;
+        void OnPlayerEnter(Player* player) override;
+        void OnObjectCreate(GameObject* go) override;
+        void OnCreatureCreate(Creature* creature) override;
+        void OnCreatureEvade(Creature* creature) override;
+        void OnCreatureDeath(Creature* creature) override;
+        void OnCreatureDespawn(Creature* creature) override;
+        void SetData(uint32 type, uint32 data) override;
+        uint32 GetData(uint32 type) const override;
+        void Update(uint32 diff) override;
 
-        void OnObjectCreate(GameObject* pGo) override;
-        void OnCreatureCreate(Creature* pCreature) override;
-
-        void OnCreatureEvade(Creature* pCreature) override;
-        void OnCreatureDeath(Creature* pCreature) override;
-
-        void SetData(uint32 uiType, uint32 uiData) override;
-        uint32 GetData(uint32 uiType) const override;
-
-        void Update(const uint32 diff) override;
-
-        bool ProcessStatueEvent(uint32 uiEventId);
+        bool ProcessStatueEvent(uint32 eventId);
+        bool DouseFlame(GameObject* flame);
+        void SuppressionChanged(Creature* shade, ObjectGuid casterGuid, bool apply, bool replacement = false);
+        bool SummonAvatar(Creature* shade);
+        bool HasMalfurion() const;
 
         const char* Save() const override { return m_strInstData.c_str(); }
-        void Load(const char* chrIn) override;
+        void Load(const char* data) override;
 
     protected:
-        void DoSpawnAtalarionIfCan();
-        void DoUpdateFlamesFlags(bool bRestore);
+        void SaveProgress();
+        void UpdateDoors();
+        void RestoreProgress();
+        bool SpawnAtalarion();
+        bool SpawnDragons();
+        void RestoreIdol();
+        bool StartAvatarEvent();
+        void EndAvatarEvent(uint32 state);
+        void ClearHakkarSummons();
+        bool IsCurrentHakkarMember(Creature* creature) const;
+        Creature* SummonHakkarMob(uint32 entry, GameObject* circle);
+        GameObject* GetRandomCircle() const;
+        bool RetryHakkarSummon(uint32& timer, uint8& retries);
+        void UpdateFlames();
+        void HideCircles();
 
         uint32 m_auiEncounter[MAX_ENCOUNTER];
         std::string m_strInstData;
-
-        uint8 m_uiProtectorsRemaining;                      // Jammalan door handling
-        uint8 m_uiStatueCounter;                            // Atalarion Statue Event
-        uint8 m_uiFlameCounter;                             // Avatar of Hakkar Event
+        uint8 m_uiStatueCounter;
+        uint8 m_uiProtectorsRemaining;
+        uint8 m_uiFlameCounter;
         uint32 m_uiAvatarSummonTimer;
         uint32 m_uiSupressorTimer;
         uint32 m_suppressionTimer;
+        uint32 m_startRetryTimer;
+        uint32 m_transformRetryTimer;
+        uint32 m_restoreTimer;
+        uint32 m_saveTimer;
+        uint8 m_startRetries;
+        uint8 m_waveRetries;
+        uint8 m_suppressorRetries;
+        uint8 m_transformRetries;
+        uint8 m_restoreRetries;
         bool m_bIsFirstHakkarWave;
         bool m_bCanSummonBloodkeeper;
-
-        GuidList m_luiFlameGUIDs;
-        GuidList m_luiBigLightGUIDs;
-        GuidVector m_evilCircleGuidList;
+        bool m_firstWaveInitialized;
+        bool m_firstBloodkeeperSummoned;
+        bool m_avatarSummoned;
+        time_t m_idolExpires;
+        // 0: available, 1: killed, 2: legacy unknown (never recreate loot), 3: expired.
+        uint32 m_dragonState[2];
+        time_t m_dragonExpires[2];
+        ObjectGuid m_hakkarGuid;
+        ObjectGuid m_malfurionGuid;
+        ObjectGuid m_dragonGuid[2];
+        GuidSet m_hakkarSummons;
+        GuidSet m_suppressingGuids;
+        GuidSet m_dousedFlames;
+        GuidSet m_firstWavePending;
+        GuidSet m_luiFlameGUIDs;
+        GuidSet m_luiBigLightGUIDs;
+        GuidSet m_evilCircleGuidList;
+        GuidSet m_protectorGuids;
+        GuidSet m_deadProtectorGuids;
+        std::vector<std::pair<uint32, ObjectGuid>> m_waveRequests;
 };
 
 #endif

@@ -26,6 +26,7 @@ void instance_uldaman::Initialize()
     m_uiKeeperCooldown = 0;
     m_resettingKeepers = m_pendingKeeperReset = false;
     m_annoraUnlocked = false;
+    m_restoreAnnoraKills = true;
     m_annoraScorpionDbGuids.clear();
     m_annoraDeadScorpionDbGuids.clear();
     if (auto groups = sObjectMgr.GetSpawnGroupContainer())
@@ -35,7 +36,6 @@ void instance_uldaman::Initialize()
             for (auto const& member : found->second.DbGuids)
                 m_annoraScorpionDbGuids.insert(member.DbGuid);
     }
-    RestoreAnnoraKills();
     m_ironayaGuid.Clear();
     m_ironayaStage = m_ironayaSummonFailures = 0;
     m_ironayaTimer = 0;
@@ -179,7 +179,8 @@ void instance_uldaman::OnCreatureGroupDespawn(CreatureGroup* group, Creature* cr
 
 void instance_uldaman::CheckAnnoraUnlock()
 {
-    if (m_annoraUnlocked || m_annoraScorpionDbGuids.empty())
+    RestoreAnnoraKills();
+    if (m_restoreAnnoraKills || m_annoraUnlocked || m_annoraScorpionDbGuids.empty())
         return;
     const time_t now = time(nullptr);
     for (uint32 guid : m_annoraScorpionDbGuids)
@@ -201,11 +202,23 @@ void instance_uldaman::CheckAnnoraUnlock()
 
 void instance_uldaman::RestoreAnnoraKills()
 {
-    // Reconstruct once when loading a map, not from ordinary runtime despawns.
-    m_annoraDeadScorpionDbGuids.clear();
+    if (!m_restoreAnnoraKills)
+        return;
+    // Map constructs and loads its script before creating the persistent state.
+    auto persistentState = instance->GetPersistentState();
+    if (!persistentState)
+        return;
+    const time_t now = time(nullptr);
+    // Merge once: death callbacks can precede the first update and respawn save.
     for (uint32 guid : m_annoraScorpionDbGuids)
-        if (instance->GetPersistentState()->GetCreatureRespawnTime(guid) > time(nullptr))
+    {
+        Creature* scorpid = instance->GetCreature(guid);
+        if (scorpid && scorpid->IsAlive())
+            m_annoraDeadScorpionDbGuids.erase(guid);
+        else if (persistentState->GetCreatureRespawnTime(guid) > now)
             m_annoraDeadScorpionDbGuids.insert(guid);
+    }
+    m_restoreAnnoraKills = false;
 }
 
 void instance_uldaman::BuildSaveData()
@@ -272,8 +285,9 @@ void instance_uldaman::SetData(uint32 type, uint32 state)
 
 void instance_uldaman::Load(const char* input)
 {
-    // Old instances with no completed boss can have an empty save string.
-    RestoreAnnoraKills();
+    // Load also runs before Map creates its persistent state, even for old saves.
+    m_annoraDeadScorpionDbGuids.clear();
+    m_restoreAnnoraKills = true;
     if (!input)
         return;
     uint32 altar = NOT_STARTED, boss = NOT_STARTED;
@@ -580,6 +594,7 @@ void instance_uldaman::OnCreatureDespawn(Creature* creature)
 
 void instance_uldaman::Update(uint32 diff)
 {
+    RestoreAnnoraKills();
     if (m_pendingKeeperReset)
         SetData(TYPE_ALTAR_EVENT, NOT_STARTED);
     UpdateIronaya(diff);
