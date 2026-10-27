@@ -37,7 +37,7 @@ enum
     SPELL_SHADOW_BOLT_VOLLEY    = 15245,
     SPELL_WARD_OF_ZUMRAH        = 11086,
     SPELL_HEALING_WAVE          = 12491,
-    SPELL_SUMMON_ZOMBIES        = 10247,            // spell should be triggered by missing trap 128972
+    SPELL_SUMMON_ZOMBIES        = 10247,            // same two summons as the linked shallow-grave trap
 
     // NPC_WARD_OF_ZUMRAH       = 7785,
     // NPC_SKELETON_OF_ZUMRAH   = 7786,
@@ -51,7 +51,7 @@ struct boss_zumrahAI : public ScriptedAI
 {
     boss_zumrahAI(Creature* pCreature) : ScriptedAI(pCreature)
     {
-        m_pInstance = (instance_zulfarrak*) pCreature->GetInstanceData();
+        m_pInstance = dynamic_cast<instance_zulfarrak*>(pCreature->GetInstanceData());
         m_bHasTurnedHostile = false;
         Reset();
     }
@@ -65,6 +65,9 @@ struct boss_zumrahAI : public ScriptedAI
     uint32 m_uiSpawnZombieTimer;
 
     bool m_bHasTurnedHostile;
+    bool m_bSummoningFromGrave;
+    uint8 m_uiGraveSummonMask;
+    GuidSet m_pendingGraveSummons;
 
     void Reset() override
     {
@@ -73,8 +76,48 @@ struct boss_zumrahAI : public ScriptedAI
         m_uiWardOfZumrahTimer       = urand(7000, 20000);
         m_uHealingWaveTimer         = urand(10000, 15000);
         m_uiSpawnZombieTimer        = 1000;
+        m_bSummoningFromGrave        = false;
+        m_uiGraveSummonMask          = 0;
+        m_pendingGraveSummons.clear();
 
+        // A normal combat reset must not repeat the first proximity introduction.
         m_attackDistance = 10.0f;
+    }
+
+    bool DespawnIfEncounterComplete()
+    {
+        if (!m_pInstance || m_pInstance->GetData(TYPE_ZUMRAH) != DONE)
+            return false;
+        // A late living spawn must not recreate a defeated boss. Keep the real
+        // death corpse and its normal loot until ordinary corpse removal.
+        if (m_creature->IsAlive())
+            m_creature->ForcedDespawn();
+        return true;
+    }
+
+    void JustRespawned() override
+    {
+        ScriptedAI::JustRespawned();
+        DespawnIfEncounterComplete();
+    }
+
+    bool IsValidVictim(Unit* target) const
+    {
+        if (!target || !target->IsInWorld() || !target->IsAlive() || target->IsFeigningDeath() ||
+            target->GetMap() != m_creature->GetMap() || target->GetInstanceData() != m_pInstance)
+            return false;
+
+        const uint32 invalidFlags = UNIT_FLAG_NOT_ATTACKABLE_1 | UNIT_FLAG_UNTARGETABLE |
+            UNIT_FLAG_TAXI_FLIGHT | UNIT_FLAG_UNINTERACTIBLE | UNIT_FLAG_SPAWNING | UNIT_FLAG_IMMUNE_TO_NPC;
+        if (target->HasFlag(UNIT_FIELD_FLAGS, invalidFlags))
+            return false;
+        if (target->IsPlayer())
+        {
+            Player* player = static_cast<Player*>(target);
+            if (player->IsGameMaster() || player->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
+                return false;
+        }
+        return true;
     }
 
     void Aggro(Unit* /*pWho*/) override
@@ -89,7 +132,10 @@ struct boss_zumrahAI : public ScriptedAI
 
     void MoveInLineOfSight(Unit* pWho) override
     {
-        if (!m_bHasTurnedHostile && pWho->GetTypeId() == TYPEID_PLAYER && m_creature->IsWithinDistInMap(pWho, 9.0f) && m_creature->IsWithinLOSInMap(pWho))
+        if (!m_pInstance || !m_creature->IsAlive() || DespawnIfEncounterComplete() || !IsValidVictim(pWho))
+            return;
+
+        if (!m_bHasTurnedHostile && pWho->IsPlayer() && m_creature->IsWithinDistInMap(pWho, 9.0f) && m_creature->IsWithinLOSInMap(pWho))
         {
             m_creature->SetFactionTemporary(FACTION_HOSTILE, TEMPFACTION_TOGGLE_IMMUNE_TO_PLAYER);
             DoScriptText(SAY_INTRO, m_creature);
@@ -102,8 +148,53 @@ struct boss_zumrahAI : public ScriptedAI
 
     void JustSummoned(Creature* pSummoned) override
     {
-        if (pSummoned->GetEntry() == NPC_ZULFARRAK_ZOMBIE || pSummoned->GetEntry() == NPC_ZULFARRAK_DEAD_HERO)
-            pSummoned->AI()->AttackStart(m_creature->GetVictim());
+        if (!m_pInstance || !pSummoned || !pSummoned->IsAlive() || !pSummoned->IsInWorld() ||
+            pSummoned->GetMap() != m_creature->GetMap() || pSummoned->GetInstanceData() != m_pInstance)
+            return;
+        if (pSummoned->GetEntry() != NPC_ZULFARRAK_ZOMBIE && pSummoned->GetEntry() != NPC_ZULFARRAK_DEAD_HERO)
+            return;
+
+        if (m_bSummoningFromGrave && m_pendingGraveSummons.insert(pSummoned->GetObjectGuid()).second)
+            m_uiGraveSummonMask |= pSummoned->GetEntry() == NPC_ZULFARRAK_ZOMBIE ? 1 : 2;
+
+        Unit* victim = m_creature->GetVictim();
+        if (m_pInstance && m_pInstance->GetData(TYPE_ZUMRAH) != DONE && IsValidVictim(victim) && pSummoned->AI())
+            pSummoned->AI()->AttackStart(victim);
+    }
+
+    bool TrySummonFromGrave(GameObject* grave)
+    {
+        if (!m_pInstance || m_bSummoningFromGrave || !m_creature->IsAlive() ||
+            m_pInstance->GetData(TYPE_ZUMRAH) != IN_PROGRESS || !IsValidVictim(m_creature->GetVictim()) || !grave ||
+            grave->GetEntry() != GO_SHALLOW_GRAVE || grave->GetMap() != m_creature->GetMap() ||
+            !grave->IsSpawned() || grave->GetLootState() != GO_READY)
+            return false;
+
+        m_pendingGraveSummons.clear();
+        m_uiGraveSummonMask = 0;
+        m_bSummoningFromGrave = true;
+        SpellCastResult result = m_creature->CastSpell(grave->GetPositionX(), grave->GetPositionY(), grave->GetPositionZ(),
+            SPELL_SUMMON_ZOMBIES, TRIGGERED_OLD_TRIGGERED, nullptr, nullptr, grave->GetObjectGuid());
+        m_bSummoningFromGrave = false;
+
+        // Both existing spell effects must succeed. A spell can report success
+        // while a missing creature template or failed allocation yields no add.
+        if (result != SPELL_CAST_OK || m_uiGraveSummonMask != 3 || m_pendingGraveSummons.size() != 2)
+        {
+            GuidSet partial;
+            partial.swap(m_pendingGraveSummons);
+            for (ObjectGuid guid : partial)
+                if (Creature* summoned = m_creature->GetMap()->GetCreature(guid))
+                {
+                    summoned->SetNoRewards();
+                    summoned->ForcedDespawn();
+                }
+            return false;
+        }
+
+        m_pendingGraveSummons.clear();
+        grave->SetLootState(GO_JUST_DEACTIVATED);
+        return true;
     }
 
     GameObject* SelectNearbyShallowGrave()
@@ -135,7 +226,8 @@ struct boss_zumrahAI : public ScriptedAI
 
     void UpdateAI(const uint32 uiDiff) override
     {
-        if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
+        if (!m_pInstance || !m_creature->IsAlive() || DespawnIfEncounterComplete() ||
+            !m_creature->SelectHostileTarget() || !IsValidVictim(m_creature->GetVictim()))
             return;
 
         if (m_uiSpawnZombieTimer)
@@ -145,16 +237,19 @@ struct boss_zumrahAI : public ScriptedAI
                 // Use a nearby grave to spawn zombies
                 if (GameObject* pGrave = SelectNearbyShallowGrave())
                 {
-                    m_creature->CastSpell(pGrave->GetPositionX(), pGrave->GetPositionY(), pGrave->GetPositionZ(), SPELL_SUMMON_ZOMBIES, TRIGGERED_OLD_TRIGGERED, nullptr, nullptr, pGrave->GetObjectGuid());
-                    pGrave->SetLootState(GO_JUST_DEACTIVATED);
+                    if (TrySummonFromGrave(pGrave))
+                    {
+                        if (roll_chance_i(30))
+                            DoScriptText(SAY_SUMMON, m_creature);
 
-                    if (roll_chance_i(30))
-                        DoScriptText(SAY_SUMMON, m_creature);
-
-                    m_uiSpawnZombieTimer = 20000;
+                        m_uiSpawnZombieTimer = 20000;
+                    }
+                    else
+                        m_uiSpawnZombieTimer = 1000;
                 }
-                else                                        // No Grave usable any more
-                    m_uiSpawnZombieTimer = 0;
+                else
+                    // Graves may be temporarily unloaded or in use by a player.
+                    m_uiSpawnZombieTimer = 1000;
             }
             else
                 m_uiSpawnZombieTimer -= uiDiff;

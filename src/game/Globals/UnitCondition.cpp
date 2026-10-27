@@ -24,6 +24,7 @@
 #include "MotionGenerators/MovementGenerator.h"
 #include "Spells/SpellAuras.h"
 #include "Spells/SpellMgr.h"
+#include "Spells/SpellStacking.h"
 #include <cstring>
 #include "Util/ProgressBar.h"
 #include "Log/Log.h"
@@ -99,6 +100,67 @@ bool HasSameOrStrongerHelpfulPeriodicHeal(Unit const* recipient, Unit const* cas
     }
     return false;
 }
+
+// Opt-in protection checks.  Matching an aura type alone is not enough:
+// independently stackable shields and armor buffs must remain valid targets.
+bool HasSameOrStrongerHelpfulProtection(Unit const* recipient, Unit const* caster, uint32 spellId)
+{
+    SpellEntry const* requested = sSpellTemplate.LookupEntry<SpellEntry>(spellId);
+    if (!recipient || !caster || !requested || !IsPositiveSpell(requested))
+        return false;
+
+    for (auto const& auraPair : recipient->GetSpellAuraHolderMap())
+    {
+        SpellAuraHolder const* holder = auraPair.second;
+        if (!holder || holder->IsDeleted() || !holder->IsPositive() || !holder->GetStackAmount() ||
+            (!holder->IsPermanent() && holder->GetAuraDuration() <= 0))
+            continue;
+        SpellEntry const* existing = holder->GetSpellProto();
+        if (!existing)
+            continue;
+
+        bool sameSpell = requested->Id == existing->Id;
+        bool sameChain = sSpellMgr.IsSpellAnotherRankOfSpell(requested->Id, existing->Id);
+        // SpellStacker only reads the target here.  Use the same conflict test
+        // as native aura application, without changing the global stack rules.
+        if (!sameSpell && !sameChain &&
+            sSpellStacker.IsSpellStackableWithSpell(requested, existing, const_cast<Unit*>(recipient)))
+            continue;
+
+        bool hasProtection = false;
+        bool allCovered = true;
+        for (uint32 i = 0; i < MAX_EFFECT_INDEX; ++i)
+        {
+            uint32 type = requested->EffectApplyAuraName[i];
+            int32 misc = requested->EffectMiscValue[i];
+            if (!requested->Effect[i] || !IsPositiveEffect(requested, SpellEffectIndex(i)) ||
+                (type != SPELL_AURA_SCHOOL_ABSORB && !(type == SPELL_AURA_MOD_RESISTANCE && misc == 1)))
+                continue;
+            int32 required = caster->CalculateSpellEffectValue(recipient, requested, SpellEffectIndex(i), nullptr, true, false);
+            if (required <= 0)
+                continue;
+            hasProtection = true;
+            bool covered = false;
+            for (uint32 j = 0; j < MAX_EFFECT_INDEX; ++j)
+            {
+                Aura const* aura = holder->GetAuraByEffectIndex(SpellEffectIndex(j));
+                if (!aura || !aura->IsPositive() || aura->GetModifier()->m_auraname != type ||
+                    aura->GetModifier()->m_miscvalue != misc)
+                    continue;
+                // Same active spell is never needlessly refreshed.  Other
+                // ranks/conflicts use current, possibly consumed absorb amount.
+                if (sameSpell || aura->GetAmount() / int32(holder->GetStackAmount()) >= required)
+                    covered = true;
+            }
+            if (!covered)
+                allCovered = false;
+        }
+        if (hasProtection && allCovered)
+            return true;
+    }
+    return false;
+}
+
 }
 
 std::shared_ptr<std::map<int32, UnitConditionEntry>> UnitConditionMgr::Load()
@@ -221,6 +283,8 @@ int32 UnitConditionMgr::getConditionValue(Unit const* source, Unit const* target
             }) ? value : 0;
         case UnitCondition::HAS_SAME_OR_STRONGER_HELPFUL_AURA:
             return value > 0 && HasSameOrStrongerHelpfulPeriodicHeal(source, target, uint32(value)) ? value : 0;
+        case UnitCondition::HAS_SAME_OR_STRONGER_HELPFUL_PROTECTION:
+            return value > 0 && HasSameOrStrongerHelpfulProtection(source, target, uint32(value)) ? value : 0;
         case UnitCondition::HAS_HELPFUL_AURA_DISPEL_TYPE:
             return source->HasAuraHolder([value](SpellAuraHolder* holder)
             {

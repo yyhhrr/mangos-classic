@@ -31,49 +31,110 @@ EndContentData */
 
 
 #include "zulfarrak.h"
+#include "Globals/ObjectMgr.h"
 
 /*######
 ## event_go_zulfarrak_gong
 ######*/
 
-bool ProcessEventId_event_go_zulfarrak_gong(uint32 /*uiEventId*/, Object* pSource, Object* /*pTarget*/, bool bIsStart)
+bool ProcessEventId_event_go_zulfarrak_gong(uint32 eventId, Object* source, Object* /*target*/, bool isStart)
 {
-    if (bIsStart && pSource->GetTypeId() == TYPEID_PLAYER)
+    if (!isStart || eventId != 2488 || !source || source->GetTypeId() != TYPEID_PLAYER)
+        return false;
+    Player* player = static_cast<Player*>(source);
+    if (auto data = dynamic_cast<instance_zulfarrak*>(player->GetInstanceData()))
     {
-        if (instance_zulfarrak* pInstance = (instance_zulfarrak*)((Player*)pSource)->GetInstanceData())
-        {
-            if (pInstance->GetData(TYPE_GAHZRILLA) == NOT_STARTED || pInstance->GetData(TYPE_GAHZRILLA) == FAIL)
-            {
-                pInstance->SetData(TYPE_GAHZRILLA, IN_PROGRESS);
-                return false;                               // Summon Gahz'rilla by Database Script
-            }
-            return true;
-            // Prevent DB script summoning Gahz'rilla
-        }
+        data->StartGahzrillaEvent(player);
+        return true; // No player-owned delayed database summon remains.
     }
     return false;
 }
 
-/*######
-## event_spell_unlocking
-######*/
-
-bool ProcessEventId_event_spell_unlocking(uint32 /*uiEventId*/, Object* pSource, Object* /*pTarget*/, bool bIsStart)
+bool ProcessEventId_event_spell_unlocking(uint32 eventId, Object* source, Object* /*target*/, bool isStart)
 {
-    if (bIsStart && pSource->GetTypeId() == TYPEID_PLAYER)
+    if (!isStart || eventId != 2609 || !source || source->GetTypeId() != TYPEID_PLAYER)
+        return false;
+    Player* player = static_cast<Player*>(source);
+    if (auto data = dynamic_cast<instance_zulfarrak*>(player->GetInstanceData()))
     {
-        if (instance_zulfarrak* pInstance = (instance_zulfarrak*)((Player*)pSource)->GetInstanceData())
-        {
-            if (pInstance->GetData(TYPE_PYRAMID_EVENT) == NOT_STARTED)
-            {
-                pInstance->SetData(TYPE_PYRAMID_EVENT, IN_PROGRESS);
-                return false;                               // Summon pyramid trolls by Database Script
-            }
-            return true;
-        }
+        data->StartPyramidEvent(player);
+        return true; // The instance preserves waves when the starter leaves.
     }
     return false;
 }
+
+// Default gossip preparation retains the database texts, translations and conditions.
+// Both Bly choices request the same action, and Weegli has a single door choice.
+bool GossipSelect_npc_zulfarrak_crew(Player* player, Creature* creature, uint32 sender, uint32 action)
+{
+    if (!player || !creature)
+        return true;
+    player->CLOSE_GOSSIP_MENU();
+    if (sender != 0 || action != GOSSIP_OPTION_GOSSIP || !player->IsAlive() || !player->IsInWorld() ||
+        !creature->IsAlive() || !creature->IsInWorld() || player->GetMap() != creature->GetMap() ||
+        !creature->IsWithinDistInMap(player, INTERACTION_DISTANCE))
+        return true;
+    if (auto data = dynamic_cast<instance_zulfarrak*>(creature->GetInstanceData()))
+    {
+        if (creature->GetEntry() == 7604)
+            data->StartBlyBetrayal(player);
+        else if (creature->GetEntry() == 7607)
+            data->StartDoorDemolition(player);
+    }
+    return true;
+}
+
+struct ZulFarrakDoorExplosion : public SpellScript
+{
+    void OnHit(Spell* spell, SpellMissInfo miss) const override
+    {
+        if (miss != SPELL_MISS_NONE)
+            return;
+        GameObject* door = spell->GetGOTarget();
+        WorldObject* caster = spell->GetTrueCaster();
+        if (!door || !caster || door->GetEntry() != GO_END_DOOR ||
+            door->GetGoState() != GO_STATE_ACTIVE_ALTERNATIVE || caster->GetMap() != door->GetMap())
+            return;
+        if (auto data = dynamic_cast<instance_zulfarrak*>(door->GetInstanceData()))
+            data->ConfirmDoorDestroyed(door, caster);
+    }
+};
+
+struct ZulFarrakCrewEscape : public SpellScript
+{
+    void OnHit(Spell* spell, SpellMissInfo miss) const override
+    {
+        Unit* target = spell->GetUnitTarget();
+        WorldObject* caster = spell->GetTrueCaster();
+        if (miss != SPELL_MISS_NONE || !target || !target->IsCreature() || caster != target || !target->IsAlive())
+            return;
+        if (auto data = dynamic_cast<instance_zulfarrak*>(target->GetInstanceData()))
+            data->NotifyCrewEscaped(static_cast<Creature*>(target));
+    }
+};
+
+// EventAI self buffs also run outside combat, before spell-list targeting.
+// Only these two native NPC casts opt in to the same protective target test.
+struct ZulFarrakProtection : public SpellScript
+{
+    SpellCastResult OnCheckCast(Spell* spell, bool /*strict*/) const override
+    {
+        Unit* caster = spell->GetCaster();
+        if (!caster || !caster->IsCreature() || caster->GetMapId() != 209)
+            return SPELL_CAST_OK;
+        uint32 condition = 0;
+        if (caster->GetEntry() == 7789 && spell->m_spellInfo->Id == 20798)
+            condition = 2090090;
+        else if (caster->GetEntry() == 7608 && spell->m_spellInfo->Id == 11974)
+            condition = 2090091;
+        if (!condition)
+            return SPELL_CAST_OK;
+        Unit* recipient = spell->m_targets.getUnitTarget();
+        if (!recipient)
+            recipient = caster; // Both spells support a native self cast.
+        return sObjectMgr.IsUnitConditionSatisfied(condition, recipient, caster) ? SPELL_FAILED_AURA_BOUNCED : SPELL_CAST_OK;
+    }
+};
 
 /*######
 ## at_zulfarrak
@@ -81,12 +142,14 @@ bool ProcessEventId_event_spell_unlocking(uint32 /*uiEventId*/, Object* pSource,
 
 bool AreaTrigger_at_zulfarrak(Player* pPlayer, AreaTriggerEntry const* pAt)
 {
+    if (!pPlayer || !pAt || !pPlayer->IsInWorld())
+        return false;
     if (pAt->id == AREATRIGGER_ANTUSUL)
     {
-        if (pPlayer->IsGameMaster() || pPlayer->IsDead())
+        if (pPlayer->IsGameMaster() || pPlayer->IsDead() || pPlayer->IsFeigningDeath())
             return false;
 
-        instance_zulfarrak* pInstance = (instance_zulfarrak*)pPlayer->GetInstanceData();
+        instance_zulfarrak* pInstance = dynamic_cast<instance_zulfarrak*>(pPlayer->GetInstanceData());
 
         if (!pInstance)
             return false;
@@ -95,7 +158,7 @@ bool AreaTrigger_at_zulfarrak(Player* pPlayer, AreaTriggerEntry const* pAt)
         {
             if (Creature* pAntuSul = pInstance->GetSingleCreatureFromStorage(NPC_ANTUSUL))
             {
-                if (pAntuSul->IsAlive())
+                if (pAntuSul->IsAlive() && pAntuSul->IsInWorld() && pAntuSul->GetMap() == pPlayer->GetMap() && pAntuSul->AI())
                     pAntuSul->AI()->AttackStart(pPlayer);
             }
         }
@@ -120,4 +183,13 @@ void AddSC_zulfarrak()
     pNewScript->Name = "at_zulfarrak";
     pNewScript->pAreaTrigger = &AreaTrigger_at_zulfarrak;
     pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_zulfarrak_crew";
+    pNewScript->pGossipSelect = &GossipSelect_npc_zulfarrak_crew;
+    pNewScript->RegisterSelf();
+
+    RegisterSpellScript<ZulFarrakDoorExplosion>("spell_zulfarrak_door_explosion");
+    RegisterSpellScript<ZulFarrakCrewEscape>("spell_zulfarrak_crew_escape");
+    RegisterSpellScript<ZulFarrakProtection>("spell_zulfarrak_protection");
 }

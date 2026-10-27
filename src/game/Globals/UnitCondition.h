@@ -114,6 +114,8 @@ enum class UnitCondition
     LABEL                                    = 86,
     // Value = planned HoT spell ID; source = recipient, target = caster.
     HAS_SAME_OR_STRONGER_HELPFUL_AURA         = 87,
+    // Value = planned protective spell ID; source = recipient, target = caster.
+    HAS_SAME_OR_STRONGER_HELPFUL_PROTECTION   = 88,
     MAX
 };
 

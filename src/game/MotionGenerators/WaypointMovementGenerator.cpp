@@ -589,12 +589,16 @@ bool WaypointMovementGenerator<Creature>::SetNextWaypoint(uint32 pointId)
     if (!i_path || i_path->empty())
         return false;
 
-    // point id should not be bigger than the size of the path -1
-    pointId = uint32(pointId % i_path->size());
-
+    // Database paths can start at 1 or use sparse node IDs.  Honor an exact
+    // node before falling back to the legacy wrap for an out-of-range ID.
     WaypointPath::const_iterator currPoint = i_path->find(pointId);
     if (currPoint == i_path->end())
-        return false;
+    {
+        pointId = uint32(pointId % i_path->size());
+        currPoint = i_path->find(pointId);
+        if (currPoint == i_path->end())
+            return false;
+    }
 
     // Allow Moving with next tick
     // Handle allow movement this way to not interact with PAUSED state.
