@@ -45,8 +45,14 @@ struct boss_ambassador_flamelashAI : public ScriptedAI
     ScriptedInstance* m_pInstance;
 
     uint32 m_uiSpiritTimer[MAX_DWARF_RUNES];
+    uint32 m_uiDestroyerRetryTimer;
+    uint8 m_uiDestroyerAttempts;
+    bool m_bDestroyersPending;
+    bool m_bEncounterActive;
+    bool m_abDestroyerSummoned[4];
 
     GuidSet m_sSpiritsGuidsSet;
+    GuidSet m_sDestroyerGuids;
 
     void Reset() override
     {
@@ -54,6 +60,61 @@ struct boss_ambassador_flamelashAI : public ScriptedAI
             i = urand(0, 1000);
 
         m_sSpiritsGuidsSet.clear();
+        m_sDestroyerGuids.clear();
+        m_uiDestroyerRetryTimer = 0;
+        m_uiDestroyerAttempts = 0;
+        m_bDestroyersPending = false;
+        m_bEncounterActive = false;
+        for (bool& summoned : m_abDestroyerSummoned)
+            summoned = false;
+    }
+
+    void DespawnLivingDestroyers()
+    {
+        // The entry is also ordinary dungeon trash: only this pull's GUIDs
+        // belong to the encounter. Leave actual loot corpses untouched.
+        GuidSet summons;
+        summons.swap(m_sDestroyerGuids);
+        for (ObjectGuid const& guid : summons)
+            if (Creature* summon = m_creature->GetMap()->GetCreature(guid))
+                if (summon->IsAlive())
+                    summon->ForcedDespawn();
+        m_bDestroyersPending = false;
+    }
+
+    void EnterEvadeMode() override
+    {
+        DespawnLivingDestroyers();
+        ScriptedAI::EnterEvadeMode();
+    }
+
+    void TrySummonDestroyers()
+    {
+        static float const positions[4][4] =
+        {
+            {919.21f, -231.029f, -50.1755f, 5.65487f},
+            {913.883f, -236.914f, -49.8527f, 6.03884f},
+            {924.225f, -256.302f, -49.8526f, 1.16937f},
+            {932.524f, -252.475f, -49.8526f, 1.71042f},
+        };
+        bool complete = true;
+        ++m_uiDestroyerAttempts;
+        for (uint8 i = 0; i < 4; ++i)
+        {
+            if (m_abDestroyerSummoned[i])
+                continue;
+            if (Creature* summon = m_creature->SummonCreature(NPC_FIREGUARD_DESTROYER, positions[i][0], positions[i][1], positions[i][2], positions[i][3], TEMPSPAWN_TIMED_OOC_DESPAWN, 300000))
+            {
+                m_abDestroyerSummoned[i] = true;
+                m_sDestroyerGuids.insert(summon->GetObjectGuid());
+            }
+            else
+                complete = false;
+        }
+        // A successful slot stays committed even if that add dies during a
+        // retry. Five attempts bound a permanently failing map creation.
+        m_bDestroyersPending = !complete && m_uiDestroyerAttempts < 5;
+        m_uiDestroyerRetryTimer = 1000;
     }
 
     // function that will summon spirits periodically
@@ -85,20 +146,23 @@ struct boss_ambassador_flamelashAI : public ScriptedAI
         if (m_pInstance)
             m_pInstance->SetData(TYPE_FLAMELASH, IN_PROGRESS);
 
-        m_creature->SummonCreature(NPC_FIREGUARD_DESTROYER, 919.21f, -231.029f, -50.1755f, 5.65487f, TEMPSPAWN_TIMED_OOC_DESPAWN, 300000);
-        m_creature->SummonCreature(NPC_FIREGUARD_DESTROYER, 913.883f, -236.914f, -49.8527f, 6.03884f, TEMPSPAWN_TIMED_OOC_DESPAWN, 300000);
-        m_creature->SummonCreature(NPC_FIREGUARD_DESTROYER, 924.225f, -256.302f, -49.8526f, 1.16937f, TEMPSPAWN_TIMED_OOC_DESPAWN, 300000);
-        m_creature->SummonCreature(NPC_FIREGUARD_DESTROYER, 932.524f, -252.475f, -49.8526f, 1.71042f, TEMPSPAWN_TIMED_OOC_DESPAWN, 300000);
+        if (!m_bEncounterActive)
+        {
+            m_bEncounterActive = true;
+            TrySummonDestroyers();
+        }
     }
 
     void JustDied(Unit* /*pKiller*/) override
     {
+        m_bDestroyersPending = false;
         if (m_pInstance)
             m_pInstance->SetData(TYPE_FLAMELASH, DONE);
     }
 
     void JustReachedHome() override
     {
+        DespawnLivingDestroyers();
         if (m_pInstance)
             m_pInstance->SetData(TYPE_FLAMELASH, FAIL);
     }
@@ -123,6 +187,14 @@ struct boss_ambassador_flamelashAI : public ScriptedAI
         // Return since we have no target
         if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
             return;
+
+        if (m_bDestroyersPending)
+        {
+            if (m_uiDestroyerRetryTimer <= uiDiff)
+                TrySummonDestroyers();
+            else
+                m_uiDestroyerRetryTimer -= uiDiff;
+        }
 
         // m_uiSpiritTimer
         for (uint8 i = 0; i < MAX_DWARF_RUNES; ++i)

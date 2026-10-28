@@ -70,13 +70,8 @@ bool GOUse_go_bar_beer_keg(Player* /*pPlayer*/, GameObject* pGo)
 
 bool GOUse_go_shadowforge_brazier(Player* /*pPlayer*/, GameObject* pGo)
 {
-    if (ScriptedInstance* pInstance = (ScriptedInstance*)pGo->GetInstanceData())
-    {
-        if (pInstance->GetData(TYPE_LYCEUM) == IN_PROGRESS)
-            pInstance->SetData(TYPE_LYCEUM, DONE);
-        else
-            pInstance->SetData(TYPE_LYCEUM, IN_PROGRESS);
-    }
+    if (instance_blackrock_depths* pInstance = dynamic_cast<instance_blackrock_depths*>(pGo->GetInstanceData()))
+        pInstance->LightBrazier(pGo);
     return false;
 }
 
@@ -86,12 +81,8 @@ bool GOUse_go_shadowforge_brazier(Player* /*pPlayer*/, GameObject* pGo)
 
 bool GOUse_go_relic_coffer_door(Player* /*pPlayer*/, GameObject* pGo)
 {
-    if (ScriptedInstance* pInstance = (ScriptedInstance*)pGo->GetInstanceData())
-    {
-        // check if the event is already done
-        if (pInstance->GetData(TYPE_VAULT) != DONE && pInstance->GetData(TYPE_VAULT) != IN_PROGRESS)
-            pInstance->SetData(TYPE_VAULT, SPECIAL);
-    }
+    if (instance_blackrock_depths* pInstance = dynamic_cast<instance_blackrock_depths*>(pGo->GetInstanceData()))
+        pInstance->OpenRelicCoffer(pGo);
 
     return false;
 }
@@ -114,7 +105,7 @@ enum
 // Two NPCs spawn when AT-1786 is triggered
 bool AreaTrigger_at_shadowforge_bridge(Player* pPlayer, AreaTriggerEntry const* /*pAt*/)
 {
-    if (instance_blackrock_depths* pInstance = (instance_blackrock_depths*)pPlayer->GetInstanceData())
+    if (instance_blackrock_depths* pInstance = dynamic_cast<instance_blackrock_depths*>(pPlayer->GetInstanceData()))
     {
         if (pPlayer->IsGameMaster() || !pPlayer->IsAlive() || pInstance->GetData(TYPE_BRIDGE) == DONE)
             return false;
@@ -210,18 +201,21 @@ enum RingOfLawPhases
 
 bool AreaTrigger_at_ring_of_law(Player* pPlayer, AreaTriggerEntry const* pAt)
 {
-    if (instance_blackrock_depths* pInstance = (instance_blackrock_depths*)pPlayer->GetInstanceData())
+    if (instance_blackrock_depths* pInstance = dynamic_cast<instance_blackrock_depths*>(pPlayer->GetInstanceData()))
     {
         if (pInstance->GetData(TYPE_RING_OF_LAW) == IN_PROGRESS || pInstance->GetData(TYPE_RING_OF_LAW) == DONE || pInstance->GetData(TYPE_RING_OF_LAW) == SPECIAL)
             return false;
 
-        if (pPlayer->IsGameMaster())
+        if (pPlayer->IsGameMaster() || !pPlayer->IsAlive())
             return false;
 
-        pInstance->SetData(TYPE_RING_OF_LAW, pInstance->GetData(TYPE_RING_OF_LAW) == DATA_BANNER_BEFORE_EVENT ? SPECIAL : IN_PROGRESS);
-
-        pPlayer->SummonCreature(NPC_GRIMSTONE, aSpawnPositions[POS_GRIMSTONE][0], aSpawnPositions[POS_GRIMSTONE][1], aSpawnPositions[POS_GRIMSTONE][2], aSpawnPositions[POS_GRIMSTONE][3], TEMPSPAWN_DEAD_DESPAWN, 0);
+        const bool challenge = pInstance->IsArenaChallenge() || pInstance->GetData(TYPE_RING_OF_LAW) == DATA_BANNER_BEFORE_EVENT;
         pInstance->SetArenaCenterCoords(pAt->x, pAt->y, pAt->z);
+        if (Creature* controller = pPlayer->SummonCreature(NPC_GRIMSTONE, aSpawnPositions[POS_GRIMSTONE][0], aSpawnPositions[POS_GRIMSTONE][1], aSpawnPositions[POS_GRIMSTONE][2], aSpawnPositions[POS_GRIMSTONE][3], TEMPSPAWN_DEAD_DESPAWN, 0))
+        {
+            if (!pInstance->RegisterArenaController(controller, challenge))
+                controller->ForcedDespawn();
+        }
 
         return false;
     }
@@ -234,65 +228,133 @@ bool AreaTrigger_at_ring_of_law(Player* pPlayer, AreaTriggerEntry const* pAt)
 
 struct npc_grimstoneAI : public npc_escortAI
 {
-    npc_grimstoneAI(Creature* pCreature) : npc_escortAI(pCreature)
+    npc_grimstoneAI(Creature* pCreature) : npc_escortAI(pCreature), m_bInitialized(false)
     {
-        m_pInstance = (instance_blackrock_depths*)pCreature->GetInstanceData();
-        // select which trash NPC will be released for this run
-        m_uiMobSpawnId = urand(0, 5);
-        // Select MAX_THELDREN_ADDS(4) random adds for Theldren encounter
-        uint8 uiCount = 0;
-        for (uint8 i = 0; i < MAX_POSSIBLE_THELDREN_ADDS && uiCount < MAX_THELDREN_ADDS; ++i)
+        m_pInstance = dynamic_cast<instance_blackrock_depths*>(pCreature->GetInstanceData());
+        std::vector<uint32> gladiators;
+        if (!m_pInstance || !m_pInstance->GetArenaSelection(m_uiMobSpawnId, m_uiBossEntry, gladiators))
         {
-            if (urand(0, 1) || i >= MAX_POSSIBLE_THELDREN_ADDS - MAX_THELDREN_ADDS + uiCount)
+            m_uiMobSpawnId = urand(0, 5);
+            m_uiBossEntry = aRingBoss[urand(0, 5)];
+            for (uint8 i = 0; i < MAX_POSSIBLE_THELDREN_ADDS && gladiators.size() < MAX_THELDREN_ADDS; ++i)
             {
-                m_uiGladiatorId[uiCount] = aGladiator[i];
-                ++uiCount;
+                if (urand(0, 1) || i >= MAX_POSSIBLE_THELDREN_ADDS - MAX_THELDREN_ADDS + gladiators.size())
+                    gladiators.push_back(aGladiator[i]);
             }
+            if (m_pInstance)
+                m_pInstance->StoreArenaSelection(m_uiMobSpawnId, m_uiBossEntry, gladiators);
         }
-
+        m_uiGladiatorId = gladiators;
         Reset();
     }
 
     instance_blackrock_depths* m_pInstance;
-
+    bool m_bInitialized;
     uint8 m_uiEventPhase;
     uint32 m_uiEventTimer;
-
-    uint8 m_uiMobSpawnId;
-    uint8 m_uiAliveSummonedMob;
-
+    uint32 m_uiMobSpawnId;
+    uint32 m_uiBossEntry;
     RingOfLawPhases m_uiPhase;
-
-    uint32 m_uiGladiatorId[MAX_THELDREN_ADDS];
-
+    std::vector<uint32> m_uiGladiatorId;
+    GuidSet m_sAliveSummons;
     GuidList m_lSummonedGUIDList;
     GuidSet m_lArenaCrowd;
+    std::vector<uint32> m_vSpawnEntries;
+    std::vector<bool> m_vSpawnedSlots;
+    uint8 m_uiSpawnAttempts;
 
     void Reset() override
     {
+        // Grimstone cannot fight; an incidental Reset must not forget a running wave.
+        if (m_bInitialized)
+            return;
+        m_bInitialized = true;
         m_creature->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SPAWNING);
-
-        m_uiEventTimer        = 1000;
-        m_uiEventPhase        = 0;
-        m_uiAliveSummonedMob  = 0;
-
+        m_uiEventTimer = 1000;
+        m_uiEventPhase = 0;
+        m_uiSpawnAttempts = 0;
         m_uiPhase = PHASE_MOBS;
     }
 
     void JustSummoned(Creature* pSummoned) override
     {
-        if (!m_pInstance)
+        if (!m_pInstance || !m_pInstance->RegisterArenaSummon(m_creature, pSummoned))
+        {
+            pSummoned->ForcedDespawn();
             return;
-
-        // Ring mob or boss summoned
-        float fX, fY, fZ;
-        float fcX, fcY, fcZ;
+        }
+        float fX, fY, fZ, fcX, fcY, fcZ;
         m_pInstance->GetArenaCenterCoords(fX, fY, fZ);
         m_creature->GetRandomPoint(fX, fY, fZ, 10.0f, fcX, fcY, fcZ);
         pSummoned->GetMotionMaster()->MovePoint(1, fcX, fcY, fcZ);
-
-        ++m_uiAliveSummonedMob;
+        m_sAliveSummons.insert(pSummoned->GetObjectGuid());
         m_lSummonedGUIDList.push_back(pSummoned->GetObjectGuid());
+    }
+
+    void ClearArenaSummons()
+    {
+        // Keep real corpses and their loot; only the current controller owns these GUIDs.
+        m_sAliveSummons.clear();
+        for (auto guid : m_lSummonedGUIDList)
+        {
+            if (Creature* summoned = m_creature->GetMap()->GetCreature(guid))
+            {
+                if (summoned->IsAlive())
+                    summoned->ForcedDespawn();
+            }
+        }
+        m_lSummonedGUIDList.clear();
+    }
+
+    void FailArena()
+    {
+        // Instance cleanup can synchronously notify this AI of despawns.
+        m_sAliveSummons.clear();
+        if (m_pInstance)
+            m_pInstance->FinishArena(m_creature, false);
+        ClearArenaSummons();
+        m_creature->ForcedDespawn();
+    }
+
+    bool SummonRingMob(std::vector<uint32> const& entries, SpawnPosition position)
+    {
+        if (m_vSpawnEntries.empty())
+        {
+            m_vSpawnEntries = entries;
+            m_vSpawnedSlots.assign(entries.size(), false);
+            m_uiSpawnAttempts = 0;
+        }
+        ++m_uiSpawnAttempts;
+        bool complete = true;
+        for (size_t i = 0; i < m_vSpawnEntries.size(); ++i)
+        {
+            if (m_vSpawnedSlots[i])
+                continue;
+            const uint32 entry = m_vSpawnEntries[i];
+            // A partial failed run must never recreate an already rewarded boss or gladiator.
+            if (m_uiPhase != PHASE_MOBS && m_pInstance->WasArenaEntryKilled(entry))
+            {
+                m_vSpawnedSlots[i] = true;
+                continue;
+            }
+            float x, y, z;
+            m_creature->GetRandomPoint(aSpawnPositions[position][0], aSpawnPositions[position][1], aSpawnPositions[position][2], 2.0f, x, y, z);
+            if (Creature* summoned = m_creature->SummonCreature(entry, x, y, z, 0, TEMPSPAWN_DEAD_DESPAWN, 0))
+                m_vSpawnedSlots[i] = m_sAliveSummons.find(summoned->GetObjectGuid()) != m_sAliveSummons.end();
+            if (!m_vSpawnedSlots[i])
+                complete = false;
+        }
+        if (!complete)
+        {
+            if (m_uiSpawnAttempts >= 5)
+                FailArena();
+            else
+                m_uiEventTimer = 1000;
+            return false;
+        }
+        m_vSpawnEntries.clear();
+        m_vSpawnedSlots.clear();
+        return true;
     }
 
     void DoChallengeQuestCredit()
@@ -307,36 +369,19 @@ struct npc_grimstoneAI : public npc_escortAI
         }
     }
 
-    void SummonedCreatureJustDied(Creature* /*pSummoned*/) override
+    void SummonedCreatureJustDied(Creature* summoned) override
     {
-        --m_uiAliveSummonedMob;
-
-        switch (m_uiPhase)
-        {
-            case PHASE_MOBS:                                // Ring mob killed
-            case PHASE_BOSS:                                // Ring boss killed
-                if (m_uiAliveSummonedMob == 0)
-                    m_uiEventTimer = 5000;
-                break;
-            case PHASE_GLADIATORS:                          // Theldren and his band killed
-                // Adds + Theldren
-                if (m_uiAliveSummonedMob == 0)
-                {
-                    m_uiEventTimer = 5000;
-                    DoChallengeQuestCredit();
-                }
-                break;
-        }
+        if (!m_pInstance || !m_pInstance->IsArenaSummon(m_creature, summoned) || !m_sAliveSummons.erase(summoned->GetObjectGuid()))
+            return;
+        // While either wave is being assembled, a death cannot skip the pending slots/second wave.
+        if (m_sAliveSummons.empty() && m_vSpawnEntries.empty() && (m_uiEventPhase == 8 || m_uiEventPhase == 12))
+            m_uiEventTimer = 5000;
     }
 
-    void SummonRingMob(uint32 uiEntry, uint8 uiNpcPerWave, SpawnPosition uiPosition)
+    void SummonedCreatureDespawn(Creature* summoned) override
     {
-        float fX, fY, fZ;
-        for (uint8 i = 0; i < uiNpcPerWave; ++i)
-        {
-            m_creature->GetRandomPoint(aSpawnPositions[uiPosition][0], aSpawnPositions[uiPosition][1], aSpawnPositions[uiPosition][2], 2.0f, fX, fY, fZ);
-            m_creature->SummonCreature(uiEntry, fX, fY, fZ, 0, TEMPSPAWN_DEAD_DESPAWN, 0);
-        }
+        if (m_sAliveSummons.find(summoned->GetObjectGuid()) != m_sAliveSummons.end())
+            FailArena();
     }
 
     void WaypointReached(uint32 uiPointId) override
@@ -365,10 +410,11 @@ struct npc_grimstoneAI : public npc_escortAI
                 m_uiEventTimer = 5000;
                 break;
             case 6:
-                if (m_pInstance)
+                if (m_pInstance && m_pInstance->IsArenaController(m_creature))
                 {
-                    m_pInstance->SetData(TYPE_RING_OF_LAW, DONE);
-                    // debug_log("SD2: npc_grimstone: event reached end and set complete.");
+                    m_pInstance->FinishArena(m_creature, true);
+                    if (m_pInstance->GetData(TYPE_RING_OF_LAW) == DONE && m_uiPhase == PHASE_GLADIATORS)
+                        DoChallengeQuestCredit();
                 }
                 break;
         }
@@ -379,31 +425,19 @@ struct npc_grimstoneAI : public npc_escortAI
         if (!m_pInstance)
             return;
 
-        if (m_pInstance->GetData(TYPE_RING_OF_LAW) == FAIL)
+        if (!m_pInstance->IsArenaController(m_creature) || m_pInstance->GetData(TYPE_RING_OF_LAW) == FAIL)
         {
-            // Reset Doors
-            if (m_uiEventPhase >= 10)                       // North Gate is opened
-            {
-                m_pInstance->DoUseDoorOrButton(GO_ARENA_2);
-                m_pInstance->DoUseDoorOrButton(GO_ARENA_4);
-            }
-            else if (m_uiEventPhase >= 4)                   // East Gate is opened
-            {
-                m_pInstance->DoUseDoorOrButton(GO_ARENA_1);
-                m_pInstance->DoUseDoorOrButton(GO_ARENA_4);
-            }
-
-            // Despawn Summoned Mobs
-            for (GuidList::const_iterator itr = m_lSummonedGUIDList.begin(); itr != m_lSummonedGUIDList.end(); ++itr)
-            {
-                if (Creature* pSummoned = m_creature->GetMap()->GetCreature(*itr))
-                    pSummoned->ForcedDespawn();
-            }
-            m_lSummonedGUIDList.clear();
-
-            // Despawn NPC
-            m_creature->ForcedDespawn();
+            FailArena();
             return;
+        }
+        // An unloaded/despawned live member is a failed run, never an implicit kill.
+        for (auto guid : m_sAliveSummons)
+        {
+            if (!m_creature->GetMap()->GetCreature(guid))
+            {
+                FailArena();
+                return;
+            }
         }
 
         if (m_uiEventTimer)
@@ -454,15 +488,17 @@ struct npc_grimstoneAI : public npc_escortAI
                         break;
                     case 5:
                         m_creature->SetVisibility(VISIBILITY_OFF);
-                        SetEscortPaused(false);
                         // Summon Ring Mob(s)
-                        SummonRingMob(aRingMob[0][m_uiMobSpawnId], aRingMob[1][m_uiMobSpawnId], POS_EAST);
+                        if (!SummonRingMob(std::vector<uint32>(aRingMob[1][m_uiMobSpawnId], aRingMob[0][m_uiMobSpawnId]), POS_EAST))
+                            return;
+                        SetEscortPaused(false);
                         m_uiEventTimer = 16000;
                         break;
                     case 7:
                         // Summon Ring Mob(s)
-                        SummonRingMob(aRingMob[0][m_uiMobSpawnId], aRingMob[1][m_uiMobSpawnId], POS_EAST);
-                        m_uiEventTimer = 0;
+                        if (!SummonRingMob(std::vector<uint32>(aRingMob[1][m_uiMobSpawnId], aRingMob[0][m_uiMobSpawnId]), POS_EAST))
+                            return;
+                        m_uiEventTimer = m_sAliveSummons.empty() ? 5000 : 0;
                         break;
                     case 8:
                         // Summoned Mobs are dead, continue event
@@ -486,23 +522,32 @@ struct npc_grimstoneAI : public npc_escortAI
                         m_uiEventTimer = 2500;
                         break;
                     case 11:
-                        // Summon Boss
+                    {
+                        // Freeze the chosen variant before even a failed first summon can be retried.
+                        if (!m_pInstance->BeginArenaRewardWave(m_creature))
+                        {
+                            FailArena();
+                            return;
+                        }
                         m_creature->SetVisibility(VISIBILITY_OFF);
-                        // If banner summoned after start, then summon Thelden after the creatures are dead
-                        if (m_pInstance->GetData(TYPE_RING_OF_LAW) == SPECIAL && m_uiPhase == PHASE_MOBS)
+                        // The selected team stays fixed across partial failures and controller reconstruction.
+                        std::vector<uint32> entries;
+                        if (m_pInstance->IsArenaChallenge())
                         {
                             m_uiPhase = PHASE_GLADIATORS;
-                            SummonRingMob(NPC_THELDREN, 1, POS_NORTH);
-                            for (unsigned int i : m_uiGladiatorId)
-                                SummonRingMob(i, 1, POS_NORTH);
+                            entries.push_back(NPC_THELDREN);
+                            entries.insert(entries.end(), m_uiGladiatorId.begin(), m_uiGladiatorId.end());
                         }
                         else
                         {
                             m_uiPhase = PHASE_BOSS;
-                            SummonRingMob(aRingBoss[urand(0, 5)], 1, POS_NORTH);
+                            entries.push_back(m_uiBossEntry);
                         }
-                        m_uiEventTimer = 0;
+                        if (!SummonRingMob(entries, POS_NORTH))
+                            return;
+                        m_uiEventTimer = m_sAliveSummons.empty() ? 5000 : 0;
                         break;
+                    }
                     case 12:
                         // Boss dead
                         m_lSummonedGUIDList.clear();
@@ -535,6 +580,8 @@ struct SummonThelrinDnd : public SpellScript
             return;
 
         Unit* target = spell->GetUnitTarget();
+        if (!target || target->GetMapId() != 230)
+            return;
         instance_blackrock_depths* instance = dynamic_cast<instance_blackrock_depths*>(target->GetInstanceData());
         if (instance && instance->GetData(TYPE_RING_OF_LAW) != DONE && instance->GetData(TYPE_RING_OF_LAW) != SPECIAL)
             instance->SetData(TYPE_RING_OF_LAW, instance->GetData(TYPE_RING_OF_LAW) == IN_PROGRESS ? uint32(SPECIAL) : uint32(DATA_BANNER_BEFORE_EVENT));
@@ -558,7 +605,7 @@ struct npc_phalanxAI : public npc_escortAI
 {
     npc_phalanxAI(Creature* pCreature) : npc_escortAI(pCreature)
     {
-        m_pInstance = (instance_blackrock_depths*)pCreature->GetInstanceData();
+        m_pInstance = dynamic_cast<instance_blackrock_depths*>(pCreature->GetInstanceData());
         Reset();
     }
 
@@ -568,7 +615,6 @@ struct npc_phalanxAI : public npc_escortAI
     uint32 uiThunderclapTimer;
     uint32 uiMightyBlowTimer;
     uint32 uiFireballVolleyTimer;
-    uint32 uiCallPatrolTimer;
 
     void Reset() override
     {
@@ -584,7 +630,6 @@ struct npc_phalanxAI : public npc_escortAI
         uiThunderclapTimer     = 0;
         uiMightyBlowTimer      = 0;
         uiFireballVolleyTimer  = 0;
-        uiCallPatrolTimer      = 0;
     }
 
     void Aggro(Unit* /*pWho*/) override
@@ -616,7 +661,7 @@ struct npc_phalanxAI : public npc_escortAI
                     m_creature->SetFactionTemporary(FACTION_IRONFORGE, TEMPFACTION_NONE);
                     if (m_pInstance->GetData(TYPE_PLUGGER) == IN_PROGRESS)
                     {
-                        uiCallPatrolTimer = 10000;
+                        m_pInstance->ScheduleBarPatrol(10000);
                         m_pInstance->SetData(TYPE_PLUGGER, DONE);
                     }
                 }
@@ -632,17 +677,6 @@ struct npc_phalanxAI : public npc_escortAI
     {
         if (!m_pInstance)
             return;
-
-        if (uiCallPatrolTimer)
-        {
-            if (uiCallPatrolTimer < uiDiff && m_pInstance->GetData(TYPE_BAR) != DONE)
-            {
-                m_pInstance->SetData(TYPE_BAR, IN_PROGRESS);
-                uiCallPatrolTimer = 0;
-            }
-            else
-                uiCallPatrolTimer -= uiDiff;
-        }
 
         // Combat check
         if (m_creature->SelectHostileTarget() && m_creature->GetVictim())
@@ -708,18 +742,40 @@ struct npc_mistress_nagmaraAI : public ScriptedAI
 {
     npc_mistress_nagmaraAI(Creature* pCreature) : ScriptedAI(pCreature)
     {
-        m_pInstance = (instance_blackrock_depths*)pCreature->GetInstanceData();
+        m_pInstance = dynamic_cast<instance_blackrock_depths*>(pCreature->GetInstanceData());
         Reset();
     }
 
     instance_blackrock_depths* m_pInstance;
-    Creature* pRocknot;
+    ObjectGuid m_rocknotGuid;
+    bool m_bLoveRequested;
 
     uint8 m_uiPhase;
     uint32 m_uiPhaseTimer;
 
+    Creature* GetRocknot()
+    {
+        if (Creature* rocknot = m_creature->GetMap()->GetCreature(m_rocknotGuid))
+            if (rocknot->IsAlive())
+                return rocknot;
+        if (m_pInstance)
+        {
+            if (Creature* rocknot = m_pInstance->GetSingleCreatureFromStorage(NPC_PRIVATE_ROCKNOT, true))
+            {
+                if (rocknot->IsAlive())
+                {
+                    m_rocknotGuid = rocknot->GetObjectGuid();
+                    return rocknot;
+                }
+            }
+        }
+        return nullptr;
+    }
+
     void Reset() override
     {
+        m_rocknotGuid.Clear();
+        m_bLoveRequested = false;
         m_uiPhase = 0;
         m_uiPhaseTimer = 0;
     }
@@ -729,9 +785,13 @@ struct npc_mistress_nagmaraAI : public ScriptedAI
         if (!m_pInstance)
             return;
 
-        pRocknot = m_pInstance->GetSingleCreatureFromStorage(NPC_PRIVATE_ROCKNOT);
+        if (m_uiPhase || m_pInstance->GetData(TYPE_NAGMARA) == SPECIAL || m_pInstance->GetData(TYPE_NAGMARA) == IN_PROGRESS || m_pInstance->GetData(TYPE_NAGMARA) == DONE)
+            return;
+        m_bLoveRequested = true;
+        Creature* pRocknot = GetRocknot();
         if (!pRocknot)
             return;
+        m_bLoveRequested = false;
 
         m_creature->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
         m_creature->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER);
@@ -744,6 +804,12 @@ struct npc_mistress_nagmaraAI : public ScriptedAI
 
     void UpdateAI(const uint32 uiDiff) override
     {
+        if (m_bLoveRequested)
+        {
+            DoPotionOfLoveIfCan();
+            if (m_bLoveRequested)
+                return;
+        }
         if (m_uiPhaseTimer)
         {
             if (m_uiPhaseTimer <= uiDiff)
@@ -755,7 +821,10 @@ struct npc_mistress_nagmaraAI : public ScriptedAI
             }
         }
 
-        if (!pRocknot)
+        if (!m_uiPhase)
+            return;
+        Creature* pRocknot = GetRocknot();
+        if (!pRocknot || !pRocknot->IsAlive())
             return;
 
         switch (m_uiPhase)
@@ -878,12 +947,13 @@ struct npc_rocknotAI : public npc_escortAI
 {
     npc_rocknotAI(Creature* pCreature) : npc_escortAI(pCreature)
     {
-        m_pInstance = (instance_blackrock_depths*)pCreature->GetInstanceData();
+        m_pInstance = dynamic_cast<instance_blackrock_depths*>(pCreature->GetInstanceData());
         Reset();
     }
 
     instance_blackrock_depths* m_pInstance;
-    Creature* pNagmara;
+    ObjectGuid m_nagmaraGuid;
+    uint32 m_uiWaitingForNagmara;
 
     uint32 m_uiBreakKegTimer;
     uint32 m_uiBreakDoorTimer;
@@ -895,17 +965,36 @@ struct npc_rocknotAI : public npc_escortAI
 
     void Reset() override
     {
-        pNagmara                = m_pInstance->GetSingleCreatureFromStorage(NPC_MISTRESS_NAGMARA);
-
         if (HasEscortState(STATE_ESCORT_ESCORTING))
             return;
 
+        m_nagmaraGuid.Clear();
+        m_uiWaitingForNagmara   = 0;
         m_fInitialOrientation   = 3.21141f;
         m_uiBreakKegTimer       = 0;
         m_uiBreakDoorTimer      = 0;
         m_uiEmoteTimer          = 0;
         m_uiBarReactTimer       = 0;
         m_bIsDoorOpen           = false;
+    }
+
+    Creature* GetNagmara()
+    {
+        if (Creature* nagmara = m_creature->GetMap()->GetCreature(m_nagmaraGuid))
+            if (nagmara->IsAlive())
+                return nagmara;
+        if (m_pInstance)
+        {
+            if (Creature* nagmara = m_pInstance->GetSingleCreatureFromStorage(NPC_MISTRESS_NAGMARA, true))
+            {
+                if (nagmara->IsAlive())
+                {
+                    m_nagmaraGuid = nagmara->GetObjectGuid();
+                    return nagmara;
+                }
+            }
+        }
+        return nullptr;
     }
 
     void DoGo(uint32 id, GOState state)
@@ -919,6 +1008,14 @@ struct npc_rocknotAI : public npc_escortAI
         if (!m_pInstance)
             return;
 
+        Creature* pNagmara = GetNagmara();
+        if ((uiPointId == 10 || uiPointId == 17 || uiPointId == 34) && (!pNagmara || !pNagmara->IsAlive()))
+        {
+            m_uiWaitingForNagmara = uiPointId;
+            SetEscortPaused(true);
+            return;
+        }
+        m_uiWaitingForNagmara = 0;
         switch (uiPointId)
         {
             case 1:     // if Nagmara and Potion of Love event is in progress, switch to second part of the escort
@@ -950,13 +1047,7 @@ struct npc_rocknotAI : public npc_escortAI
                 break;
             case 10:     // This step is the start of the "alternate" waypoint path used with Nagmara
                 // Make Nagmara follow Rocknot
-                if (!pNagmara)
-                {
-                    SetEscortPaused(true);
-                    SetCurrentWaypoint(9);
-                }
-                else
-                    pNagmara->GetMotionMaster()->MoveChase(m_creature, 2.0f, 0);
+                pNagmara->GetMotionMaster()->MoveChase(m_creature, 2.0f, 0);
                 break;
             case 17:
                 // Open the bar back door if relevant
@@ -989,6 +1080,22 @@ struct npc_rocknotAI : public npc_escortAI
     {
         if (!m_pInstance)
             return;
+
+        // A missing counterpart pauses only this route; resume this exact waypoint when she loads.
+        if (m_uiWaitingForNagmara)
+        {
+            const uint32 waypoint = m_uiWaitingForNagmara;
+            if (Creature* nagmara = GetNagmara())
+            {
+                if (nagmara->IsAlive())
+                {
+                    WaypointReached(waypoint);
+                    if (waypoint != 34)
+                        SetEscortPaused(false);
+                }
+            }
+            return;
+        }
 
         // When Nagmara is in Potion of Love event and reach Rocknot, she set TYPE_NAGMARA to SPECIAL
         // in order to make Rocknot start the second part of his escort quest
@@ -1157,7 +1264,7 @@ struct npc_marshal_windsorAI : public npc_escortAI
 {
     npc_marshal_windsorAI(Creature* m_creature) : npc_escortAI(m_creature)
     {
-        m_pInstance = (instance_blackrock_depths*)m_creature->GetInstanceData();
+        m_pInstance = dynamic_cast<instance_blackrock_depths*>(m_creature->GetInstanceData());
         Reset();
     }
 
@@ -1230,7 +1337,13 @@ struct npc_marshal_windsorAI : public npc_escortAI
                 break;
             case 20:
                 if (m_pInstance)
-                    m_pInstance->DoUseDoorOrButton(GO_JAIL_SUPPLY_CRATE);
+                {
+                    if (GameObject* crate = m_pInstance->GetSingleGameObjectFromStorage(GO_JAIL_SUPPLY_CRATE))
+                    {
+                        if (crate->GetGoType() == GAMEOBJECT_TYPE_GOOBER)
+                            crate->Use(m_creature);
+                    }
+                }
                 break;
             case 21:
                 m_creature->UpdateEntry(NPC_REGINALD_WINDSOR);
@@ -1325,24 +1438,36 @@ struct npc_marshal_windsorAI : public npc_escortAI
 
     void UpdateEscortAI(const uint32 /*uiDiff*/) override
     {
-        // Handle escort resume events
-        if (m_pInstance && m_pInstance->GetData(TYPE_QUEST_JAIL_BREAK) == SPECIAL)
+        // Cell DB scripts still supply dialogue and hostility; record both real deaths even in one update.
+        if (m_pInstance)
         {
+            const bool gossipSignal = m_pInstance->GetData(TYPE_QUEST_JAIL_BREAK) == SPECIAL;
+            bool resume = false;
             switch (m_uiEventPhase)
             {
-                case 1:                     // Dughal
-                case 3:                     // Ograbisi
-                case 4:                     // Crest
-                case 5:                     // Shill
-                case 6:                     // Tobias
-                    SetEscortPaused(false);
+                case 1: // Dughal
+                case 6: // Tobias
+                    resume = gossipSignal;
                     break;
-                case 2:                     // Jaz
-                    ++m_uiEventPhase;
+                case 2: // Jaz and Ograbisi share a cell and may die in either order/the same frame.
+                case 3:
+                    if (m_pInstance->AreJailTargetsDead(NPC_JAZ, NPC_OGRABISI))
+                    {
+                        m_uiEventPhase = 3;
+                        resume = true;
+                    }
+                    break;
+                case 4: // Shill
+                    resume = m_pInstance->IsJailTargetDead(NPC_SHILL);
+                    break;
+                case 5: // Crest
+                    resume = m_pInstance->IsJailTargetDead(NPC_CREST);
                     break;
             }
-
-            m_pInstance->SetData(TYPE_QUEST_JAIL_BREAK, IN_PROGRESS);
+            if (resume)
+                SetEscortPaused(false);
+            if (gossipSignal)
+                m_pInstance->SetData(TYPE_QUEST_JAIL_BREAK, IN_PROGRESS);
         }
 
         if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
@@ -1361,10 +1486,18 @@ bool QuestAccept_npc_marshal_windsor(Player* pPlayer, Creature* pCreature, const
 {
     if (pQuest->GetQuestId() == QUEST_JAIL_BREAK)
     {
-        pCreature->SetFactionTemporary(FACTION_ESCORT_A_NEUTRAL_ACTIVE, TEMPFACTION_RESTORE_RESPAWN);
-
         if (npc_marshal_windsorAI* pEscortAI = dynamic_cast<npc_marshal_windsorAI*>(pCreature->AI()))
-            pEscortAI->Start(false, pPlayer, pQuest);
+        {
+            // Start() rejects a running escort/combat. Do not clear that round's death set.
+            if (pEscortAI->HasEscortState(STATE_ESCORT_ESCORTING) || pCreature->GetVictim())
+                return true;
+            if (pEscortAI->m_pInstance && pEscortAI->m_pInstance->BeginJailBreak(pCreature))
+            {
+                pEscortAI->m_uiEventPhase = 0;
+                pCreature->SetFactionTemporary(FACTION_ESCORT_A_NEUTRAL_ACTIVE, TEMPFACTION_RESTORE_RESPAWN);
+                pEscortAI->Start(false, pPlayer, pQuest);
+            }
+        }
 
         return true;
     }
@@ -1390,7 +1523,7 @@ bool GossipSelect_npc_dughal_stormwing(Player* pPlayer, Creature* pCreature, uin
     if (uiAction == GOSSIP_ACTION_INFO_DEF + 1)
     {
         // Set instance data in order to allow the quest to continue
-        if (instance_blackrock_depths* pInstance = (instance_blackrock_depths*)pCreature->GetInstanceData())
+        if (instance_blackrock_depths* pInstance = dynamic_cast<instance_blackrock_depths*>(pCreature->GetInstanceData()))
             pInstance->SetData(TYPE_QUEST_JAIL_BREAK, SPECIAL);
 
         DoScriptText(SAY_DUGHAL_FREE, pCreature, pPlayer);
@@ -1423,7 +1556,7 @@ bool GossipSelect_npc_tobias_seecher(Player* pPlayer, Creature* pCreature, uint3
     if (uiAction == GOSSIP_ACTION_INFO_DEF + 1)
     {
         // Set instance data in order to allow the quest to continue
-        if (instance_blackrock_depths* pInstance = (instance_blackrock_depths*)pCreature->GetInstanceData())
+        if (instance_blackrock_depths* pInstance = dynamic_cast<instance_blackrock_depths*>(pCreature->GetInstanceData()))
             pInstance->SetData(TYPE_QUEST_JAIL_BREAK, SPECIAL);
 
         DoScriptText(urand(0, 1) ? SAY_TOBIAS_FREE_1 : SAY_TOBIAS_FREE_2, pCreature);
@@ -1458,11 +1591,11 @@ struct npc_hurley_blackbreathAI : public npc_escortAI
 {
     npc_hurley_blackbreathAI(Creature* pCreature) : npc_escortAI(pCreature)
     {
-        m_pInstance = (ScriptedInstance*)pCreature->GetInstanceData();
+        m_pInstance = dynamic_cast<instance_blackrock_depths*>(pCreature->GetInstanceData());
         Reset();
     }
 
-    ScriptedInstance* m_pInstance;
+    instance_blackrock_depths* m_pInstance;
 
     uint32 uiFlameBreathTimer;
     uint32 m_uiEventTimer;
@@ -1556,6 +1689,12 @@ struct npc_hurley_blackbreathAI : public npc_escortAI
             {
                 if (m_uiEventTimer <= uiDiff)
                 {
+                    // The instance commits IN_PROGRESS only after boss and all three cronies exist.
+                    if (m_pInstance->GetData(TYPE_HURLEY) != IN_PROGRESS)
+                    {
+                        m_uiEventTimer = 1000;
+                        return;
+                    }
                     Start(false);
                     SetEscortPaused(false);
                     m_uiEventTimer = 0;
@@ -1647,7 +1786,7 @@ struct boss_plugger_spazzringAI : public ScriptedAI
 
     boss_plugger_spazzringAI(Creature* pCreature) : ScriptedAI(pCreature)
     {
-        m_pInstance = (instance_blackrock_depths*)pCreature->GetInstanceData();
+        m_pInstance = dynamic_cast<instance_blackrock_depths*>(pCreature->GetInstanceData());
         Reset();
     }
 
@@ -1849,17 +1988,18 @@ struct npc_ironhand_guardianAI : public ScriptedAI
 {
     npc_ironhand_guardianAI(Creature* creature) : ScriptedAI(creature)
     {
-        instance = (ScriptedInstance*)creature->GetInstanceData();
+        instance = dynamic_cast<instance_blackrock_depths*>(creature->GetInstanceData());
         Reset();
     }
 
-    ScriptedInstance* instance;
+    instance_blackrock_depths* instance;
 
     uint32 m_goutOfFlameTimer;
     uint8 m_phase;
 
     void Reset() override
     {
+        m_phase = 0;
         m_goutOfFlameTimer = urand(4, 30) * IN_MILLISECONDS;
         m_creature->SetCanEnterCombat(false);
         SetCombatMovement(false);
@@ -1871,7 +2011,7 @@ struct npc_ironhand_guardianAI : public ScriptedAI
         if (!instance)
             return;
 
-        if (instance->GetData(TYPE_IRON_HALL) == NOT_STARTED)
+        if (!instance->IsIronHallStarted())
         {
             m_phase = 0;
             return;

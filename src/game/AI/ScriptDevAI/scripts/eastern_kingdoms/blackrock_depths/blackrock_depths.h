@@ -224,6 +224,8 @@ class instance_blackrock_depths : public ScriptedInstance
         ~instance_blackrock_depths() {}
 
         void Initialize() override;
+        void OnPlayerEnter(Player*) override;
+        void OnObjectSpawn(GameObject*) override;
 
         void OnCreatureCreate(Creature* pCreature) override;
         void OnCreatureEnterCombat(Creature* pCreature) override;
@@ -234,6 +236,8 @@ class instance_blackrock_depths : public ScriptedInstance
         void SetData(uint32 uiType, uint32 uiData) override;
         uint32 GetData(uint32 uiType) const override;
         bool GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const override;
+        bool GetGameObjectLootSnapshot(uint32 entry, std::string& snapshot) const override;
+        void OnGameObjectLootSnapshot(uint32 entry, std::string const& snapshot, bool exhausted) override;
 
         const char* Save() const override { return m_strInstData.c_str(); }
         void Load(const char* chrIn) override;
@@ -246,8 +250,25 @@ class instance_blackrock_depths : public ScriptedInstance
         { fX = m_fArenaCenterX; fY = m_fArenaCenterY; fZ = m_fArenaCenterZ; }
         void GetArenaCrowdGuid(GuidSet& sCrowdSet) const { sCrowdSet = m_sArenaCrowdNpcGuids; }
 
+        bool OpenRelicCoffer(GameObject* go);
+        bool LightBrazier(GameObject* go);
+        bool RegisterArenaController(Creature* controller, bool challenge);
+        bool IsArenaController(Creature* controller) const;
+        bool BeginArenaRewardWave(Creature* controller);
+        bool RegisterArenaSummon(Creature* controller, Creature* summoned);
+        bool IsArenaSummon(Creature* controller, Creature* summoned) const;
+        void FinishArena(Creature* controller, bool success);
+        bool WasArenaEntryKilled(uint32 entry) const;
+        bool IsArenaChallenge() const { return m_arenaChallenge; }
+        bool GetArenaSelection(uint32& mobIndex, uint32& bossEntry, std::vector<uint32>& gladiators) const;
+        void StoreArenaSelection(uint32 mobIndex, uint32 bossEntry, std::vector<uint32> const& gladiators);
+        bool BeginJailBreak(Creature* windsor);
+        bool IsJailTargetDead(uint32 entry) const;
+        bool AreJailTargetsDead(uint32 first, uint32 second) const;
+        bool IsIronHallStarted() const { return m_ironHallStarted; }
+        void ScheduleBarPatrol(uint32 delay);
         // Bar events
-        void SetBarDoorIsOpen() { m_bIsBarDoorOpen = true; }
+        void SetBarDoorIsOpen();
         void GetBarDoorIsOpen(bool& bIsOpen) const { bIsOpen = m_bIsBarDoorOpen; }
         void HandleBarPatrons(uint8 uiEventType);
         void HandleBarPatrol(uint8 uiStep);
@@ -256,6 +277,74 @@ class instance_blackrock_depths : public ScriptedInstance
         void DoCallNextDwarf();
         bool CanReplacePrincess() const;
 
+        void SaveState();
+        void BuildSaveData();
+        void SyncObjects();
+        void RestoreProgress();
+        void ResetTomb();
+        bool StartVault();
+        void CheckVaultComplete();
+        bool SpawnHurleySlots();
+        bool SpawnPatrolSlots();
+        void StartReward(uint32 index);
+        void SyncReward(uint32 index);
+        void CloseReward(uint32 index);
+        bool IsVaultConstruct(Creature* creature) const;
+        int RelicIndex(uint32 entry) const;
+        bool IsArenaRewardEntry(uint32 entry) const;
+        void AbortArenaGeneration();
+        bool IsTombParticipant(Player* player) const;
+        Player* SelectTombTarget(Creature* dwarf) const;
+
+        struct SavedReward
+        {
+            uint32 state = 0; // 0 unavailable, 1 available, 2 closed/claimed/legacy unknown
+            uint64 expires = 0;
+            std::string snapshot;
+        };
+        SavedReward m_rewards[2];
+        bool m_restorePending = false;
+        bool m_resettingTomb = false;
+        bool m_tombResumePending = false;
+        bool m_tombRecoveredRun = false;
+        bool m_ironHallStarted = false;
+        uint32 m_syncTimer = 0;
+        uint32 m_tombDeadMask = 0;
+        uint32 m_tombActivatedMask = 0;
+        uint32 m_tombResetTimer = 0;
+        uint32 m_cofferMask = 0;
+        uint32 m_brazierMask = 0;
+        std::set<uint32> m_vaultExpected;
+        std::set<uint32> m_vaultDead;
+        ObjectGuid m_doomgripGuid;
+        bool m_doomgripKilled = false;
+        uint32 m_vaultRetryTimer = 0;
+        uint8 m_vaultRetries = 0;
+        ObjectGuid m_arenaController;
+        GuidSet m_arenaSummons;
+        bool m_arenaChallenge = false;
+        bool m_arenaRewardWaveStarted = false;
+        bool m_arenaSelectionStored = false;
+        uint32 m_arenaMobIndex = 0;
+        uint32 m_arenaBossEntry = 0;
+        std::vector<uint32> m_arenaGladiators;
+        std::set<uint32> m_arenaKilled;
+        std::set<uint32> m_jailDead;
+        ObjectGuid m_jailController;
+        bool m_hurleyRequested = false;
+        uint32 m_hurleyDeadMask = 0;
+        uint32 m_hurleyRetryTimer = 0;
+        uint8 m_hurleyRetries = 0;
+        ObjectGuid m_hurleySlots[4];
+        float m_hurleySlotPositions[4][3] = {};
+        bool m_hurleyPositionsReady = false;
+        bool m_patrolRequested = false;
+        uint32 m_patrolDeadMask = 0;
+        uint32 m_patrolStage = 0;
+        uint8 m_patrolRetries = 0;
+        ObjectGuid m_patrolSlots[3];
+        float m_patrolSlotPositions[3][3] = {};
+        bool m_patrolPositionsReady = false;
         uint32 m_auiEncounter[MAX_ENCOUNTER];
         std::string m_strInstData;
 
