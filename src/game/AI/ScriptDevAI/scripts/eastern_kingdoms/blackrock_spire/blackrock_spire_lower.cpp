@@ -53,10 +53,9 @@ std::string BlackrockSpireLower::Save() const
     return out.str();
 }
 
-bool BlackrockSpireLower::Load(std::string const& text)
+bool BlackrockSpireLower::Decode(std::string const& text, Progress& next)
 {
     if (text.size() > 2048) return false;
-    Progress next;
     if (!text.empty())
     {
         std::istringstream in(text);
@@ -92,6 +91,19 @@ bool BlackrockSpireLower::Load(std::string const& text)
             if ((!(next.objects & (1u << i)) && next.objectUntil[i]) ||
                 ((next.objects & (1u << i)) && next.urokElapsed < objectDelays[i])) return false;
     }
+    return true;
+}
+
+bool BlackrockSpireLower::ValidateSave(std::string const& text)
+{
+    Progress next;
+    return Decode(text, next);
+}
+
+bool BlackrockSpireLower::Load(std::string const& text)
+{
+    Progress next;
+    if (!Decode(text, next)) return false;
     // Preserve runtime identities when an upper-spire event reset reloads the
     // same durable lower progress. Only changed generations detach actors.
     auto previous = m_progress;

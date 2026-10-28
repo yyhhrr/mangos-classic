@@ -6,6 +6,7 @@
 #define DEF_BLACKROCK_SPIRE_H
 
 #include "blackrock_spire_lower.h"
+#include "blackrock_spire_upper.h"
 #include <array>
 
 enum
@@ -82,17 +83,6 @@ enum
     FACTION_BLACK_DRAGON        = 103
 };
 
-static const Position aStadiumLocs[7] =
-{
-    {210.00f, -420.30f, 110.94f, 3.14f},                    // dragons summon location
-    {210.14f, -397.54f, 111.1f,  0.f},                      // Gyth summon location
-    {163.62f, -420.33f, 110.47f, 0.f},                      // center of the stadium location (for movement)
-    {164.63f, -444.04f, 121.97f, 3.22f},                    // Lord Nefarius summon position
-    {161.01f, -443.73f, 121.97f, 6.26f},                    // Rend summon position
-    {164.64f, -443.30f, 121.97f, 1.61f},                    // Nefarius move position
-    {165.74f, -466.46f, 116.80f, 0.f},                      // Rend move position
-};
-
 static const Position aBeastLocs[3] =
 {
     {98.09f, -563.45f, 109.86f, 2.37f},                     // Summon points
@@ -100,131 +90,56 @@ static const Position aBeastLocs[3] =
     {96.92f, -560.98f, 110.18f, 2.43f},
 };
 
-static const uint32 aStadiumSpectators[12] =
+class instance_blackrock_spire : public ScriptedInstance
 {
-    NPC_BLACKHAND_VETERAN, NPC_BLACKHAND_VETERAN, NPC_BLACKHAND_VETERAN, NPC_BLACKHAND_ELITE, NPC_BLACKHAND_VETERAN, NPC_BLACKHAND_VETERAN,
-    NPC_BLACKHAND_VETERAN, NPC_BLACKHAND_VETERAN, NPC_BLACKHAND_VETERAN, NPC_BLACKHAND_ELITE, NPC_BLACKHAND_VETERAN, NPC_BLACKHAND_VETERAN
+public:
+    explicit instance_blackrock_spire(Map* map);
+    void Initialize() override;
+    void OnObjectCreate(GameObject*) override;
+    void OnCreatureCreate(Creature*) override;
+    void OnCreatureRespawn(Creature*) override;
+    void OnCreatureDeath(Creature*) override;
+    void OnCreatureEvade(Creature*) override;
+    void OnCreatureDespawn(Creature*) override;
+    void OnCreatureEnterCombat(Creature*) override;
+    void OnPlayerEnter(Player*) override;
+    void OnPlayerLeave(Player*) override;
+    void Update(uint32) override;
+    uint32 GetData(uint32 type) const override { return m_upper.GetData(type); }
+    void SetData(uint32 type, uint32 value) override { m_upper.SetData(type, value); }
+    void SetData64(uint32, uint64) override;
+    bool StartUrok(Object* source, Object* target) { return m_lower.StartUrok(source, target); }
+    bool StartStadium(Player* player) { return m_upper.StartStadium(player); }
+    bool StartRookery(Player* player) { return m_upper.StartRookery(player); }
+    bool TryUnlockUpper(Player* player) { return m_upper.TryUnlockUpper(player); }
+    bool StartEmberseer(Player* player) { return m_upper.StartEmberseer(player); }
+    bool IsStadiumGyth(Creature* actor) const { return m_upper.IsStadiumGyth(actor); }
+    bool WasStadiumRendReleased(Creature* actor) const { return m_upper.WasStadiumRendReleased(actor); }
+    bool ConfirmStadiumRend(Creature* gyth, Creature* rend) { return m_upper.ConfirmStadiumRend(gyth, rend); }
+    void FailStadium() { m_upper.FailStadium(); }
+    void FailEmberseer() { m_upper.FailEmberseer(); }
+    bool ShouldEmberseerBeCaged() const { return m_upper.ShouldEmberseerBeCaged(); }
+    bool IsEmberseerGrowing() const { return m_upper.IsEmberseerGrowing(); }
+    bool IsEmberseerReleased() const { return m_upper.IsEmberseerReleased(); }
+    uint32 GetEmberseerGeneration() const { return m_upper.GetEmberseerGeneration(); }
+    uint32 GetEmberseerGrowingStacks() const { return m_upper.GetEmberseerGrowingStacks(); }
+    void EmberseerGrowingTick(Creature* actor, uint32 stacks) { m_upper.EmberseerGrowingTick(actor, stacks); }
+    uint32 GetEmberseerReleaseStep() const { return m_upper.GetEmberseerReleaseStep(); }
+    void EmberseerReleaseStep(Creature* actor, uint32 step) { m_upper.EmberseerReleaseStep(actor, step); }
+    void EmberseerReleased(Creature* actor) { m_upper.EmberseerReleased(actor); }
+    void GetIncarceratorGUIDList(GuidList& list) const { m_upper.GetIncarceratorGUIDList(list); }
+    std::vector<InstanceEventReset> GetResettableEvents() const override;
+    bool GetEventResetData(uint32, std::string&) const override;
+    void ApplyEventReset(uint32, std::string const&) override;
+    char const* Save() const override { return m_strInstData.c_str(); }
+    void Load(char const*) override;
+    bool m_bBeastIntroDone = false;
+    bool m_bBeastOutOfLair = false;
+private:
+    std::string BuildSave(std::string const* upperOverride = nullptr, bool resetStadium = false) const;
+    void SaveState();
+    std::string m_strInstData;
+    BlackrockSpireLower m_lower;
+    BlackrockSpireUpper m_upper;
 };
-
-static const Position aSpectatorsSpawnLocs[12] =
-{
-    {163.3209f, -340.9818f, 111.0216f, 4.818223f},
-    {164.2471f, -339.0313f, 111.0368f, 1.413717f},
-    {161.124f, -339.5178f, 111.0381f, 3.001966f},
-    {162.5045f, -337.8101f, 111.0367f, 4.13643f},
-    {160.9896f, -337.7715f, 111.0368f, 1.117011f},
-    {161.8347f, -335.7923f, 111.0352f, 2.286381f},
-    {113.9726f, -366.0805f, 116.9195f, 6.252025f},
-    {112.7245f, -368.9635f, 116.9307f, 4.677482f},
-    {110.5757f, -368.2123f, 116.9278f, 4.310963f},
-    {109.3343f, -366.4785f, 116.9261f, 2.740167f},
-    {110.1331f, -363.9824f, 116.9272f, 0.5235988f},
-    {111.9971f, -363.0948f, 116.929f, 5.951573f},
-};
-
-static const Position aSpectatorsTargetLocs[12] =
-{
-    {160.619f, -395.826f, 121.9752f, -1.502597f},
-    {162.1428f, -395.1175f, 121.9751f, -1.67753f},
-    {158.6822f, -395.7097f, 121.9753f, -1.787977f},
-    {164.384f, -395.3787f, 121.9751f, -1.502597f},
-    {156.9669f, -395.2188f, 121.9752f, -1.678662f},
-    {166.2515f, -395.0366f, 121.975f, -1.791467f},
-    {143.814f, -396.7092f, 121.9753f, -1.40136f},
-    {145.3893f, -396.1959f, 121.9752f, -1.419479f},
-    {142.1598f, -396.0284f, 121.9752f, -1.661444f},
-    {147.7274f, -396.3042f, 121.9753f, -1.40136f},
-    {139.9446f, -396.7277f, 121.9753f, -1.428414f},
-    {149.3754f, -395.7497f, 121.9753f, -1.714769f},
-};
-
-// Stadium event description
-static const uint32 aStadiumEventNpcs[MAX_STADIUM_WAVES][5] =
-{
-    {NPC_CHROMATIC_WHELP, NPC_CHROMATIC_WHELP, NPC_CHROMATIC_WHELP, NPC_CHROMATIC_DRAGON, 0},
-    {NPC_CHROMATIC_WHELP, NPC_CHROMATIC_WHELP, NPC_CHROMATIC_WHELP, NPC_CHROMATIC_DRAGON, 0},
-    {NPC_CHROMATIC_WHELP, NPC_CHROMATIC_WHELP, NPC_CHROMATIC_DRAGON, NPC_BLACKHAND_HANDLER, 0},
-    {NPC_CHROMATIC_WHELP, NPC_CHROMATIC_WHELP, NPC_CHROMATIC_DRAGON, NPC_BLACKHAND_HANDLER, 0},
-    {NPC_CHROMATIC_WHELP, NPC_CHROMATIC_WHELP, NPC_CHROMATIC_WHELP, NPC_CHROMATIC_DRAGON, NPC_BLACKHAND_HANDLER},
-    {NPC_CHROMATIC_WHELP, NPC_CHROMATIC_WHELP, NPC_CHROMATIC_DRAGON, NPC_CHROMATIC_DRAGON, NPC_BLACKHAND_HANDLER},
-    {NPC_CHROMATIC_WHELP, NPC_CHROMATIC_WHELP, NPC_CHROMATIC_DRAGON, NPC_CHROMATIC_DRAGON, NPC_BLACKHAND_HANDLER},
-};
-
-class instance_blackrock_spire : public ScriptedInstance, private DialogueHelper
-{
-    public:
-        instance_blackrock_spire(Map* pMap);
-        ~instance_blackrock_spire() {}
-
-        void Initialize() override;
-
-        void OnObjectCreate(GameObject* pGo) override;
-        void OnCreatureCreate(Creature* pCreature) override;
-        void OnCreatureRespawn(Creature* pCreature) override;
-        void OnPlayerEnter(Player* player) override;
-        void OnPlayerLeave(Player* player) override;
-
-        void OnCreatureDeath(Creature* pCreature) override;
-        void OnCreatureEvade(Creature* pCreature) override;
-        void OnCreatureEnterCombat(Creature* pCreature) override;
-        void OnCreatureDespawn(Creature* pCreature) override;
-
-        void SetData(uint32 uiType, uint32 uiData) override;
-        void SetData64(uint32 type, uint64 value) override;
-        bool StartUrok(Object* source, Object* target) { return m_lower.StartUrok(source, target); }
-        uint32 GetData(uint32 uiType) const override;
-
-        std::vector<InstanceEventReset> GetResettableEvents() const override;
-        bool GetEventResetData(uint32 eventId, std::string& data) const override;
-        void ApplyEventReset(uint32 eventId, std::string const& data) override;
-
-        const char* Save() const override { return m_strInstData.c_str(); }
-        void Load(const char* chrIn) override;
-
-        void DoUseEmberseerRunes(bool bReset = false);
-        void DoProcessEmberseerEvent();
-
-        void DoOpenUpperDoorIfCan(Player* pPlayer);
-        void DoSortRoomEventMobs();
-        void GetIncarceratorGUIDList(GuidList& lList) const { lList = m_lIncarceratorGUIDList; }
-
-        void StartflamewreathEventIfCan();
-
-        void Update(const uint32 diff) override;
-
-        bool m_bBeastIntroDone;
-        bool m_bBeastOutOfLair;
-
-    private:
-        void JustDidDialogueStep(int32 iEntry) override;
-        void DoSendNextStadiumWave();
-        void DoSendNextFlamewreathWave();
-        void RestoreStadiumDoor(GameObject* go);
-        std::string BuildSave(bool resetStadium = false) const;
-        void SaveState();
-
-        bool m_bUpperDoorOpened;
-
-        uint32 m_auiEncounter[MAX_ENCOUNTER];
-        std::string m_strInstData;
-
-        uint32 m_uiDragonspineDoorTimer;
-        uint32 m_uiDragonspineGoCount;
-        uint32 m_uiFlamewreathEventTimer;
-        uint32 m_uiFlamewreathWaveCount;
-        uint32 m_uiStadiumEventTimer;
-        uint8 m_uiStadiumWaves;
-        uint8 m_uiStadiumMobsAlive;
-        bool m_stadiumResetObjects;
-
-        ObjectGuid m_aRoomRuneGuid[MAX_ROOMS];
-        GuidList m_alRoomEventMobGUIDSorted[MAX_ROOMS];
-        GuidList m_lRoomEventMobGUIDList;
-        GuidList m_lIncarceratorGUIDList;
-        GuidList m_lEmberseerRunesGUIDList;
-        GuidList m_lStadiumSpectatorsGUIDList;
-        GuidSet m_sStadiumEventActors;
-        BlackrockSpireLower m_lower;
-};
-
 #endif

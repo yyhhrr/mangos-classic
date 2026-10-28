@@ -35,6 +35,7 @@ public:
     // nullptr spell is the instance's verified EventAI action35 request from16044.
     bool HandleGrayhoofSpellHit(Creature* trigger, SpellEntry const* spell);
     std::string Save() const;
+    static bool ValidateSave(std::string const& text);
     bool Load(std::string const& text);
 
 private:
@@ -60,6 +61,7 @@ private:
         std::array<Actor, ACTOR_SLOTS> actors{};
     };
 
+    static bool Decode(std::string const&, Progress&);
     static uint64 Now();
     void Commit();
     void ClearLiving(uint32 first, uint32 last);
