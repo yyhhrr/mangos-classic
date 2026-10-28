@@ -6,6 +6,7 @@
 #define DEF_DM_H
 
 #include "dire_maul_east.h"
+#include "dire_maul_west.h"
 
 enum
 {
@@ -144,6 +145,8 @@ class instance_dire_maul : public ScriptedInstance
         void SetData64(uint32, uint64) override;
         DireMaulEast& East() { return m_east; }
         DireMaulEast const& East() const { return m_east; }
+        DireMaulWest& West() { return m_west; }
+        DireMaulWest const& West() const { return m_west; }
 
         void SetData(uint32 uiType, uint32 uiData) override;
         uint32 GetData(uint32 uiType) const override;
@@ -163,34 +166,16 @@ class instance_dire_maul : public ScriptedInstance
         bool CheckConditionCriteriaMeet(Player const* pPlayer, uint32 uiInstanceConditionId, WorldObject const* pConditionSource, uint32 conditionSourceType) const override;
 
         void Update(const uint32 diff) override;
-        GuidVector GetRitualSymbolGuids();
-        void ProcessDreadsteedRitualStart();
-
     protected:
-        bool CheckAllGeneratorsDestroyed();
-        void ProcessForceFieldOpening();
-        void SortPylonGuards();
-        void PylonGuardJustDied(Creature* pCreature);
-
         uint32 m_auiEncounter[MAX_ENCOUNTER];
         std::string m_strInstData;
 
         void SaveState();
         std::string BuildSave(std::array<uint32, MAX_ENCOUNTER> const* prefix = nullptr) const;
 
-        // West
-        ObjectGuid m_aCrystalGeneratorGuid[MAX_GENERATORS];
-
-        GuidList m_luiHighborneSummonerGUIDs;
-        GuidList m_lGeneratorGuardGUIDs;
-        GuidList m_lDreadsteedPortalsGUIDs;
-        std::set<uint32> m_sSortedGeneratorGuards[MAX_GENERATORS];
-
-        GuidVector m_lRitualSymbolGUIDs;
-
-        // North
-        bool m_bDoNorthBeforeWest;
+        bool m_loading = false;
         DireMaulEast m_east;
+        DireMaulWest m_west;
 };
 
 #endif

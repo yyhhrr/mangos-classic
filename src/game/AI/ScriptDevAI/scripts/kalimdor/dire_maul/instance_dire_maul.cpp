@@ -17,7 +17,7 @@
 /* ScriptData
 SDName: instance_dire_maul
 SD%Complete: 70
-SDComment: East CreatureAI scenes use a versioned coordinator; West and North retain their existing behaviour
+SDComment: East CreatureAI scenes use a versioned coordinator; West uses acknowledged ritual progress and fixed pylon identities
 SDCategory: Dire Maul
 EndScriptData
 
@@ -29,7 +29,7 @@ EndScriptData
 
 namespace
 {
-bool ParseDireMaulSave(char const* text, std::array<uint32, MAX_ENCOUNTER>& prefix, std::string& east)
+bool ParseDireMaulSave(char const* text, std::array<uint32, MAX_ENCOUNTER>& prefix, std::string& east, std::string& west)
 {
     if (!text || std::char_traits<char>::length(text) > 65536) return false;
     std::istringstream in(text);
@@ -40,8 +40,32 @@ bool ParseDireMaulSave(char const* text, std::array<uint32, MAX_ENCOUNTER>& pref
         value = uint32(token[0] - '0');
     }
     in >> std::ws;
-    east.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    return true;
+    std::string tail(std::istreambuf_iterator<char>(in), {});
+    west.clear();
+    if (tail.compare(0, 5, "DMW1 ") != 0) { east = tail; return true; }
+    std::istringstream framed(tail.substr(5));
+    std::string token;
+    if (!(framed >> token) || token.empty()) return false;
+    uint32 length = 0;
+    for (char c : token)
+    {
+        if (c < '0' || c > '9' || length > 2400 || (length == 2400 && c != '0')) return false;
+        length = length * 10 + uint32(c - '0');
+    }
+    if (!length || framed.get() != ' ') return false;
+    west.resize(length);
+    if (!framed.read(&west[0], length) || framed.get() != ' ') return false;
+    east.assign(std::istreambuf_iterator<char>(framed), {});
+    // An explicit West frame always carries the East extension. Treat a
+    // truncated new save as damaged, rather than silently loading East legacy.
+    return !east.empty();
+}
+std::array<uint32, 9> WestPrefix(std::array<uint32, MAX_ENCOUNTER> const& prefix)
+{
+    std::array<uint32, 9> result{};
+    for (uint32 i = 0; i < 8; ++i) result[i] = prefix[TYPE_WARPWOOD + i];
+    result[8] = prefix[TYPE_DREADSTEED];
+    return result;
 }
 }
 
@@ -53,13 +77,14 @@ std::string instance_dire_maul::BuildSave(std::array<uint32, MAX_ENCOUNTER> cons
         if (i) out << ' ';
         out << (prefix ? (*prefix)[i] : GetData(i));
     }
-    out << ' ' << m_east.Save();
+    std::string west = m_west.Save();
+    out << " DMW1 " << west.size() << ' ' << west << ' ' << m_east.Save();
     return out.str();
 }
-void instance_dire_maul::SaveState() { m_strInstData = BuildSave(); SaveToDB(); }
-void instance_dire_maul::OnCreatureRespawn(Creature* actor) { m_east.OnCreatureRespawn(actor); }
-void instance_dire_maul::OnCreatureEvade(Creature* actor) { m_east.OnCreatureEvade(actor); }
-void instance_dire_maul::OnCreatureDespawn(Creature* actor) { m_east.OnCreatureDespawn(actor); }
+void instance_dire_maul::SaveState() { m_strInstData = BuildSave(); if (!m_loading) SaveToDB(); }
+void instance_dire_maul::OnCreatureRespawn(Creature* actor) { m_east.OnCreatureRespawn(actor); m_west.OnCreatureRespawn(actor); }
+void instance_dire_maul::OnCreatureEvade(Creature* actor) { m_east.OnCreatureEvade(actor); m_west.OnCreatureEvade(actor); }
+void instance_dire_maul::OnCreatureDespawn(Creature* actor) { m_east.OnCreatureDespawn(actor); m_west.OnCreatureDespawn(actor); }
 void instance_dire_maul::SetData64(uint32 type, uint64 value)
 {
     if (type == 1002)
@@ -75,8 +100,8 @@ void instance_dire_maul::OnGameObjectLootSnapshot(ObjectGuid const& guid, uint32
 }
 
 instance_dire_maul::instance_dire_maul(Map* pMap) : ScriptedInstance(pMap),
-    m_bDoNorthBeforeWest(false),
-    m_east(*this, [this]() { SaveState(); })
+    m_east(*this, [this]() { SaveState(); }),
+    m_west(*this, [this]() { SaveState(); })
 {
     Initialize();
 }
@@ -90,41 +115,18 @@ void instance_dire_maul::Initialize()
 void instance_dire_maul::Update(uint32 diff)
 {
     m_east.Update(diff);
-    if (GetData(TYPE_DREADSTEED) == IN_PROGRESS)
-    {
-        // While J'eevee is spawned, failure condition is simply no players found
-        if (Creature* imp = instance->GetCreature(m_npcEntryGuidStore[NPC_JEEVEE]))
-        {
-            if (instance->GetPlayersCountExceptGMs() == 0)
-                SetData(TYPE_DREADSTEED, FAIL);
-        }
-        else
-        {
-            GameObject* bell = instance->GetGameObject(m_goEntryGuidStore[GO_BELL_OF_DETHMOORA]);
-            GameObject* wheel = instance->GetGameObject(m_goEntryGuidStore[GO_WHEEL_OF_BLACK_MARCH]);
-            GameObject* candle = instance->GetGameObject(m_goEntryGuidStore[GO_DOOMSDAY_CANDLE]);
-            if (bell && bell->GetLootState() != GO_ACTIVATED && wheel && wheel->GetLootState() != GO_ACTIVATED && candle && candle->GetLootState() != GO_ACTIVATED)
-                SetData(TYPE_DREADSTEED, FAIL);
-        }
-    }
+    m_west.Update(diff);
 }
 
-void instance_dire_maul::OnPlayerEnter(Player* pPlayer)
+void instance_dire_maul::OnPlayerEnter(Player* player)
 {
-    m_east.OnPlayerEnter(pPlayer);
-    // figure where to enter to set library doors accordingly
-    // Enter DM North first
-    if (pPlayer->IsWithinDist2d(260.0f, -20.0f, 20.0f) && m_auiEncounter[TYPE_WARPWOOD] != DONE)
-        m_bDoNorthBeforeWest = true;
-    else
-        m_bDoNorthBeforeWest = false;
-
-    DoToggleGameObjectFlags(GO_WEST_LIBRARY_DOOR, GO_FLAG_NO_INTERACT, m_bDoNorthBeforeWest);
-    DoToggleGameObjectFlags(GO_WEST_LIBRARY_DOOR, GO_FLAG_LOCKED, !m_bDoNorthBeforeWest);
+    m_east.OnPlayerEnter(player);
+    m_west.OnPlayerEnter(player);
 }
 
 void instance_dire_maul::OnPlayerLeave(Player* pPlayer) {
     m_east.OnPlayerLeave(pPlayer);
+    m_west.OnPlayerLeave(pPlayer);
     // Remove King of the Gordok aura
     if (pPlayer->HasAura(SPELL_KING_OF_GORDOK))
         pPlayer->RemoveAurasDueToSpell(SPELL_KING_OF_GORDOK);
@@ -133,6 +135,7 @@ void instance_dire_maul::OnPlayerLeave(Player* pPlayer) {
 void instance_dire_maul::OnCreatureCreate(Creature* pCreature)
 {
     m_east.OnCreatureCreate(pCreature);
+    m_west.OnCreatureCreate(pCreature);
     switch (pCreature->GetEntry())
     {
         // East
@@ -140,22 +143,12 @@ void instance_dire_maul::OnCreatureCreate(Creature* pCreature)
         case NPC_IRONBARK_REDEEMED:
             break;
 
-        // West
+        // West actor ownership is maintained by the coordinator.
         case NPC_PRINCE_TORTHELDRIN:
-            if (m_auiEncounter[TYPE_IMMOLTHAR] == DONE)
-                pCreature->SetFactionTemporary(FACTION_HOSTILE, TEMPFACTION_RESTORE_RESPAWN | TEMPFACTION_TOGGLE_IMMUNE_TO_PLAYER);
-            break;
-        case NPC_ARCANE_ABERRATION:
-        case NPC_MANA_REMNANT:
-            m_lGeneratorGuardGUIDs.push_back(pCreature->GetObjectGuid());
-            return;
         case NPC_IMMOLTHAR:
         case NPC_WARLOCK_DUMMY_INFERNAL:
         case NPC_JEEVEE:
             break;
-        case NPC_HIGHBORNE_SUMMONER:
-            m_luiHighborneSummonerGUIDs.push_back(pCreature->GetObjectGuid());
-            return;
 
         // North
         case NPC_CHO_RUSH_THE_OBSERVER:
@@ -176,6 +169,7 @@ void instance_dire_maul::OnCreatureCreate(Creature* pCreature)
 void instance_dire_maul::OnObjectCreate(GameObject* pGo)
 {
     m_east.OnObjectCreate(pGo);
+    m_west.OnObjectCreate(pGo);
     switch (pGo->GetEntry())
     {
         // East object state is synchronized by the versioned coordinator.
@@ -185,61 +179,13 @@ void instance_dire_maul::OnObjectCreate(GameObject* pGo)
         case GO_FELVINE_SHARD:
             break;
 
-        // West
-        case GO_CRYSTAL_GENERATOR_1:
-            m_aCrystalGeneratorGuid[0] = pGo->GetObjectGuid();
-            if (m_auiEncounter[TYPE_PYLON_1] == DONE)
-                pGo->SetGoState(GO_STATE_ACTIVE);
-            return;
-        case GO_CRYSTAL_GENERATOR_2:
-            m_aCrystalGeneratorGuid[1] = pGo->GetObjectGuid();
-            if (m_auiEncounter[TYPE_PYLON_2] == DONE)
-                pGo->SetGoState(GO_STATE_ACTIVE);
-            return;
-        case GO_CRYSTAL_GENERATOR_3:
-            m_aCrystalGeneratorGuid[2] = pGo->GetObjectGuid();
-            if (m_auiEncounter[TYPE_PYLON_3] == DONE)
-                pGo->SetGoState(GO_STATE_ACTIVE);
-            return;
-        case GO_CRYSTAL_GENERATOR_4:
-            m_aCrystalGeneratorGuid[3] = pGo->GetObjectGuid();
-            if (m_auiEncounter[TYPE_PYLON_4] == DONE)
-                pGo->SetGoState(GO_STATE_ACTIVE);
-            return;
-        case GO_CRYSTAL_GENERATOR_5:
-            m_aCrystalGeneratorGuid[4] = pGo->GetObjectGuid();
-            if (m_auiEncounter[TYPE_PYLON_5] == DONE)
-                pGo->SetGoState(GO_STATE_ACTIVE);
-            return;
-        case GO_FORCEFIELD:
-            if (CheckAllGeneratorsDestroyed())
-                pGo->SetGoState(GO_STATE_ACTIVE);
-            break;
-        case GO_PRINCES_CHEST_AURA:
-            break;
-        case GO_WARPWOOD_DOOR:
-            if (m_auiEncounter[TYPE_WARPWOOD] == DONE)
-                pGo->SetGoState(GO_STATE_ACTIVE);
-            break;
-        case GO_WEST_LIBRARY_DOOR:
-            pGo->SetFlag(GAMEOBJECT_FLAGS, m_bDoNorthBeforeWest ? GO_FLAG_NO_INTERACT : GO_FLAG_LOCKED);
-            pGo->RemoveFlag(GAMEOBJECT_FLAGS, m_bDoNorthBeforeWest ? GO_FLAG_LOCKED : GO_FLAG_NO_INTERACT);
-            break;
-        case GO_DREADSTEED_PORTAL:
-            // exclude the central portal
-            if (pGo->GetPositionZ() > -29.0f)
-                m_lDreadsteedPortalsGUIDs.push_back(pGo->GetObjectGuid());
-            return; 
-        case GO_BELL_OF_DETHMOORA:
-        case GO_WHEEL_OF_BLACK_MARCH:
-        case GO_DOOMSDAY_CANDLE:
-        case GO_WARLOCK_RITUAL_CIRCLE:
-        case GO_RITUAL_CANDLE_AURA:
-            break;
-        case GO_MOUNT_QUEST_SYMBOL1:
-        case GO_MOUNT_QUEST_SYMBOL2:
-        case GO_MOUNT_QUEST_SYMBOL3:
-            m_lRitualSymbolGUIDs.push_back(pGo->GetObjectGuid());
+        // West final state and fixed ritual identities are synchronized separately.
+        case GO_CRYSTAL_GENERATOR_1: case GO_CRYSTAL_GENERATOR_2: case GO_CRYSTAL_GENERATOR_3:
+        case GO_CRYSTAL_GENERATOR_4: case GO_CRYSTAL_GENERATOR_5: case GO_FORCEFIELD:
+        case GO_PRINCES_CHEST_AURA: case GO_WARPWOOD_DOOR: case GO_WEST_LIBRARY_DOOR:
+        case GO_DREADSTEED_PORTAL: case GO_BELL_OF_DETHMOORA: case GO_WHEEL_OF_BLACK_MARCH:
+        case GO_DOOMSDAY_CANDLE: case GO_WARLOCK_RITUAL_CIRCLE: case GO_RITUAL_CANDLE_AURA:
+        case GO_MOUNT_QUEST_SYMBOL1: case GO_MOUNT_QUEST_SYMBOL2: case GO_MOUNT_QUEST_SYMBOL3:
             break;
 
         // North
@@ -256,71 +202,9 @@ void instance_dire_maul::SetData(uint32 uiType, uint32 uiData)
 {
     if (uiType < 3) { m_east.SetData(uiType, uiData); return; }
     if (uiType >= MAX_ENCOUNTER || uiData > SPECIAL) return;
+    if ((uiType >= TYPE_WARPWOOD && uiType <= TYPE_PYLON_5) || uiType == TYPE_DREADSTEED) { m_west.SetData(uiType, uiData); return; }
     switch (uiType)
     {
-        // West
-        case TYPE_WARPWOOD:
-            if (uiData == DONE)
-                DoUseDoorOrButton(GO_WARPWOOD_DOOR);
-            m_auiEncounter[uiType] = uiData;
-            break;
-        case TYPE_IMMOLTHAR:
-            if (uiData == DONE)
-            {
-                if (Creature* pPrince = GetSingleCreatureFromStorage(NPC_PRINCE_TORTHELDRIN))
-                {
-                    DoScriptText(SAY_FREE_IMMOLTHAR, pPrince);
-                    pPrince->SetFactionTemporary(FACTION_HOSTILE, TEMPFACTION_RESTORE_RESPAWN | TEMPFACTION_TOGGLE_IMMUNE_TO_PLAYER);
-                    // Despawn Chest-Aura
-                    if (GameObject* pChestAura = GetSingleGameObjectFromStorage(GO_PRINCES_CHEST_AURA))
-                        pChestAura->Use(pPrince);
-                }
-            }
-            m_auiEncounter[uiType] = uiData;
-            break;
-        case TYPE_PRINCE:
-            m_auiEncounter[uiType] = uiData;
-            break;
-        case TYPE_PYLON_1:
-        case TYPE_PYLON_2:
-        case TYPE_PYLON_3:
-        case TYPE_PYLON_4:
-        case TYPE_PYLON_5:
-            m_auiEncounter[uiType] = uiData;
-            if (uiData == DONE)
-            {
-                DoUseDoorOrButton(m_aCrystalGeneratorGuid[uiType - TYPE_PYLON_1]);
-                if (CheckAllGeneratorsDestroyed())
-                    ProcessForceFieldOpening();
-            }
-            break;
-        case TYPE_DREADSTEED:
-            m_auiEncounter[uiType] = uiData;
-            if (uiData == FAIL)
-            {
-                if (Creature* pRitual = GetSingleCreatureFromStorage(NPC_WARLOCK_DUMMY_INFERNAL))
-                    pRitual->ForcedDespawn();
-
-                for (auto portal : m_lDreadsteedPortalsGUIDs)
-                    instance->GetGameObject(portal)->SetLootState(GO_JUST_DEACTIVATED);
-
-                for (auto symbol : m_lRitualSymbolGUIDs)
-                    instance->GetGameObject(symbol)->SetLootState(GO_JUST_DEACTIVATED);
-
-                std::vector<uint32> ids = { GO_BELL_OF_DETHMOORA , GO_DOOMSDAY_CANDLE , GO_WHEEL_OF_BLACK_MARCH };
-                for (uint32 id : ids)
-                {
-                    if (GameObject* pGo = GetSingleGameObjectFromStorage(id))
-                    {
-                        pGo->SetLootState(GO_JUST_DEACTIVATED);
-                        pGo->SetRespawnDelay(1);
-                    }
-                }
-
-                if (GameObject *pGo = GetSingleGameObjectFromStorage(GO_WARLOCK_RITUAL_CIRCLE))
-                    pGo->SetLootState(GO_JUST_DEACTIVATED);
-            }
-            break;
         // North
         case TYPE_KING_GORDOK:
             m_auiEncounter[uiType] = uiData;
@@ -396,8 +280,8 @@ void instance_dire_maul::ApplyEventReset(uint32 eventId, std::string const& data
 {
     if (eventId != TYPE_KING_GORDOK) return;
     std::array<uint32, MAX_ENCOUNTER> prefix{};
-    std::string east;
-    if (!ParseDireMaulSave(data.c_str(), prefix, east) || east != m_east.Save() || prefix[TYPE_KING_GORDOK] != NOT_STARTED) return;
+    std::string east, west;
+    if (!ParseDireMaulSave(data.c_str(), prefix, east, west) || east != m_east.Save() || west != m_west.Save() || prefix[TYPE_KING_GORDOK] != NOT_STARTED) return;
     for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
         if (i != TYPE_KING_GORDOK && prefix[i] != GetData(i)) return;
     // Reset only North. Loading East here would detach its live actor GUIDs.
@@ -439,51 +323,21 @@ bool instance_dire_maul::GetBossLootReward(uint32 bossEntry, BossLootReward& rew
 uint32 instance_dire_maul::GetData(uint32 uiType) const
 {
     if (uiType < 3) return m_east.GetData(uiType);
+    if ((uiType >= TYPE_WARPWOOD && uiType <= TYPE_PYLON_5) || uiType == TYPE_DREADSTEED) return m_west.GetData(uiType);
     if (uiType < MAX_ENCOUNTER)
         return m_auiEncounter[uiType];
 
     return 0;
 }
 
-void instance_dire_maul::OnCreatureEnterCombat(Creature* pCreature)
-{
-    switch (pCreature->GetEntry())
-    {
-        // West
-        // - Handling of guards of generators
-        case NPC_ARCANE_ABERRATION:
-        case NPC_MANA_REMNANT:
-            SortPylonGuards();
-            break;
-        // - Set InstData for ImmolThar
-        case NPC_IMMOLTHAR:
-            SetData(TYPE_IMMOLTHAR, IN_PROGRESS);
-            break;
-    }
-}
+void instance_dire_maul::OnCreatureEnterCombat(Creature* actor) { m_west.OnCreatureEnterCombat(actor); }
 
 void instance_dire_maul::OnCreatureDeath(Creature* pCreature)
 {
     m_east.OnCreatureDeath(pCreature);
+    m_west.OnCreatureDeath(pCreature);
     switch (pCreature->GetEntry())
     {
-        // West
-        // - Handling of guards of generators
-        case NPC_ARCANE_ABERRATION:
-        case NPC_MANA_REMNANT:
-            PylonGuardJustDied(pCreature);
-            break;
-        // - InstData settings
-        case NPC_TENDRIS_WARPWOOD:
-            SetData(TYPE_WARPWOOD, DONE);
-            break;
-        case NPC_IMMOLTHAR:
-            SetData(TYPE_IMMOLTHAR, DONE);
-            break;
-        case NPC_LORD_HELNURATH:
-            SetData(TYPE_DREADSTEED, DONE);
-            break;
-
         // North
         // - Handling of Ogre Boss (Assume boss can be handled in Acid)
         case NPC_KING_GORDOK:
@@ -514,16 +368,20 @@ void instance_dire_maul::OnCreatureDeath(Creature* pCreature)
 void instance_dire_maul::Load(char const* text)
 {
     std::array<uint32, MAX_ENCOUNTER> prefix{};
-    std::string east;
-    if (!ParseDireMaulSave(text, prefix, east) ||
-        !DireMaulEast::ValidateSave({{prefix[0], prefix[1], prefix[2]}}, east))
+    std::string east, west;
+    if (!ParseDireMaulSave(text, prefix, east, west) ||
+        !DireMaulEast::ValidateSave({{prefix[0], prefix[1], prefix[2]}}, east) ||
+        !DireMaulWest::ValidateSave(WestPrefix(prefix), west))
     {
         OUT_LOAD_INST_DATA_FAIL;
         return;
     }
+    m_loading = true;
     for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
         m_auiEncounter[i] = i >= 3 && prefix[i] == IN_PROGRESS ? uint32(NOT_STARTED) : prefix[i];
     m_east.Load({{prefix[0], prefix[1], prefix[2]}}, east);
+    m_west.Load(WestPrefix(prefix), west);
+    m_loading = false;
     m_strInstData = BuildSave();
     OUT_LOAD_INST_DATA_COMPLETE;
 }
@@ -550,111 +408,6 @@ bool instance_dire_maul::CheckConditionCriteriaMeet(Player const* pPlayer, uint3
     script_error_log("instance_dire_maul::CheckConditionCriteriaMeet called with unsupported Id %u. Called with param plr %s, src %s, condition source type %u",
                      uiInstanceConditionId, pPlayer ? pPlayer->GetGuidStr().c_str() : "nullptr", pConditionSource ? pConditionSource->GetGuidStr().c_str() : "nullptr", conditionSourceType);
     return false;
-}
-
-GuidVector instance_dire_maul::GetRitualSymbolGuids()
-{
-    return m_lRitualSymbolGUIDs;
-}
-
-bool instance_dire_maul::CheckAllGeneratorsDestroyed()
-{
-    return !(m_auiEncounter[TYPE_PYLON_1] != DONE || m_auiEncounter[TYPE_PYLON_2] != DONE || m_auiEncounter[TYPE_PYLON_3] != DONE || m_auiEncounter[TYPE_PYLON_4] != DONE || m_auiEncounter[TYPE_PYLON_5] != DONE);
-}
-
-void instance_dire_maul::ProcessForceFieldOpening()
-{
-    // 'Open' the force field
-    DoUseDoorOrButton(GO_FORCEFIELD);
-
-    // Let the summoners attack Immol'Thar
-    Creature* pImmolThar = GetSingleCreatureFromStorage(NPC_IMMOLTHAR);
-    if (!pImmolThar || pImmolThar->IsDead())
-        return;
-
-    bool bHasYelled = false;
-    for (GuidList::const_iterator itr = m_luiHighborneSummonerGUIDs.begin(); itr != m_luiHighborneSummonerGUIDs.end(); ++itr)
-    {
-        Creature* pSummoner = instance->GetCreature(*itr);
-
-        if (!bHasYelled && pSummoner)
-        {
-            DoScriptText(SAY_KILL_IMMOLTHAR, pSummoner);
-            bHasYelled = true;
-        }
-
-        if (!pSummoner || pSummoner->IsDead())
-            continue;
-
-        pSummoner->AI()->AttackStart(pImmolThar);
-    }
-    m_luiHighborneSummonerGUIDs.clear();
-}
-
-void instance_dire_maul::SortPylonGuards()
-{
-    if (!m_lGeneratorGuardGUIDs.empty())
-    {
-        for (uint8 i = 0; i < MAX_GENERATORS; ++i)
-        {
-            GameObject* pGenerator = instance->GetGameObject(m_aCrystalGeneratorGuid[i]);
-            // Skip non-existing or finished generators
-            if (!pGenerator || GetData(TYPE_PYLON_1 + i) == DONE)
-                continue;
-
-            // Sort all remaining (alive) NPCs to unfinished generators
-            for (GuidList::iterator itr = m_lGeneratorGuardGUIDs.begin(); itr != m_lGeneratorGuardGUIDs.end();)
-            {
-                Creature* pGuard = instance->GetCreature(*itr);
-                if (!pGuard || pGuard->IsDead())    // Remove invalid guids and dead guards
-                {
-                    m_lGeneratorGuardGUIDs.erase(itr++);
-                    continue;
-                }
-
-                if (pGuard->IsWithinDist2d(pGenerator->GetPositionX(), pGenerator->GetPositionY(), 20.0f))
-                {
-                    m_sSortedGeneratorGuards[i].insert(pGuard->GetGUIDLow());
-                    m_lGeneratorGuardGUIDs.erase(itr++);
-                }
-                else
-                    ++itr;
-            }
-        }
-    }
-}
-
-void instance_dire_maul::PylonGuardJustDied(Creature* pCreature)
-{
-    for (uint8 i = 0; i < MAX_GENERATORS; ++i)
-    {
-        // Skip already activated generators
-        if (GetData(TYPE_PYLON_1 + i) == DONE)
-            continue;
-
-        // Only process generator where the npc is sorted in
-        if (m_sSortedGeneratorGuards[i].find(pCreature->GetGUIDLow()) != m_sSortedGeneratorGuards[i].end())
-        {
-            m_sSortedGeneratorGuards[i].erase(pCreature->GetGUIDLow());
-            if (m_sSortedGeneratorGuards[i].empty())
-                SetData(TYPE_PYLON_1 + i, DONE);
-
-            break;
-        }
-    }
-}
-
-void instance_dire_maul::ProcessDreadsteedRitualStart()
-{
-    if (GameObject* go = GetSingleGameObjectFromStorage(GO_WARLOCK_RITUAL_CIRCLE))
-    {
-        go->SetRespawnTime(900);
-        go->Refresh();
-    }
-
-    for (auto portal : m_lDreadsteedPortalsGUIDs)
-        if (GameObject* go = instance->GetGameObject(portal))
-            DoRespawnGameObject(portal, 380);
 }
 
 InstanceData* GetInstanceData_instance_dire_maul(Map* pMap)
