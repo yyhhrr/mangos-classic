@@ -59,6 +59,8 @@ enum
     SPELL_KODO_DESPAWN              = 22970,                // spell only exists in classic dbc, used by kodo during following?
 };
 
+constexpr float KODO_DELIVERY_DISTANCE = 10.0f;
+
 struct npc_aged_dying_ancient_kodoAI : public ScriptedAI
 {
     npc_aged_dying_ancient_kodoAI(Creature* pCreature) : ScriptedAI(pCreature) { Reset(); }
@@ -72,12 +74,15 @@ struct npc_aged_dying_ancient_kodoAI : public ScriptedAI
 
     void MoveInLineOfSight(Unit* pWho) override
     {
-        if (pWho->GetEntry() == NPC_SMEED)
+        if (m_creature->GetEntry() != NPC_TAMED_KODO || !m_creature->HasAura(SPELL_KODO_KOMBO_DESPAWN_BUFF))
+            return;
+
+        if (pWho->GetEntry() == NPC_SMEED && pWho->IsAlive())
         {
             if (m_creature->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP))
                 return;
 
-            if (m_creature->IsWithinDistInMap(pWho, 10.0f))
+            if (GetClosestCreatureWithEntry(m_creature, NPC_SMEED, KODO_DELIVERY_DISTANCE) == pWho)
             {
                 switch (urand(0, 2))
                 {
@@ -94,7 +99,10 @@ struct npc_aged_dying_ancient_kodoAI : public ScriptedAI
 
     void SpellHit(Unit* /*pCaster*/, SpellEntry const* pSpell) override
     {
-        if (pSpell->Id == SPELL_KODO_KOMBO_GOSSIP)
+        if (pSpell->Id == SPELL_KODO_KOMBO_GOSSIP &&
+            m_creature->GetEntry() == NPC_TAMED_KODO &&
+            m_creature->HasAura(SPELL_KODO_KOMBO_DESPAWN_BUFF) &&
+            GetClosestCreatureWithEntry(m_creature, NPC_SMEED, KODO_DELIVERY_DISTANCE))
         {
             m_creature->GetMotionMaster()->MoveIdle();
             m_creature->SetFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
@@ -105,17 +113,21 @@ struct npc_aged_dying_ancient_kodoAI : public ScriptedAI
     void UpdateAI(const uint32 diff) override
     {
         // timer should always be == 0 unless we already updated entry of creature. Then not expect this updated to ever be in combat.
-        if (m_uiDespawnTimer && m_uiDespawnTimer <= diff)
+        if (m_uiDespawnTimer)
         {
-            if (!m_creature->GetVictim() && m_creature->IsAlive())
+            if (m_uiDespawnTimer <= diff)
             {
-                Reset();
-                m_creature->SetDeathState(JUST_DIED);
-                m_creature->Respawn();
-                return;
+                if (!m_creature->GetVictim() && m_creature->IsAlive())
+                {
+                    Reset();
+                    m_creature->SetDeathState(JUST_DIED);
+                    m_creature->Respawn();
+                    return;
+                }
             }
+            else
+                m_uiDespawnTimer -= diff;
         }
-        else m_uiDespawnTimer -= diff;
 
         if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
             return;
@@ -150,6 +162,8 @@ struct KodoKombobulator : public SpellScript
         Unit* target = spell->GetUnitTarget();
         // The player buff requires a friendly target: tame the kodo before casting it.
         static_cast<Creature*>(target)->UpdateEntry(NPC_TAMED_KODO);
+        // Delivery interaction opens only after this kodo reaches Smeed.
+        target->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
         target->CastSpell(caster, SPELL_KODO_KOMBO_PLAYER_BUFF, TRIGGERED_OLD_TRIGGERED);
         target->CastSpell(nullptr, SPELL_KODO_KOMBO_DESPAWN_BUFF, TRIGGERED_NONE);
 
@@ -162,12 +176,21 @@ struct KodoKombobulator : public SpellScript
 
 bool GossipHello_npc_aged_dying_ancient_kodo(Player* pPlayer, Creature* pCreature)
 {
-    if (pPlayer->HasAura(SPELL_KODO_KOMBO_PLAYER_BUFF) && pCreature->HasAura(SPELL_KODO_KOMBO_DESPAWN_BUFF))
+    // Recheck the location here as stale or direct gossip requests can bypass the UI.
+    if (pCreature->GetEntry() == NPC_TAMED_KODO &&
+        pCreature->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP) &&
+        GetClosestCreatureWithEntry(pCreature, NPC_SMEED, KODO_DELIVERY_DISTANCE) &&
+        pPlayer->GetQuestStatus(QUEST_KODO) == QUEST_STATUS_INCOMPLETE &&
+        pPlayer->GetSpellAuraHolder(SPELL_KODO_KOMBO_PLAYER_BUFF, pCreature->GetObjectGuid()) &&
+        pCreature->HasAura(SPELL_KODO_KOMBO_DESPAWN_BUFF))
     {
         // the expected quest objective
         pPlayer->TalkedToCreature(pCreature->GetEntry(), pCreature->GetObjectGuid());
 
         pPlayer->RemoveAurasDueToSpell(SPELL_KODO_KOMBO_PLAYER_BUFF);
+        // Consume this kodo's delivery state before the delayed despawn.
+        pCreature->RemoveAurasDueToSpell(SPELL_KODO_KOMBO_DESPAWN_BUFF);
+        pCreature->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
         pCreature->ForcedDespawn(10000);
     }
 
