@@ -215,6 +215,22 @@ struct ZigguratStore
     GuidList m_zigguratAcolyteGuid;
 };
 
+struct StratholmeSpawn
+{
+    uint32 kind = 0, entry = 0;
+    bool created = false, killed = false;
+    float x = 0, y = 0, z = 0, o = 0, dx = 0, dy = 0, dz = 0;
+    uint64 expires = 0;
+    ObjectGuid guid;
+    uint32 attempts = 0;
+};
+
+struct StratholmeBoxRequest
+{
+    uint32 generation = 0, attempts = 0;
+    ObjectGuid owner;
+};
+
 class instance_stratholme : public ScriptedInstance
 {
     public:
@@ -227,6 +243,9 @@ class instance_stratholme : public ScriptedInstance
 
         void OnCreatureCreate(Creature* creature) override;
         void OnObjectCreate(GameObject* go) override;
+        void OnObjectSpawn(GameObject* go) override;
+        bool StartBaronRun(Player* player);
+        bool UsePostbox(Player* player, GameObject* go);
 
         void SetData(uint32 type, uint32 data) override;
         uint32 GetData(uint32 type) const override;
@@ -244,6 +263,51 @@ class instance_stratholme : public ScriptedInstance
         void Update(const uint32 diff) override;
 
     protected:
+        void BuildSaveData();
+        void SaveState();
+        void BuildStaticMembers();
+        void RestoreProgress();
+        void SyncObjects();
+        void SyncAurius();
+        void SyncRunAura(Player* player);
+        bool IsSlaughterParticipant(Player* player) const;
+        Player* GetSlaughterParticipant() const;
+        void AdvanceSlaughter();
+        void QueueSpawn(uint32 kind, uint32 entry, Position const& pos, Position const& dest);
+        bool SpawnSlot(StratholmeSpawn& slot);
+        void ProcessSpawns(uint32 diff);
+        void CheckDefenses(Creature* speaker = nullptr);
+        void EnsureYsida();
+        bool AllKilled(uint32 kind, uint32 count) const;
+        bool StaticMembersDead(std::set<uint32> const& members) const;
+        bool PairEnded() const;
+        void BeginNewPair();
+        void UpdatePairReward();
+
+        bool m_staticReady = false, m_restorePending = true, m_slaughterResumePending = false;
+        bool m_retryBlocked = false, m_runPaused = false, m_legacy = false;
+        uint32 m_slaughterPhase = 0, m_spawnTimer = 1, m_saveTimer = 1000;
+        uint32 m_defenseTriggered = 0, m_ysidaAttempts = 0, m_ysidaTimer = 1;
+        std::set<uint32> m_staticDead, m_abomExpected, m_towerExpected[3], m_defenseExpected[MAX_DEFENSE_POINTS];
+        std::map<uint32, ObjectGuid> m_staticGuids;
+        std::map<uint32, uint32> m_staticEntries;
+        std::vector<StratholmeSpawn> m_spawns;
+        std::set<uint32> m_postboxGuids;
+        ObjectGuid m_postmasterOwner, m_gateTrapTarget[2];
+        bool m_postmasterCasting = false;
+        bool m_pairBox = false;
+        bool m_pairBoxCasting = false;
+        bool m_pairTriggerSeen = false;
+        uint32 m_pairBoxAttempts = 0, m_internalSpawnKind = 0, m_runFailTimer = 0;
+        uint32 m_auriusAttempts = 0;
+        bool m_auriusPositionReady = false;
+        Position m_auriusPosition{};
+        ObjectGuid m_pairSpawner;
+        uint32 m_pairGeneration = 1, m_pairBoxCastingGeneration = 0;
+        ObjectGuid m_pairBoxCastingOwner;
+        std::vector<StratholmeBoxRequest> m_pairRewards;
+        GuidSet m_excessActors;
+
         bool StartSlaughterSquare();
         void DoSortZiggurats();
         void DoOpenSlaughterhouseDoor(bool open);

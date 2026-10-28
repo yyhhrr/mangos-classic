@@ -45,7 +45,7 @@ enum
     SPELL_MINDBLAST                 = 17287,
     SPELL_PSYCHICSCREAM             = 13704,
     SPELL_SLEEP                     = 12098,
-    SPELL_MINDCONTROL               = 15690,
+    SPELL_MINDCONTROL               = 17405,                // hostile-player charm;15690 is a self dummy aura
 
     NPC_DATHROHAN                   = 10812
 };
@@ -101,32 +101,32 @@ struct boss_dathrohan_balnazzarAI : public ScriptedAI
             // MindBlast
             if (m_uiMindBlast_Timer < uiDiff)
             {
-                DoCastSpellIfCan(m_creature->GetVictim(), SPELL_MINDBLAST);
-                m_uiMindBlast_Timer = urand(15000, 20000);
+                if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_MINDBLAST) == CAST_OK)
+                    m_uiMindBlast_Timer = urand(15000, 20000);
             }
             else m_uiMindBlast_Timer -= uiDiff;
 
             // CrusadersHammer
             if (m_uiCrusadersHammer_Timer < uiDiff)
             {
-                DoCastSpellIfCan(m_creature->GetVictim(), SPELL_CRUSADERSHAMMER);
-                m_uiCrusadersHammer_Timer = 12000;
+                if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_CRUSADERSHAMMER) == CAST_OK)
+                    m_uiCrusadersHammer_Timer = 12000;
             }
             else m_uiCrusadersHammer_Timer -= uiDiff;
 
             // CrusaderStrike
             if (m_uiCrusaderStrike_Timer < uiDiff)
             {
-                DoCastSpellIfCan(m_creature->GetVictim(), SPELL_CRUSADERSTRIKE);
-                m_uiCrusaderStrike_Timer = 15000;
+                if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_CRUSADERSTRIKE) == CAST_OK)
+                    m_uiCrusaderStrike_Timer = 15000;
             }
             else m_uiCrusaderStrike_Timer -= uiDiff;
 
             // HolyStrike
             if (m_uiHolyStrike_Timer < uiDiff)
             {
-                DoCastSpellIfCan(m_creature->GetVictim(), SPELL_HOLYSTRIKE);
-                m_uiHolyStrike_Timer = 15000;
+                if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_HOLYSTRIKE) == CAST_OK)
+                    m_uiHolyStrike_Timer = 15000;
             }
             else m_uiHolyStrike_Timer -= uiDiff;
 
@@ -150,16 +150,16 @@ struct boss_dathrohan_balnazzarAI : public ScriptedAI
             // MindBlast
             if (m_uiMindBlast_Timer < uiDiff)
             {
-                DoCastSpellIfCan(m_creature->GetVictim(), SPELL_MINDBLAST);
-                m_uiMindBlast_Timer = urand(15000, 20000);
+                if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_MINDBLAST) == CAST_OK)
+                    m_uiMindBlast_Timer = urand(15000, 20000);
             }
             else m_uiMindBlast_Timer -= uiDiff;
 
             // ShadowShock
             if (m_uiShadowShock_Timer < uiDiff)
             {
-                DoCastSpellIfCan(m_creature->GetVictim(), SPELL_SHADOWSHOCK);
-                m_uiShadowShock_Timer = 11000;
+                if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_SHADOWSHOCK) == CAST_OK)
+                    m_uiShadowShock_Timer = 11000;
             }
             else m_uiShadowShock_Timer -= uiDiff;
 
@@ -167,9 +167,8 @@ struct boss_dathrohan_balnazzarAI : public ScriptedAI
             if (m_uiPsychicScream_Timer < uiDiff)
             {
                 if (Unit* pTarget = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0))
-                    DoCastSpellIfCan(pTarget, SPELL_PSYCHICSCREAM);
-
-                m_uiPsychicScream_Timer = 20000;
+                    if (DoCastSpellIfCan(pTarget, SPELL_PSYCHICSCREAM) == CAST_OK)
+                        m_uiPsychicScream_Timer = 20000;
             }
             else m_uiPsychicScream_Timer -= uiDiff;
 
@@ -177,17 +176,21 @@ struct boss_dathrohan_balnazzarAI : public ScriptedAI
             if (m_uiDeepSleep_Timer < uiDiff)
             {
                 if (Unit* pTarget = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0))
-                    DoCastSpellIfCan(pTarget, SPELL_SLEEP);
-
-                m_uiDeepSleep_Timer = 15000;
+                    if (DoCastSpellIfCan(pTarget, SPELL_SLEEP) == CAST_OK)
+                        m_uiDeepSleep_Timer = 15000;
             }
             else m_uiDeepSleep_Timer -= uiDiff;
 
             // MindControl
             if (m_uiMindControl_Timer < uiDiff)
             {
-                DoCastSpellIfCan(m_creature->GetVictim(), SPELL_MINDCONTROL);
-                m_uiMindControl_Timer = 15000;
+                // Keep the original victim preference when it is a player.
+                // A pet tank must not redirect this player mechanic to a pet.
+                Unit* pTarget = m_creature->GetVictim();
+                if (pTarget->GetTypeId() != TYPEID_PLAYER || pTarget->HasAura(SPELL_MINDCONTROL))
+                    pTarget = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, SPELL_MINDCONTROL, SELECT_FLAG_PLAYER | SELECT_FLAG_NOT_AURA);
+                if (pTarget && DoCastSpellIfCan(pTarget, SPELL_MINDCONTROL) == CAST_OK)
+                    m_uiMindControl_Timer = 15000;
             }
             else m_uiMindControl_Timer -= uiDiff;
         }

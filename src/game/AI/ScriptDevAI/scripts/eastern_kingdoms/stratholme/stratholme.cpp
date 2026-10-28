@@ -25,6 +25,11 @@ EndScriptData
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "stratholme.h"
+#include "Maps/MapPersistentStateMgr.h"
+#include "Globals/ObjectMgr.h"
+#include "Entities/TemporarySpawn.h"
+#include <cmath>
+#include <iomanip>
 
 instance_stratholme::instance_stratholme(Map* map) : ScriptedInstance(map),
     m_baronRunTimer(0),
@@ -57,15 +62,11 @@ void instance_stratholme::Initialize()
 
 void instance_stratholme::OnPlayerEnter(Player* player)
 {
-    // Baron ultimatum succeeded: summon Ysida outside the cage alive
-    if (GetData(TYPE_BARON_RUN) == DONE)
-        player->SummonCreature(NPC_YSIDA, stratholmeLocation[8].x, stratholmeLocation[8].y, stratholmeLocation[8].z, stratholmeLocation[8].o, TEMPSPAWN_DEAD_DESPAWN, 0);
-    // Baron ultimatum failed: summon Ysida outside the cage dead
-    else if (GetData(TYPE_BARON_RUN) == FAIL)
-    {
-        if (Creature* ysida = player->SummonCreature(NPC_YSIDA, stratholmeLocation[8].x, stratholmeLocation[8].y, stratholmeLocation[8].z, stratholmeLocation[8].o, TEMPSPAWN_DEAD_DESPAWN, 0))
-            ysida->CastSpell(nullptr, 29266, TRIGGERED_OLD_TRIGGERED); // Guesswork - Feign Death
-    }
+    SyncRunAura(player);
+    m_restorePending = true;
+    m_ysidaAttempts = 0; m_ysidaTimer = 1;
+    m_retryBlocked = false;
+    for (auto& slot : m_spawns) slot.attempts = 0;
 }
 
 // This function will prevent to lock players/monsters out/in
@@ -75,27 +76,16 @@ void instance_stratholme::OnPlayerEnter(Player* player)
 // different of the one requested by open (true = open, false  = closed)
 void instance_stratholme::DoOpenSlaughterhouseDoor(bool open)
 {
-    if (open != m_isSlaughterDoorOpen)
-    {
-        DoUseDoorOrButton(GO_ZIGGURAT_DOOR_4);
-        m_isSlaughterDoorOpen = open;
-    }
+    m_isSlaughterDoorOpen = open;
+    if (GameObject* door = GetSingleGameObjectFromStorage(GO_ZIGGURAT_DOOR_4, true))
+        door->SetGoState(open ? GO_STATE_ACTIVE : GO_STATE_READY);
 }
 
 bool instance_stratholme::StartSlaughterSquare()
 {
-    if (m_auiEncounter[TYPE_BARONESS] == SPECIAL && m_auiEncounter[TYPE_NERUB] == SPECIAL && m_auiEncounter[TYPE_PALLID] == SPECIAL)
-    {
-        DoOrSimulateScriptTextForThisInstance(SAY_ANNOUNCE_RIVENDARE, NPC_BARON);
-
-        DoUseDoorOrButton(GO_PORT_GAUNTLET);
-        DoUseDoorOrButton(GO_PORT_SLAUGHTER);
-
-        debug_log("SD2: Instance Stratholme: Open Slaughter square.");
-        return true;
-    }
-
-    return false;
+    bool ready = m_auiEncounter[1] == SPECIAL && m_auiEncounter[2] == SPECIAL && m_auiEncounter[3] == SPECIAL;
+    if (ready) SyncObjects();
+    return ready;
 }
 
 void instance_stratholme::OnCreatureCreate(Creature* creature)
@@ -103,9 +93,7 @@ void instance_stratholme::OnCreatureCreate(Creature* creature)
     switch (creature->GetEntry())
     {
         case NPC_AURIUS:
-            creature->SetStandState(UNIT_STAND_STATE_KNEEL);
-            if (m_auiEncounter[TYPE_AURIUS] == DONE)
-                creature->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER);
+            // Flags and pose are restored only after creature initialization.
         // no break here
         case NPC_BARON:
         case NPC_YSIDA:
@@ -146,205 +134,85 @@ void instance_stratholme::OnCreatureCreate(Creature* creature)
             }
             break;
     }
+    if (creature->HasStaticDBSpawnData())
+    {
+        m_staticGuids[creature->GetDbGuid()] = creature->GetObjectGuid();
+        m_staticEntries[creature->GetDbGuid()] = creature->GetEntry();
+        uint32 entry = creature->GetEntry();
+        if (entry != NPC_CRIMSON_INITIATE && entry != NPC_CRIMSON_GALLANT && entry != NPC_CRIMSON_GUARDSMAN && entry != NPC_CRIMSON_CONJURER && entry != NPC_CRIMSON_BATTLE_MAGE)
+            for (auto& members : m_defenseExpected) members.erase(creature->GetDbGuid());
+    }
+    if (creature->GetEntry() == 16046)
+    {
+        m_pairSpawner = creature->GetObjectGuid();
+        for (auto& slot : m_spawns) if (slot.kind == 50 || slot.kind == 51) slot.attempts = 0;
+        m_spawnTimer = 1;
+    }
+    m_restorePending = true;
 }
+
 
 void instance_stratholme::OnObjectCreate(GameObject* go)
 {
-    switch (go->GetEntry())
-    {
-        case GO_SERVICE_ENTRANCE:
-            break;
-        case GO_GAUNTLET_GATE1:
-            // TODO
-            // weird, but unless flag is set, client will not respond as expected. DB bug?
-            go->SetFlag(GAMEOBJECT_FLAGS, GO_FLAG_LOCKED);
-            break;
-
-        case GO_ZIGGURAT_DOOR_1:
-            m_zigguratStorage[0].m_doorGuid = go->GetObjectGuid();
-            if (m_auiEncounter[TYPE_BARONESS] == DONE || m_auiEncounter[TYPE_BARONESS] == SPECIAL)
-                go->SetGoState(GO_STATE_ACTIVE);
-            return;
-        case GO_ZIGGURAT_DOOR_2:
-            m_zigguratStorage[1].m_doorGuid = go->GetObjectGuid();
-            if (m_auiEncounter[TYPE_NERUB] == DONE || m_auiEncounter[TYPE_NERUB] == SPECIAL)
-                go->SetGoState(GO_STATE_ACTIVE);
-            return;
-        case GO_ZIGGURAT_DOOR_3:
-            m_zigguratStorage[2].m_doorGuid = go->GetObjectGuid();
-            if (m_auiEncounter[TYPE_PALLID] == DONE || m_auiEncounter[TYPE_PALLID] == SPECIAL)
-                go->SetGoState(GO_STATE_ACTIVE);
-            return;
-
-        case GO_ZIGGURAT_DOOR_4:
-            if (m_auiEncounter[TYPE_RAMSTEIN] == DONE || m_auiEncounter[TYPE_BLACK_GUARDS] == DONE)
-                go->SetGoState(GO_STATE_ACTIVE);
-            break;
-        case GO_ZIGGURAT_DOOR_5:
-            if (m_auiEncounter[TYPE_BLACK_GUARDS] == DONE)
-                go->SetGoState(GO_STATE_ACTIVE);
-            break;
-        case GO_PORT_GAUNTLET:
-        case GO_PORT_SLAUGHTER:
-            if (m_auiEncounter[TYPE_BARONESS] == SPECIAL && m_auiEncounter[TYPE_NERUB] == SPECIAL && m_auiEncounter[TYPE_PALLID] == SPECIAL)
-                go->SetGoState(GO_STATE_ACTIVE);
-            break;
-        case GO_PORT_SLAUGHTER_GATE:
-            if (m_auiEncounter[TYPE_RAMSTEIN] == DONE)      // Might actually be unneeded
-                go->SetGoState(GO_STATE_ACTIVE);
-            break;
-        case GO_PORT_ELDERS:
-        case GO_YSIDA_CAGE:
-        case GO_PORT_TRAP_GATE_1:
-        case GO_PORT_TRAP_GATE_2:
-        case GO_PORT_TRAP_GATE_3:
-        case GO_PORT_TRAP_GATE_4:
-            break;
-
-        default:
-            return;
-    }
     m_goEntryGuidStore[go->GetEntry()] = go->GetObjectGuid();
+    if (go->GetEntry() == GO_GAUNTLET_GATE1) go->SetFlag(GAMEOBJECT_FLAGS, GO_FLAG_LOCKED);
+    if (go->GetEntry() == GO_ZIGGURAT_DOOR_1) m_zigguratStorage[0].m_doorGuid = go->GetObjectGuid();
+    if (go->GetEntry() == GO_ZIGGURAT_DOOR_2) m_zigguratStorage[1].m_doorGuid = go->GetObjectGuid();
+    if (go->GetEntry() == GO_ZIGGURAT_DOOR_3) m_zigguratStorage[2].m_doorGuid = go->GetObjectGuid();
+    m_restorePending = true;
+}
+
+void instance_stratholme::OnObjectSpawn(GameObject* go)
+{
+    if (m_pairBoxCasting && go->GetEntry() == 153464 && go->GetSpellId() == SPELL_SUMMON_WINNER_BOX && go->GetSpawnerGuid() == m_pairBoxCastingOwner)
+    {
+        if (m_pairBoxCastingGeneration == m_pairGeneration) m_pairBox = true;
+        m_pairRewards.erase(std::remove_if(m_pairRewards.begin(), m_pairRewards.end(), [&](StratholmeBoxRequest const& request) { return request.generation == m_pairBoxCastingGeneration; }), m_pairRewards.end());
+        SaveState();
+    }
+    m_restorePending = true;
 }
 
 void instance_stratholme::SetData(uint32 type, uint32 data)
 {
-    // TODO: Remove the hard-coded indexes from array accessing
+    if (type >= MAX_ENCOUNTER) return;
+    if (m_auiEncounter[type] == DONE && type != TYPE_BARONESS && type != TYPE_NERUB && type != TYPE_PALLID) return;
+    // The tower boss and its five static acolytes have distinct completion states.
     switch (type)
     {
         case TYPE_BARON_RUN:
-            switch (data)
-            {
-                case IN_PROGRESS:
-                    if (m_auiEncounter[type] == IN_PROGRESS || m_auiEncounter[type] == FAIL)
-                        break;
-
-                    // Baron ultimatum starts: summon Ysida in the cage
-                    if (Creature* pBaron = GetSingleCreatureFromStorage(NPC_BARON))
-                    {
-                        DoOrSimulateScriptTextForThisInstance(SAY_ANNOUNCE_RUN_START, NPC_BARON);
-                        if (Creature* pYsida = pBaron->SummonCreature(NPC_YSIDA, stratholmeLocation[7].x, stratholmeLocation[7].y, stratholmeLocation[7].z, stratholmeLocation[7].o, TEMPSPAWN_DEAD_DESPAWN, 0))
-                            pYsida->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER | UNIT_NPC_FLAG_GOSSIP);
-                    }
-
-                    m_baronRunTimer = 45 * MINUTE * IN_MILLISECONDS;
-                    debug_log("SD2: Instance Stratholme: Baron run in progress.");
-                    break;
-                case FAIL:
-                    // may add code to remove aura from players, but in theory the time should be up already and removed.
-                    break;
-                case DONE:
-                    m_baronRunTimer = 0;
-                    break;
-                default:
-                    break;
-            }
+            if (data == IN_PROGRESS) return; // StartBaronRun validates the real participant.
+            if (data != FAIL && data != DONE) return;
             m_auiEncounter[type] = data;
+            m_baronRunTimer = 0; m_runPaused = false;
+            for (auto const& ref : instance->GetPlayers()) if (Player* player = ref.getSource()) player->RemoveAurasDueToSpell(SPELL_BARON_ULTIMATUM);
+            m_ysidaTimer = 1; m_ysidaAttempts = 0;
             break;
-        case TYPE_BARONESS:
-        case TYPE_NERUB:
-        case TYPE_PALLID:
+        case TYPE_BARONESS: case TYPE_NERUB: case TYPE_PALLID:
+            if (m_auiEncounter[type] == SPECIAL) return;
+            if (m_auiEncounter[type] == DONE && data != SPECIAL) return;
+            if (data == SPECIAL && !StaticMembersDead(m_towerExpected[type - 1])) return;
             m_auiEncounter[type] = data;
-            if (data == DONE)
-            {
-                DoSortZiggurats();
-                DoUseDoorOrButton(m_zigguratStorage[type - TYPE_BARONESS].m_doorGuid);
-            }
-            if (data == SPECIAL)
-                StartSlaughterSquare();
+            if (data == DONE) DoSortZiggurats();
             break;
         case TYPE_RAMSTEIN:
             if (data == SPECIAL)
             {
-                if (m_auiEncounter[type] != SPECIAL && m_auiEncounter[type] != DONE)
-                {
-                    m_slaughterSquareTimer = 20 * IN_MILLISECONDS;       // TODO - unknown, also possible that this is not the very correct place..
-                    DoUseDoorOrButton(GO_PORT_GAUNTLET);
-                }
-
-                uint32 abomCount = m_abominationGUIDs.size();
-                for (auto abomGuid : m_abominationGUIDs)
-                {
-                    if (Creature* abom = instance->GetCreature(abomGuid))
-                    {
-                        if (!abom->IsAlive())
-                            --abomCount;
-                    }
-                    else
-                    {
-                        // Remove obsolete guid from set and decrement count
-                        m_abominationGUIDs.erase(abomGuid);
-                        --abomCount;
-                    }
-                }
-
-                if (!abomCount)
-                {
-                    // Open the Slaughterhouse door and set a timer to close it after 10 sec to let some time to Ramstein to move out
-                    DoOpenSlaughterhouseDoor(true);
-                    m_slaughterDoorTimer = 10 * IN_MILLISECONDS;
-
-                    // No more handlng of Abominations
-                    m_slaughterSquareTimer = 0;
-
-                    if (Creature* baron = GetSingleCreatureFromStorage(NPC_BARON))
-                    {
-                        DoScriptText(SAY_ANNOUNCE_RAMSTEIN, baron);
-                        if (Creature* ramstein = baron->SummonCreature(NPC_RAMSTEIN, stratholmeLocation[2].x, stratholmeLocation[2].y, stratholmeLocation[2].z, stratholmeLocation[2].o, TEMPSPAWN_DEAD_DESPAWN, 0))
-                            ramstein->GetMotionMaster()->MovePoint(0, stratholmeLocation[5].x, stratholmeLocation[5].y, stratholmeLocation[5].z);
-
-                        debug_log("SD2: Instance Stratholme - Slaughter event: Ramstein spawned.");
-                    }
-                }
-                else
-                    debug_log("SD2: Instance Stratholme - Slaughter event: %u Abomination left to kill.", abomCount);
+                if (m_slaughterPhase) return;
+                if (m_auiEncounter[type] != SPECIAL && m_auiEncounter[type] != DONE) m_slaughterSquareTimer = 20000;
+                m_auiEncounter[type] = SPECIAL;
+                AdvanceSlaughter();
             }
-            // After fail aggroing Ramstein means wipe on Ramstein, so close door again
-            if (data == IN_PROGRESS && m_auiEncounter[type] == FAIL)
-                DoUseDoorOrButton(GO_PORT_GAUNTLET);
-            if (data == DONE)
+            else if (data == IN_PROGRESS || data == FAIL)
             {
-                // Open side gate and start summoning skeletons
-                DoUseDoorOrButton(GO_PORT_SLAUGHTER_GATE);
-                // Close the Slaughterhouse door in case it was open again after a wipe on Ramstein
-                DoOpenSlaughterhouseDoor(false);
-                // use this timer as a bool just to start summoning
-                m_mindlessSummonTimer = 500;
-                m_mindlessCount = 0;
-                m_undeadGUIDs.clear();
-
-                // Summon 5 guards
-                if (Creature* baron = GetSingleCreatureFromStorage(NPC_BARON))
-                {
-                    for (uint8 i = 0; i < 5; ++i)
-                    {
-                        float fX, fY, fZ;
-                        baron->GetRandomPoint(stratholmeLocation[6].x, stratholmeLocation[6].y, stratholmeLocation[6].z, 5.0f, fX, fY, fZ);
-                        if (Creature* temp = baron->SummonCreature(NPC_BLACK_GUARD, stratholmeLocation[6].x, stratholmeLocation[6].y, stratholmeLocation[6].z, stratholmeLocation[6].o, TEMPSPAWN_DEAD_DESPAWN, 0))
-                            m_guardGUIDs.push_back(temp->GetObjectGuid());
-                    }
-
-                    debug_log("SD2: Instance Stratholme - Slaughter event: Summoned 5 guards.");
-                }
+                m_auiEncounter[type] = data;
+                if (data == FAIL) { m_slaughterSquareTimer = 0; DoOpenSlaughterhouseDoor(true); }
             }
-            // Open Door again and stop Abomination
-            if (data == FAIL && m_auiEncounter[type] != FAIL)
-            {
-                DoUseDoorOrButton(GO_PORT_GAUNTLET);
-                m_slaughterSquareTimer = 0;
-
-                // Let already moving Abominations stop
-                for (auto abomGuid : m_abominationGUIDs)
-                {
-                    Creature* abom = instance->GetCreature(abomGuid);
-                    if (abom && abom->GetMotionMaster()->GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE)
-                        abom->GetMotionMaster()->MovementExpired();
-                }
-            }
-
-            m_auiEncounter[type] = data;
+            else return; // A qualified Ramstein death owns completion.
             break;
         case TYPE_BARON:
+            m_runPaused = data == IN_PROGRESS && m_auiEncounter[TYPE_BARON_RUN] == IN_PROGRESS;
+            if (data != IN_PROGRESS) m_auriusSummonTimer = 0;
             if (data == IN_PROGRESS)
             {
                 DoUseOpenableObject(GO_ZIGGURAT_DOOR_5, false);
@@ -355,7 +223,10 @@ void instance_stratholme::SetData(uint32 type, uint32 data)
 
                 // If Aurius was given the medaillon wait 5s before summoning him
                 if (GetData(TYPE_AURIUS) == DONE)
+                {
                     m_auriusSummonTimer = 5 * IN_MILLISECONDS;
+                    m_auriusAttempts = 0;
+                }
             }
             else if (data == DONE)
             {
@@ -400,6 +271,8 @@ void instance_stratholme::SetData(uint32 type, uint32 data)
                     {
                         if (aurius->IsAlive())
                         {
+                            m_auriusPosition = Position{aurius->GetPositionX(), aurius->GetPositionY(), aurius->GetPositionZ(), aurius->GetOrientation()};
+                            m_auriusPositionReady = true;
                             DoScriptText(SAY_AURIUS_DEATH, aurius);
                             aurius->StopMoving();
                             aurius->SetFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER | UNIT_NPC_FLAG_GOSSIP);
@@ -440,38 +313,11 @@ void instance_stratholme::SetData(uint32 type, uint32 data)
             m_auiEncounter[type] = data;
             break;
         case TYPE_BLACK_GUARDS:
-            // Prevent double action
-            if (m_auiEncounter[type] == data)
-                return;
-
-            // Restart after failure, close Gauntlet
-            if (data == IN_PROGRESS && m_auiEncounter[type] == FAIL)
-                DoUseDoorOrButton(GO_PORT_GAUNTLET);
-            // Wipe case - open gauntlet
-            if (data == FAIL)
-                DoUseDoorOrButton(GO_PORT_GAUNTLET);
-            if (data == DONE)
-            {
-                if (Creature* baron = GetSingleCreatureFromStorage(NPC_BARON))
-                    DoScriptText(SAY_UNDEAD_DEFEAT, baron);
-                DoUseDoorOrButton(GO_ZIGGURAT_DOOR_5);
-            }
+            if (data != IN_PROGRESS && data != FAIL) return;
             m_auiEncounter[type] = data;
-
-            // No need to save anything here, so return
-            return;
+            break;
         case TYPE_POSTMASTER:
-            m_auiEncounter[type] = data;
-            if (data == IN_PROGRESS)
-            {
-                ++m_postboxesUsed;
-
-                // After the second post box prepare to spawn the Post Master
-                if (m_postboxesUsed == 2)
-                    SetData(TYPE_POSTMASTER, SPECIAL);
-            }
-            // No need to save anything here, so return
-            return;
+            return; // UsePostbox owns identity and successful summon confirmation.
         case TYPE_AURIUS:
             // Prevent further players to complete the quest in that instance or autocomplete the follow-up quest. the flag will be set back if event is succeed
             if (data == DONE)
@@ -486,70 +332,118 @@ void instance_stratholme::SetData(uint32 type, uint32 data)
             break;
     }
 
-    if (data == DONE)
-    {
-        OUT_SAVE_INST_DATA;
-
-        std::ostringstream saveStream;
-        saveStream << m_auiEncounter[0] << " " << m_auiEncounter[1] << " " << m_auiEncounter[2] << " "
-                   << m_auiEncounter[3] << " " << m_auiEncounter[4] << " " << m_auiEncounter[5] << " "
-                   << m_auiEncounter[6] << " " << m_auiEncounter[7];
-
-        m_strInstData = saveStream.str();
-
-        SaveToDB();
-        OUT_SAVE_INST_DATA_COMPLETE;
-    }
+    SaveState();
+    SyncObjects();
 }
 
-void instance_stratholme::Load(const char* chrIn)
+
+void instance_stratholme::Load(char const* data)
 {
-    if (!chrIn)
+    if (!data) return;
+    std::istringstream in(data);
+    uint32 old[8] = {};
+    for (auto& state : old) if (!(in >> state) || state > SPECIAL) return;
+    instance_stratholme baseline(instance);
+    for (uint32 i = 0; i < 8; ++i) baseline.m_auiEncounter[i] = old[i] == IN_PROGRESS ? uint32(NOT_STARTED) : old[i];
+    baseline.m_legacy = true;
+    if (old[0] == IN_PROGRESS) baseline.m_auiEncounter[0] = FAIL;
+    for (uint32 i = 1; i <= 3; ++i) if (old[i] == DONE) baseline.m_auiEncounter[i] = SPECIAL;
+    // Unknown old reward histories never authorize another Ramstein/guard drop.
+    if (old[4] == DONE || old[5] == DONE) { baseline.m_slaughterPhase = 6; baseline.m_auiEncounter[8] = DONE; }
+    *this = baseline;
+    std::string version;
+    if (!(in >> version) || version != "ST2") { BuildSaveData(); return; }
+    instance_stratholme payload(instance);
+    auto parse = [&]() -> bool
     {
-        OUT_LOAD_INST_DATA_FAIL;
-        return;
-    }
-
-    OUT_LOAD_INST_DATA(chrIn);
-
-    std::istringstream loadStream(chrIn);
-    loadStream >> m_auiEncounter[0] >> m_auiEncounter[1] >> m_auiEncounter[2] >> m_auiEncounter[3]
-               >> m_auiEncounter[4] >> m_auiEncounter[5] >> m_auiEncounter[6] >> m_auiEncounter[7];
-
-    for (uint32& i : m_auiEncounter)
-    {
-        if (i == IN_PROGRESS)
-            i = NOT_STARTED;
-    }
-
-    // Special Treatment for the Ziggurat-Bosses, as otherwise the event couldn't reload
-    if (m_auiEncounter[TYPE_BARONESS] == DONE)
-        m_auiEncounter[TYPE_BARONESS] = SPECIAL;
-    if (m_auiEncounter[TYPE_NERUB] == DONE)
-        m_auiEncounter[TYPE_NERUB] = SPECIAL;
-    if (m_auiEncounter[TYPE_PALLID] == DONE)
-        m_auiEncounter[TYPE_PALLID] = SPECIAL;
-
-    OUT_LOAD_INST_DATA_COMPLETE;
+        for (uint32 i = 0; i < 8; ++i) payload.m_auiEncounter[i] = old[i];
+        uint32 paused, pair, legacy, auriusPosition; uint64 saved;
+        if (!(in >> payload.m_auiEncounter[8] >> payload.m_auiEncounter[9] >> payload.m_baronRunTimer >> saved >> paused
+              >> payload.m_yellCounter >> payload.m_slaughterPhase >> payload.m_blackGuardsTimer >> payload.m_slaughterDoorTimer
+              >> payload.m_defenseTriggered >> pair >> legacy >> payload.m_runFailTimer >> auriusPosition
+              >> payload.m_auriusPosition.x >> payload.m_auriusPosition.y >> payload.m_auriusPosition.z >> payload.m_auriusPosition.o
+              >> payload.m_slaughterSquareTimer >> payload.m_mindlessSummonTimer)) return false;
+        if (payload.m_auiEncounter[8] > SPECIAL || payload.m_auiEncounter[9] > SPECIAL || payload.m_baronRunTimer > 2700000 ||
+            paused > 1 || pair > 1 || legacy > 1 || auriusPosition > 1 || payload.m_runFailTimer > 8000 || payload.m_yellCounter > 3 || payload.m_slaughterPhase > 6 || payload.m_slaughterPhase == 5 ||
+            payload.m_blackGuardsTimer > 60000 || payload.m_slaughterDoorTimer > 10000 || payload.m_slaughterSquareTimer > 45000 || payload.m_mindlessSummonTimer > 500 || payload.m_defenseTriggered > 511) return false;
+        for (auto& timers : payload.m_gateTrapTimers)
+            for (uint32 i = 0; i < 3; ++i) if (!(in >> timers[i]) || timers[i] > (i == 0 ? 1800000u : i == 1 ? 20000u : 2000u)) return false;
+        uint32 requests; if (!(in >> payload.m_pairGeneration >> requests) || !payload.m_pairGeneration || requests > 16) return false;
+        std::set<uint32> generations;
+        for (uint32 i = 0; i < requests; ++i)
+        {
+            StratholmeBoxRequest request; uint64 owner;
+            if (!(in >> request.generation >> owner) || !request.generation || request.generation > payload.m_pairGeneration || !owner || !generations.insert(request.generation).second) return false;
+            request.owner = ObjectGuid(owner); payload.m_pairRewards.push_back(request);
+        }
+        payload.m_pairBox = pair == 1;
+        payload.m_legacy = legacy == 1; payload.m_auriusPositionReady = auriusPosition == 1;
+        if (!std::isfinite(payload.m_auriusPosition.x) || !std::isfinite(payload.m_auriusPosition.y) || !std::isfinite(payload.m_auriusPosition.z) || !std::isfinite(payload.m_auriusPosition.o) ||
+            std::abs(payload.m_auriusPosition.x) > 17066 || std::abs(payload.m_auriusPosition.y) > 17066 || std::abs(payload.m_auriusPosition.z) > 3000) return false;
+        auto readSet = [&](std::set<uint32>& values, uint32 limit) -> bool
+        {
+            uint32 count, value; if (!(in >> count) || count > limit) return false;
+            for (uint32 i = 0; i < count; ++i) { if (!(in >> value) || !value || !values.insert(value).second) return false; }
+            return true;
+        };
+        if (!readSet(payload.m_staticDead, 256) || !readSet(payload.m_postboxGuids, 6)) return false;
+        uint32 count; if (!(in >> count) || count > 100) return false;
+        std::map<uint32, uint32> counts;
+        for (uint32 i = 0; i < count; ++i)
+        {
+            StratholmeSpawn slot; uint32 created, killed;
+            if (!(in >> slot.kind >> slot.entry >> created >> killed >> slot.expires >> slot.x >> slot.y >> slot.z >> slot.o >> slot.dx >> slot.dy >> slot.dz)) return false;
+            if (created > 1 || killed > 1 || (killed && !created) || !std::isfinite(slot.x) || !std::isfinite(slot.y) || !std::isfinite(slot.z) || !std::isfinite(slot.o) ||
+                !std::isfinite(slot.dx) || !std::isfinite(slot.dy) || !std::isfinite(slot.dz) || std::abs(slot.x) > 17066 || std::abs(slot.y) > 17066 || std::abs(slot.z) > 3000 ||
+                std::abs(slot.dx) > 17066 || std::abs(slot.dy) > 17066 || std::abs(slot.dz) > 3000 || (slot.kind == 40 && slot.expires > uint64(time(nullptr)) + 180)) return false;
+            bool valid = (slot.kind == 1 && slot.entry == NPC_RAMSTEIN && ++counts[1] <= 1) ||
+                (slot.kind == 2 && slot.entry == NPC_MINDLESS_UNDEAD && ++counts[2] <= 30) ||
+                (slot.kind == 3 && slot.entry == NPC_BLACK_GUARD && ++counts[3] <= 5) ||
+                (slot.kind == 18 && slot.entry == NPC_TIMMY_THE_CRUEL && ++counts[18] <= 1) ||
+                (slot.kind == 20 && slot.entry == NPC_CRIMSON_GALLANT && ++counts[20] <= 2) ||
+                (slot.kind == 22 && (slot.entry == NPC_CRIMSON_MONK || slot.entry == NPC_CRIMSON_SORCERER) && ++counts[slot.kind * 100000 + slot.entry] <= 1) ||
+                ((slot.kind == 19 || slot.kind == 21 || slot.kind == 24) && (slot.entry == NPC_SKELETAL_GUARDIAN || slot.entry == NPC_SKELETAL_BERSERKER) && ++counts[slot.kind] <= 5) ||
+                (slot.kind >= 32 && slot.kind <= 34 && slot.entry == NPC_UNDEAD_POSTMAN && ++counts[slot.kind] <= 3) ||
+                (slot.kind == 40 && slot.entry == 11143 && ++counts[40] <= 1) ||
+                (slot.kind == 50 && slot.entry == NPC_JARIEN && ++counts[50] <= 1) || (slot.kind == 51 && slot.entry == NPC_SOTHOS && ++counts[51] <= 1);
+            if (!valid) return false;
+            slot.created = created == 1; slot.killed = killed == 1; payload.m_spawns.push_back(slot);
+        }
+        std::string end; if (!(in >> end) || end != "END") return false;
+        in >> std::ws; if (!in.eof()) return false;
+        for (uint32 kind : {19u,20u,21u,24u,32u,33u,34u})
+            if (counts[kind] && counts[kind] != (kind == 20 ? 2u : kind >= 32 ? 3u : 5u)) return false;
+        if (counts[22 * 100000 + NPC_CRIMSON_MONK] != counts[22 * 100000 + NPC_CRIMSON_SORCERER] || counts[50] != counts[51]) return false;
+        if ((payload.m_slaughterPhase == 0 && (counts[1] || counts[2] || counts[3])) ||
+            (payload.m_slaughterPhase == 1 && counts[1] != 1) ||
+            ((payload.m_slaughterPhase == 2 || payload.m_slaughterPhase == 3 || payload.m_slaughterPhase == 4) &&
+             (counts[1] != 1 || counts[2] != 30 || counts[3] != 5 || !payload.AllKilled(1, 1))) ||
+            ((payload.m_slaughterPhase == 3 || payload.m_slaughterPhase == 4) && !payload.AllKilled(2, 30)) ||
+            (payload.m_slaughterPhase == 6 && !payload.m_legacy && !payload.AllKilled(3, 5))) return false;
+        uint64 now = uint64(time(nullptr));
+        uint64 offline = now > saved ? (now - saved) * 1000 : 0;
+        for (auto& timers : payload.m_gateTrapTimers) for (uint32& timer : timers) timer = offline >= timer ? 0 : timer - uint32(offline);
+        if (payload.m_auiEncounter[0] == IN_PROGRESS)
+        {
+            uint64 elapsed = !paused && now > saved ? (now - saved) * 1000 : 0;
+            payload.m_baronRunTimer = elapsed >= payload.m_baronRunTimer ? 0 : payload.m_baronRunTimer - uint32(elapsed);
+            if (!payload.m_baronRunTimer) payload.m_auiEncounter[0] = FAIL;
+        }
+        else payload.m_baronRunTimer = 0;
+        for (uint32 i : {1u, 2u, 3u, 5u, 6u}) if (payload.m_auiEncounter[i] == IN_PROGRESS) payload.m_auiEncounter[i] = NOT_STARTED;
+        payload.m_slaughterResumePending = (payload.m_slaughterPhase > 0 && payload.m_slaughterPhase < 6) ||
+            (!payload.m_slaughterPhase && payload.GetData(TYPE_RAMSTEIN) == SPECIAL);
+        payload.m_runPaused = false;
+        return true;
+    };
+    if (parse()) *this = payload;
+    m_restorePending = true;
+    BuildSaveData();
 }
 
 uint32 instance_stratholme::GetData(uint32 type) const
 {
-    switch (type)
-    {
-        case TYPE_BARON_RUN:
-        case TYPE_BARONESS:
-        case TYPE_NERUB:
-        case TYPE_PALLID:
-        case TYPE_RAMSTEIN:
-        case TYPE_BARON:
-        case TYPE_AURIUS:
-        case TYPE_BARTHILAS_RUN:
-        case TYPE_POSTMASTER:
-            return m_auiEncounter[type];
-        default:
-            return 0;
-    }
+    return type < MAX_ENCOUNTER ? m_auiEncounter[type] : 0;
 }
 
 static bool sortByHeight(Creature* first, Creature* second)
@@ -642,22 +536,24 @@ void instance_stratholme::OnCreatureEnterCombat(Creature* creature)
     switch (creature->GetEntry())
     {
         case NPC_BARONESS_ANASTARI: SetData(TYPE_BARONESS, IN_PROGRESS); break;
-        case NPC_MALEKI_THE_PALLID: SetData(TYPE_PALLID, IN_PROGRESS);   break;
-        case NPC_NERUBENKAN:        SetData(TYPE_NERUB, IN_PROGRESS);    break;
-        case NPC_RAMSTEIN:          SetData(TYPE_RAMSTEIN, IN_PROGRESS); break;
-        case NPC_BARON:             SetData(TYPE_BARON, IN_PROGRESS);    break;
-
-        case NPC_ABOM_BILE:
-        case NPC_ABOM_VENOM:
-            // Start Slaughterhouse Event
-            SetData(TYPE_RAMSTEIN, SPECIAL);
+        case NPC_NERUBENKAN: SetData(TYPE_NERUB, IN_PROGRESS); break;
+        case NPC_MALEKI_THE_PALLID: SetData(TYPE_PALLID, IN_PROGRESS); break;
+        case NPC_BARON: SetData(TYPE_BARON, IN_PROGRESS); break;
+        case NPC_ABOM_BILE: case NPC_ABOM_VENOM:
+            if (creature->HasStaticDBSpawnData() && m_abomExpected.count(creature->GetDbGuid())) SetData(TYPE_RAMSTEIN, SPECIAL);
             break;
-
-        case NPC_MINDLESS_UNDEAD:
-        case NPC_BLACK_GUARD:
-            // Aggro in Slaughterhouse after Ramstein
-            SetData(TYPE_BLACK_GUARDS, IN_PROGRESS);
-            break;
+        default:
+            for (auto const& slot : m_spawns) if (slot.guid == creature->GetObjectGuid() && !slot.killed)
+            {
+                if (slot.kind == 1) SetData(TYPE_RAMSTEIN, IN_PROGRESS);
+                if (slot.kind == 2 || slot.kind == 3) SetData(TYPE_BLACK_GUARDS, IN_PROGRESS);
+                if (slot.kind == 50 || slot.kind == 51)
+                {
+                    if (creature->IsTemporarySummon()) static_cast<TemporarySpawn*>(creature)->SetSummonProperties(TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 7200000);
+                    for (auto& current : m_spawns) if (current.guid == creature->GetObjectGuid()) current.expires = uint64(time(nullptr)) + 7200;
+                }
+                break;
+            }
     }
 }
 
@@ -666,36 +562,43 @@ void instance_stratholme::OnCreatureEvade(Creature* creature)
     switch (creature->GetEntry())
     {
         case NPC_BARONESS_ANASTARI: SetData(TYPE_BARONESS, FAIL); break;
-        case NPC_MALEKI_THE_PALLID: SetData(TYPE_PALLID, FAIL);   break;
-        case NPC_NERUBENKAN:        SetData(TYPE_NERUB, FAIL);    break;
-        case NPC_BARON:             SetData(TYPE_BARON, FAIL);    break;
-
-        case NPC_RAMSTEIN:
-            SetData(TYPE_RAMSTEIN, FAIL);
-            // Open Slaughterhouse door again because Ramstein will move back in
-            DoOpenSlaughterhouseDoor(true);
+        case NPC_NERUBENKAN: SetData(TYPE_NERUB, FAIL); break;
+        case NPC_MALEKI_THE_PALLID: SetData(TYPE_PALLID, FAIL); break;
+        case NPC_BARON: SetData(TYPE_BARON, FAIL); break;
+        case NPC_ABOM_BILE: case NPC_ABOM_VENOM:
+            if (!m_slaughterPhase) SetData(TYPE_RAMSTEIN, FAIL);
             break;
-        case NPC_ABOM_BILE:
-        case NPC_ABOM_VENOM:
-            // Fail in Slaughterhouse Event before Ramstein
-            SetData(TYPE_RAMSTEIN, FAIL);
-            break;
-        case NPC_MINDLESS_UNDEAD:
-        case NPC_BLACK_GUARD:
-            // Fail in Slaughterhouse after Ramstein
-            SetData(TYPE_BLACK_GUARDS, FAIL);
-            break;
+        default:
+            for (auto const& slot : m_spawns) if (slot.guid == creature->GetObjectGuid() && !slot.killed)
+            {
+                if (slot.kind == 1) SetData(TYPE_RAMSTEIN, FAIL);
+                if (slot.kind == 2 || slot.kind == 3) SetData(TYPE_BLACK_GUARDS, FAIL);
+                break;
+            }
     }
 }
 
 void instance_stratholme::OnCreatureDeath(Creature* creature)
 {
+    if (creature->HasStaticDBSpawnData())
+    {
+        uint32 guid = creature->GetDbGuid();
+        bool expected = m_abomExpected.count(guid) != 0;
+        for (auto const& members : m_towerExpected) expected = expected || members.count(guid) != 0;
+        for (auto const& members : m_defenseExpected) expected = expected || members.count(guid) != 0;
+        if (expected) m_staticDead.insert(guid);
+    }
+    for (auto& slot : m_spawns) if (slot.guid == creature->GetObjectGuid() && !slot.killed) { slot.killed = true; slot.created = true; break; }
+    UpdatePairReward();
+    AdvanceSlaughter();
+    ThazudinAcolyteJustDied(creature);
+    CheckDefenses(creature);
+    SaveState();
     switch (creature->GetEntry())
     {
         case NPC_BARONESS_ANASTARI: SetData(TYPE_BARONESS, DONE); break;
         case NPC_MALEKI_THE_PALLID: SetData(TYPE_PALLID, DONE);   break;
         case NPC_NERUBENKAN:        SetData(TYPE_NERUB, DONE);    break;
-        case NPC_RAMSTEIN:          SetData(TYPE_RAMSTEIN, DONE); break;
         case NPC_BARON:             SetData(TYPE_BARON, DONE);    break;
 
         case NPC_AURIUS:
@@ -703,24 +606,8 @@ void instance_stratholme::OnCreatureDeath(Creature* creature)
             break;
 
         case NPC_THUZADIN_ACOLYTE:
-            ThazudinAcolyteJustDied(creature);
-            break;
-
-        case NPC_ABOM_BILE:
-        case NPC_ABOM_VENOM:
-            // Start Slaughterhouse Event
-            SetData(TYPE_RAMSTEIN, SPECIAL);
-            break;
-
-        case NPC_MINDLESS_UNDEAD:
-            m_undeadGUIDs.remove(creature->GetObjectGuid());
-            if (m_undeadGUIDs.empty())
-                m_blackGuardsTimer = 60 * IN_MILLISECONDS; // Wait 1 min before sending the Black Guards outside. In Classic, this allows players to resplenish health and mana
-            break;
-        case NPC_BLACK_GUARD:
-            m_guardGUIDs.remove(creature->GetObjectGuid());
-            if (m_guardGUIDs.empty())
-                SetData(TYPE_BLACK_GUARDS, DONE);
+        case NPC_ABOM_BILE: case NPC_ABOM_VENOM:
+        case NPC_RAMSTEIN: case NPC_MINDLESS_UNDEAD: case NPC_BLACK_GUARD:
             break;
 
         // Scarlet Bastion defense and Timmy spawn support
@@ -729,79 +616,81 @@ void instance_stratholme::OnCreatureDeath(Creature* creature)
         case NPC_CRIMSON_GUARDSMAN:
         case NPC_CRIMSON_CONJURER:
         case NPC_CRIMSON_BATTLE_MAGE:
-            for (uint8 i = BARRICADE; i <= FIRST_BARRICADES; i++)
-            {
-                if (m_crimsonDefendersLowGuids[i].empty())
-                    continue;
-
-                m_crimsonDefendersLowGuids[i].remove(creature->GetObjectGuid());
-                // If all mobs from a defense group are dead then activate the related defense event
-                if (m_crimsonDefendersLowGuids[i].empty() && i != FIRST_BARRICADES)
-                    DoScarletBastionDefense(i, creature);
-            }
+            CheckDefenses();
             break;
         case NPC_BALNAZZAR:
-            DoScarletBastionDefense(CRIMSON_THRONE, creature);
+            if (!(m_defenseTriggered & 256))
+            {
+                m_defenseTriggered |= 256;
+                std::vector<uint32> entries = {NPC_SKELETAL_GUARDIAN,NPC_SKELETAL_GUARDIAN,NPC_SKELETAL_BERSERKER,NPC_SKELETAL_BERSERKER,urand(0,1) ? uint32(NPC_SKELETAL_GUARDIAN) : uint32(NPC_SKELETAL_BERSERKER)};
+                std::shuffle(entries.begin(), entries.end(), *GetRandomGenerator());
+                for (uint32 entry : entries) QueueSpawn(24, entry, scourgeInvaders[5], scourgeInvaders[6]);
+                SaveState();
+            }
             break;
-        case NPC_JARIEN:
-            m_jarienKilled = true;
-            if (m_sothosKilled)
-                if (Unit* spawner = creature->GetSpawner())
-                    spawner->CastSpell(nullptr, SPELL_SUMMON_WINNER_BOX, TRIGGERED_OLD_TRIGGERED);
-            break;
-        case NPC_SOTHOS:
-            m_sothosKilled = true;
-            if (m_jarienKilled)
-                if (Unit* spawner = creature->GetSpawner())
-                    spawner->CastSpell(nullptr, SPELL_SUMMON_WINNER_BOX, TRIGGERED_OLD_TRIGGERED);
-            break;
+        case NPC_JARIEN: case NPC_SOTHOS: break;
     }
 }
 
+
 void instance_stratholme::OnCreatureRespawn(Creature* creature)
 {
+    if (creature->GetEntry() == 16046)
+    {
+        if (m_pairTriggerSeen && PairEnded()) BeginNewPair();
+        m_pairTriggerSeen = true; m_pairSpawner = creature->GetObjectGuid();
+    }
     switch (creature->GetEntry())
     {
         case NPC_BARTHILAS:
             if (GetData(TYPE_BARTHILAS_RUN) != NOT_STARTED)
                 creature->NearTeleportTo(stratholmeLocation[1].x, stratholmeLocation[1].y, stratholmeLocation[1].z, stratholmeLocation[1].o);
             break;
-        case NPC_JARIEN:
-            m_jarienKilled = false;
-            break;
-        case NPC_SOTHOS:
-            m_sothosKilled = false;
-            break;
+
     }
+    if (creature->GetEntry() == 11143 && m_postmasterCasting && creature->GetSpawnerGuid() == m_postmasterOwner && creature->GetUInt32Value(UNIT_CREATED_BY_SPELL) == SPELL_SUMMON_POSTMASTER)
+        for (auto& slot : m_spawns) if (slot.kind == 40 && !slot.guid && !slot.killed)
+        {
+            slot.guid = creature->GetObjectGuid(); slot.created = true; slot.expires = uint64(time(nullptr)) + 180;
+            m_auiEncounter[9] = DONE; SaveState(); break;
+        }
+    if (creature->GetEntry() == NPC_JARIEN || creature->GetEntry() == NPC_SOTHOS)
+        if (Creature* trigger = instance->GetCreature(creature->GetSpawnerGuid()))
+            if (trigger->GetEntry() == 16046)
+            {
+                uint32 kind = creature->GetEntry() == NPC_JARIEN ? 50 : 51;
+                if (m_internalSpawnKind == kind) return;
+                if (PairEnded()) BeginNewPair();
+                bool found = false;
+                for (auto& slot : m_spawns) if (slot.kind == kind)
+                {
+                    found = true;
+                    if (!slot.created && !slot.killed) { slot.guid = creature->GetObjectGuid(); slot.created = true; }
+                    else if (slot.guid != creature->GetObjectGuid()) m_excessActors.insert(creature->GetObjectGuid());
+                    break;
+                }
+                if (!found)
+                {
+                    Position jarien{3421.199951f,-3056.520020f,136.498001f,0.343068f}, sothos{3425.850098f,-3054.75f,136.498001f,3.338580f};
+                    QueueSpawn(50, NPC_JARIEN, jarien, jarien); QueueSpawn(51, NPC_SOTHOS, sothos, sothos);
+                    for (auto& slot : m_spawns) { if (slot.kind == 50 || slot.kind == 51) slot.expires = uint64(time(nullptr)) + 7200; if (slot.kind == kind) { slot.guid = creature->GetObjectGuid(); slot.created = true; } }
+                }
+                m_pairSpawner = trigger->GetObjectGuid(); SaveState();
+            }
+    m_restorePending = true;
 }
 
-void instance_stratholme::ThazudinAcolyteJustDied(Creature* creature)
+
+void instance_stratholme::ThazudinAcolyteJustDied(Creature*)
 {
-    for (uint8 i = 0; i < MAX_ZIGGURATS; ++i)
-    {
-        if (m_zigguratStorage[i].m_zigguratAcolyteGuid.empty())
-            continue;                               // nothing to do anymore for this ziggurat
-
-        m_zigguratStorage[i].m_zigguratAcolyteGuid.remove(creature->GetObjectGuid());
-        if (m_zigguratStorage[i].m_zigguratAcolyteGuid.empty())
+    for (uint32 i = 0; i < 3; ++i)
+        if (m_auiEncounter[i + 1] == DONE && StaticMembersDead(m_towerExpected[i]))
         {
-            // A random zone yell after one is cleared
-            int32 aAnnounceSay[MAX_ZIGGURATS] = {SAY_ANNOUNCE_ZIGGURAT_1, SAY_ANNOUNCE_ZIGGURAT_2, SAY_ANNOUNCE_ZIGGURAT_3};
-            DoOrSimulateScriptTextForThisInstance(aAnnounceSay[i], NPC_THUZADIN_ACOLYTE);
-
-            // Kill Crystal
-            if (Creature* crystal = instance->GetCreature(m_zigguratStorage[i].m_crystalGuid))
-                crystal->CastSpell(nullptr, SPELL_SUICIDE, TRIGGERED_OLD_TRIGGERED);
-
-            switch (i)
-            {
-                case 0: SetData(TYPE_BARONESS, SPECIAL); break;
-                case 1: SetData(TYPE_NERUB, SPECIAL);    break;
-                case 2: SetData(TYPE_PALLID, SPECIAL);   break;
-                default: return;
-            }
+            int32 const texts[] = {SAY_ANNOUNCE_ZIGGURAT_1, SAY_ANNOUNCE_ZIGGURAT_2, SAY_ANNOUNCE_ZIGGURAT_3};
+            DoOrSimulateScriptTextForThisInstance(texts[i], NPC_THUZADIN_ACOLYTE);
+            if (Creature* crystal = instance->GetCreature(m_zigguratStorage[i].m_crystalGuid)) crystal->CastSpell(nullptr, SPELL_SUICIDE, TRIGGERED_OLD_TRIGGERED);
+            SetData(i + 1, SPECIAL);
         }
-    }
 }
 
 void instance_stratholme::DoSpawnScarletGuards(uint8 step, Player* summoner)
@@ -978,6 +867,7 @@ void instance_stratholme::DoGateTrap(uint8 gate)
     m_gateTrapTimers[gate][1] = 20 * IN_MILLISECONDS;
     // set timer to spawn the plagued critters
     m_gateTrapTimers[gate][2] = 2 * IN_MILLISECONDS;
+    SaveState();
 }
 
 void instance_stratholme::DoSpawnPlaguedCritters(uint8 gate, Player* player)
@@ -997,259 +887,160 @@ void instance_stratholme::DoSpawnPlaguedCritters(uint8 gate, Player* player)
 
 void instance_stratholme::Update(uint32 diff)
 {
-    // Loop over the two Gate traps, each one has up to three timers (trap reset, gate opening delay, critters spawning delay)
-    for (uint8 i = 0; i < 2; i++)
+    bool runFailedNow = false;
+    if (m_restorePending) { m_restorePending = false; RestoreProgress(); }
+    for (ObjectGuid guid : m_excessActors) if (Creature* actor = instance->GetCreature(guid)) if (actor->IsAlive()) actor->ForcedDespawn();
+    m_excessActors.clear();
+    if (m_slaughterResumePending && GetSlaughterParticipant())
     {
-        // Check that the trap is not on cooldown, if so check if player/pet is in range
-        if (m_gateTrapTimers[i][0])
-        {
-            m_gateTrapTimers[i][0] -= diff;
-            if (m_gateTrapTimers[i][0] <= diff)
-            {
-                debug_log("SD2: Instance Stratholme - Rat Trap reseted %u.", i);
-                m_gateTrapTimers[i][0] = 0;
-            }
-        }
+        m_slaughterResumePending = false;
+        m_isSlaughterDoorOpen = m_slaughterPhase >= 4;
+        for (auto& slot : m_spawns) slot.attempts = 0;
+        SaveState(); SyncObjects();
+    }
+    for (uint32 gate = 0; gate < 2; ++gate)
+    {
+        if (m_gateTrapTimers[gate][0])
+            m_gateTrapTimers[gate][0] = m_gateTrapTimers[gate][0] <= diff ? 0 : m_gateTrapTimers[gate][0] - diff;
         else
+            for (auto const& ref : instance->GetPlayers())
+                if (Player* player = ref.getSource())
+                    if (player->IsAlive() && !player->IsGameMaster() && player->GetMap() == instance)
+                    {
+                        Pet* pet = player->GetPet();
+                        if (player->IsWithinDist2d(gateTrap[gate].x, gateTrap[gate].y, 5.5f) || (pet && pet->IsAlive() && pet->IsWithinDist2d(gateTrap[gate].x, gateTrap[gate].y, 5.5f)))
+                        { m_gateTrapTarget[gate] = player->GetObjectGuid(); DoGateTrap(uint8(gate)); break; }
+                    }
+        if (m_gateTrapTimers[gate][1])
         {
-            Map::PlayerList const& players = instance->GetPlayers();
-            for (const auto& player : players)
+            if (m_gateTrapTimers[gate][1] <= diff)
             {
-                if (Player* playerSource = player.getSource())
-                {
-                    if (!playerSource->IsGameMaster() && playerSource->IsWithinDist2d(gateTrap[i].x, gateTrap[i].y, 5.5f))
-                        DoGateTrap(i);
-
-                    Pet* pet = playerSource->GetPet();
-                    if (!playerSource->IsGameMaster() && pet && pet->IsWithinDist2d(gateTrap[i].x, gateTrap[i].y, 5.5f))
-                        DoGateTrap(i);
-                }
+                if (GameObject* go = GetSingleGameObjectFromStorage(gates[2 * gate], true)) go->SetGoState(GO_STATE_ACTIVE);
+                if (GameObject* go = GetSingleGameObjectFromStorage(gates[2 * gate + 1], true)) go->SetGoState(GO_STATE_ACTIVE);
+                m_gateTrapTimers[gate][1] = 0;
             }
+            else m_gateTrapTimers[gate][1] -= diff;
         }
-        // Timer to reopen the gates
-        if (m_gateTrapTimers[i][1])
+        if (m_gateTrapTimers[gate][2])
         {
-            if (m_gateTrapTimers[i][1] <= diff)
+            if (m_gateTrapTimers[gate][2] <= diff)
             {
-                DoUseDoorOrButton(gates[2 * i]);
-                DoUseDoorOrButton(gates[2 * i + 1]);
-                m_gateTrapTimers[i][1] = 0;
+                Player* target = nullptr;
+                for (auto const& ref : instance->GetPlayers()) if (Player* player = ref.getSource())
+                    if (player->IsAlive() && !player->IsGameMaster() && player->GetMap() == instance && player->IsWithinDist2d(gateTrap[gate].x, gateTrap[gate].y, 15))
+                    { if (!target || player->GetObjectGuid() == m_gateTrapTarget[gate]) target = player; }
+                if (target) DoSpawnPlaguedCritters(uint8(gate), target);
+                m_gateTrapTimers[gate][2] = 0;
             }
-            else
-                m_gateTrapTimers[i][1] -= diff;
-        }
-        // Delay timer to spawn the plagued critters once the gate are closing
-        if (m_gateTrapTimers[i][2])
-        {
-            if (m_gateTrapTimers[i][2] <= diff)
-            {
-                if (Player* player = GetPlayerInMap())
-                    DoSpawnPlaguedCritters(i, player);
-                m_gateTrapTimers[i][2] = 0;
-            }
-            else
-                m_gateTrapTimers[i][2] -= diff;
+            else m_gateTrapTimers[gate][2] -= diff;
         }
     }
-
-    // Timer to send the Black Guard Sentries out of the Slaughterhouse before Baron Rivendare
-    if (m_blackGuardsTimer)
-    {
-        if (m_blackGuardsTimer <= diff)
-        {
-            // Open the Slaughterhouse door to let the 5 Black Guards to move out
-            DoOpenSlaughterhouseDoor(true);
-
-            for (auto guardGUID : m_guardGUIDs)
-            {
-                Creature* guard = instance->GetCreature(guardGUID);
-                if (guard && guard->IsAlive() && !guard->IsInCombat())
-                {
-                    float fX, fY, fZ;
-                    guard->GetRandomPoint(stratholmeLocation[5].x, stratholmeLocation[5].y, stratholmeLocation[5].z, 10.0f, fX, fY, fZ);
-                    guard->GetMotionMaster()->MovePoint(0, fX, fY, fZ);
-                }
-            }
-            m_blackGuardsTimer = 0;
-        }
-        else
-            m_blackGuardsTimer -= diff;
-    }
-    // Timer to close the gate of the Slaughterhouse before Baron Rivendare after Ramstein/Black Guards moved out
-    if (m_slaughterDoorTimer)
-    {
-        if (m_slaughterDoorTimer <= diff)
-        {
-            DoOpenSlaughterhouseDoor(false);
-            m_slaughterDoorTimer = 0;
-        }
-        else
-            m_slaughterDoorTimer -= diff;
-    }
-    // Timer to teleport Barthilas
     if (m_barthilasRunTimer)
     {
         if (m_barthilasRunTimer <= diff)
         {
-            Creature* barthilas = GetSingleCreatureFromStorage(NPC_BARTHILAS);
-            if (barthilas && barthilas->IsAlive() && !barthilas->IsInCombat())
-            {
-                barthilas->GetMotionMaster()->Clear(false, true);
-                barthilas->GetMotionMaster()->MoveIdle();
-                barthilas->NearTeleportTo(stratholmeLocation[1].x, stratholmeLocation[1].y, stratholmeLocation[1].z, stratholmeLocation[1].o);
-            }
-
-            SetData(TYPE_BARTHILAS_RUN, DONE);
-            m_barthilasRunTimer = 0;
+            if (Creature* actor = GetSingleCreatureFromStorage(NPC_BARTHILAS, true))
+                if (actor->IsAlive() && !actor->IsInCombat()) actor->NearTeleportTo(stratholmeLocation[1].x, stratholmeLocation[1].y, stratholmeLocation[1].z, stratholmeLocation[1].o);
+            m_barthilasRunTimer = 0; SetData(TYPE_BARTHILAS_RUN, DONE);
         }
-        else
-            m_barthilasRunTimer -= diff;
+        else m_barthilasRunTimer -= diff;
     }
-
-    // Timer to summon Aurius into the Slaughter House once Baron is engaged
     if (m_auriusSummonTimer)
     {
-        if (m_auriusSummonTimer <= diff)
+        Creature* baron = GetSingleCreatureFromStorage(NPC_BARON, true);
+        if (GetData(TYPE_BARON) != IN_PROGRESS || !baron || !baron->IsAlive() || !baron->IsInCombat()) m_auriusSummonTimer = 0;
+        else if (m_auriusSummonTimer <= diff)
         {
-            // Teleport Aurius from the Chapel and spawn it in the Slaughter House to engage Baron
-            Creature* aurius = GetSingleCreatureFromStorage(NPC_AURIUS);
-            if (aurius && aurius->IsAlive() && !aurius->IsInCombat())
-            {
-                if (Creature* baron = GetSingleCreatureFromStorage(NPC_BARON))
+            bool joined = false;
+            if (Creature* actor = GetSingleCreatureFromStorage(NPC_AURIUS, true))
+                if (actor->IsAlive() && !actor->IsInCombat())
                 {
-                    float fX, fY, fZ;
-                    baron->GetRandomPoint(baron->GetPositionX(), baron->GetPositionY(), baron->GetPositionZ(), 4.0f, fX, fY, fZ);
-                    aurius->SetStandState(UNIT_STAND_STATE_STAND);
-                    aurius->NearTeleportTo(fX, fY, fZ, aurius->GetOrientation());
-                    aurius->SetRespawnCoord(fX, fY, fZ, aurius->GetOrientation());
-                    DoScriptText(SAY_AURIUS_AGGRO, aurius);
-                    aurius->SetFactionTemporary(FACTION_VICTIM, TEMPFACTION_RESTORE_RESPAWN);
-                    aurius->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER | UNIT_NPC_FLAG_GOSSIP);
-                    aurius->AI()->AttackStart(baron);
+                    float x, y, z; baron->GetRandomPoint(baron->GetPositionX(), baron->GetPositionY(), baron->GetPositionZ(), 4, x, y, z);
+                    actor->SetStandState(UNIT_STAND_STATE_STAND); actor->NearTeleportTo(x, y, z, actor->GetOrientation()); actor->SetRespawnCoord(x, y, z, actor->GetOrientation());
+                    DoScriptText(SAY_AURIUS_AGGRO, actor); actor->SetFactionTemporary(FACTION_VICTIM, TEMPFACTION_RESTORE_RESPAWN);
+                    actor->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER | UNIT_NPC_FLAG_GOSSIP); actor->AI()->AttackStart(baron);
+                    joined = actor->IsInCombat();
                 }
-            }
-            m_auriusSummonTimer = 0;
+            m_auriusSummonTimer = joined || ++m_auriusAttempts >= 5 ? 0 : 1000;
         }
-        else
-            m_auriusSummonTimer -= diff;
+        else m_auriusSummonTimer -= diff;
     }
-
-    // Check changes for Baron ultimatum timer only if Baron is not already in combat
-    if (m_baronRunTimer && GetData(TYPE_BARON) != IN_PROGRESS)
+    if (GetData(TYPE_BARON_RUN) == IN_PROGRESS && !m_runPaused && m_baronRunTimer)
     {
-        if (m_yellCounter == 0 && m_baronRunTimer <= 10 * MINUTE * IN_MILLISECONDS)
-        {
-            DoOrSimulateScriptTextForThisInstance(SAY_ANNOUNCE_RUN_10_MIN, NPC_BARON);
-            ++m_yellCounter;
-        }
-        else if (m_yellCounter == 1 && m_baronRunTimer <= 5 * MINUTE * IN_MILLISECONDS)
-        {
-            DoOrSimulateScriptTextForThisInstance(SAY_ANNOUNCE_RUN_5_MIN, NPC_BARON);
-            ++m_yellCounter;
-        }
-        // Used to create a delay of 10s between Baron speech and Ysida's answer
-        else if (m_yellCounter == 2 && m_baronRunTimer <= (5 * MINUTE - 10) * IN_MILLISECONDS)
-        {
-            DoOrSimulateScriptTextForThisInstance(SAY_YSIDA_RUN_5_MIN, NPC_YSIDA);
-            ++m_yellCounter;
-        }
-
+        uint32 const threshold[] = {600000, 300000, 290000};
+        int32 const texts[] = {SAY_ANNOUNCE_RUN_10_MIN, SAY_ANNOUNCE_RUN_5_MIN, SAY_YSIDA_RUN_5_MIN};
+        if (m_yellCounter < 3 && m_baronRunTimer <= threshold[m_yellCounter])
+        { DoOrSimulateScriptTextForThisInstance(texts[m_yellCounter], m_yellCounter == 2 ? NPC_YSIDA : NPC_BARON); ++m_yellCounter; SaveState(); }
         if (m_baronRunTimer <= diff)
         {
-            if (GetData(TYPE_BARON_RUN) != FAIL)
-            {
-                SetData(TYPE_BARON_RUN, FAIL);
-
-                // Open the cage and let Ysida face her doom
-                if (Creature* ysida = GetSingleCreatureFromStorage(NPC_YSIDA))
-                {
-                    ysida->GetMotionMaster()->MovePoint(0, stratholmeLocation[8].x, stratholmeLocation[8].y, stratholmeLocation[8].z);
-                    DoUseDoorOrButton(GO_YSIDA_CAGE);
-                }
-
-                DoOrSimulateScriptTextForThisInstance(SAY_ANNOUNCE_RUN_FAIL, NPC_BARON);
-
-                m_baronRunTimer = 8 * IN_MILLISECONDS;  // We reset the timer so the speech of Ysida is not said at the same time than the Baron's one
-            }
-            else
-            {
-                // Baron ultimatum failed: let the Baron kill her
-                if (Creature* ysida = GetSingleCreatureFromStorage(NPC_YSIDA))
-                {
-                    if (Creature* baron = GetSingleCreatureFromStorage(NPC_BARON))
-                        baron->CastSpell(ysida, SPELL_BARON_SOUL_DRAIN, TRIGGERED_NONE);
-                }
-
-                DoOrSimulateScriptTextForThisInstance(SAY_YSIDA_RUN_FAIL, NPC_YSIDA);
-
-                m_baronRunTimer = 0;  // event done for good, no more speech
-                debug_log("SD2: Instance Stratholme: Baron run event reached end. Event has state %u.", GetData(TYPE_BARON_RUN));
-            }
+            SetData(TYPE_BARON_RUN, FAIL);
+            m_runFailTimer = 8000;
+            runFailedNow = true; SaveState();
+            DoOrSimulateScriptTextForThisInstance(SAY_ANNOUNCE_RUN_FAIL, NPC_BARON);
+            if (Creature* ysida = GetSingleCreatureFromStorage(NPC_YSIDA, true)) ysida->GetMotionMaster()->MovePoint(0, stratholmeLocation[8].x, stratholmeLocation[8].y, stratholmeLocation[8].z);
         }
-        else
-            m_baronRunTimer -= diff;
+        else m_baronRunTimer -= diff;
     }
-
-    if (m_mindlessSummonTimer)
+    if (m_runFailTimer && !runFailedNow)
     {
-        if (m_mindlessCount < 30)
+        if (m_runFailTimer <= diff)
         {
-            if (m_mindlessSummonTimer <= diff)
-            {
-                if (Creature* baron = GetSingleCreatureFromStorage(NPC_BARON))
-                {
-                    // Summon mindless skeletons and move them to random point in the center of the square
-                    if (Creature* temp = baron->SummonCreature(NPC_MINDLESS_UNDEAD, stratholmeLocation[4].x, stratholmeLocation[4].y, stratholmeLocation[4].z, stratholmeLocation[4].o, TEMPSPAWN_DEAD_DESPAWN, 0))
-                    {
-                        float fX, fY, fZ;
-                        baron->GetRandomPoint(stratholmeLocation[5].x, stratholmeLocation[5].y, stratholmeLocation[5].z, 20.0f, fX, fY, fZ);
-                        temp->SetWalk(false);
-                        temp->GetMotionMaster()->MovePoint(0, fX, fY, fZ);
-                        m_undeadGUIDs.push_back(temp->GetObjectGuid());
-                        ++m_mindlessCount;
-                    }
-                }
-                m_mindlessSummonTimer = 400;
-            }
-            else
-                m_mindlessSummonTimer -= diff;
+            m_runFailTimer = 0;
+            if (Creature* ysida = GetSingleCreatureFromStorage(NPC_YSIDA, true))
+                if (Creature* baron = GetSingleCreatureFromStorage(NPC_BARON, true)) baron->CastSpell(ysida, SPELL_BARON_SOUL_DRAIN, TRIGGERED_NONE);
+            DoOrSimulateScriptTextForThisInstance(SAY_YSIDA_RUN_FAIL, NPC_YSIDA);
         }
-        else
-            m_mindlessSummonTimer = 0;
+        else m_runFailTimer -= diff;
     }
-
-    if (m_slaughterSquareTimer)
+    if (m_ysidaTimer <= diff) { m_ysidaTimer = 1000; EnsureYsida(); } else m_ysidaTimer -= diff;
+    if (!m_slaughterResumePending && !m_retryBlocked)
+    {
+        if (m_slaughterPhase == 2 && m_mindlessSummonTimer <= diff)
+        {
+            m_mindlessSummonTimer = 400;
+            for (auto& slot : m_spawns) if (slot.kind == 2 && !slot.killed && !instance->GetCreature(slot.guid))
+            {
+                if (!SpawnSlot(slot) && slot.attempts >= 5) { m_retryBlocked = true; m_auiEncounter[8] = FAIL; SyncObjects(); SaveState(); }
+                break;
+            }
+        }
+        else if (m_slaughterPhase == 2) m_mindlessSummonTimer -= diff;
+        if (m_slaughterPhase == 3 && m_blackGuardsTimer)
+        {
+            if (m_blackGuardsTimer <= diff)
+            {
+                m_blackGuardsTimer = 0; m_slaughterPhase = 4; DoOpenSlaughterhouseDoor(true);
+                for (auto const& slot : m_spawns) if (slot.kind == 3) if (Creature* actor = instance->GetCreature(slot.guid)) if (actor->IsAlive() && !actor->IsInCombat()) actor->GetMotionMaster()->MovePoint(0, slot.dx, slot.dy, slot.dz);
+                SaveState();
+            }
+            else m_blackGuardsTimer -= diff;
+        }
+        if (m_slaughterDoorTimer)
+        {
+            if (m_slaughterDoorTimer <= diff) { m_slaughterDoorTimer = 0; DoOpenSlaughterhouseDoor(false); } else m_slaughterDoorTimer -= diff;
+        }
+    }
+    ProcessSpawns(diff);
+    AdvanceSlaughter();
+    if (m_slaughterSquareTimer && !m_slaughterPhase && !m_slaughterResumePending && !m_retryBlocked)
     {
         if (m_slaughterSquareTimer <= diff)
         {
-            // Call next Abominations
-            for (auto abomGUID : m_abominationGUIDs)
+            for (auto it = m_abominationGUIDs.begin(); it != m_abominationGUIDs.end();)
             {
-                Creature* abom = instance->GetCreature(abomGUID);
-                // Skip killed and already walking Abominations
-                if (!abom || !abom->IsAlive() || abom->GetMotionMaster()->GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE)
-                    continue;
-
-                // Let Move to somewhere in the middle
-                if (!abom->IsInCombat())
-                {
-                    if (GameObject* door = GetSingleGameObjectFromStorage(GO_PORT_SLAUGHTER))
-                    {
-                        float fX, fY, fZ;
-                        abom->GetRandomPoint(door->GetPositionX(), door->GetPositionY(), door->GetPositionZ(), 10.0f, fX, fY, fZ);
-                        abom->GetMotionMaster()->MovePoint(0, fX, fY, fZ);
-                    }
-                }
-                break;
+                Creature* actor = instance->GetCreature(*it);
+                if (!actor) { it = m_abominationGUIDs.erase(it); continue; }
+                ++it;
+                if (!actor->IsAlive() || actor->IsInCombat() || actor->GetMotionMaster()->GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE) continue;
+                float x, y, z; actor->GetRandomPoint(4037.15f, -3469.15f, 121.804f, 10, x, y, z); actor->GetMotionMaster()->MovePoint(0, x, y, z); break;
             }
-
-            // TODO - how fast are they called?
-            m_slaughterSquareTimer = urand(30, 45) * IN_MILLISECONDS;
+            m_slaughterSquareTimer = urand(30, 45) * 1000;
         }
-        else
-            m_slaughterSquareTimer -= diff;
+        else m_slaughterSquareTimer -= diff;
     }
+    if (m_saveTimer <= diff) { m_saveTimer = 30000; SaveState(); } else m_saveTimer -= diff;
 }
+
 
 bool instance_stratholme::CheckConditionCriteriaMeet(Player const* player, uint32 instanceConditionId, WorldObject const* conditionSource, uint32 conditionSourceType) const
 {
@@ -1259,6 +1050,401 @@ bool instance_stratholme::CheckConditionCriteriaMeet(Player const* player, uint3
         script_error_log("instance_stratholme::CheckConditionCriteriaMeet called with unsupported Id %u. Called with param plr %s, src %s, condition source type %u",
                      instanceConditionId, player ? player->GetGuidStr().c_str() : "nullptr", conditionSource ? conditionSource->GetGuidStr().c_str() : "nullptr", conditionSourceType);
     return false;
+}
+
+void instance_stratholme::BuildSaveData()
+{
+    std::ostringstream out;
+    out << std::setprecision(9);
+    for (uint32 i = 0; i < 8; ++i) out << m_auiEncounter[i] << ' ';
+    out << "ST2 " << m_auiEncounter[8] << ' ' << m_auiEncounter[9] << ' ' << m_baronRunTimer << ' ' << uint64(time(nullptr)) << ' '
+        << m_runPaused << ' ' << m_yellCounter << ' ' << m_slaughterPhase << ' ' << m_blackGuardsTimer << ' ' << m_slaughterDoorTimer << ' '
+        << m_defenseTriggered << ' ' << m_pairBox << ' ' << m_legacy << ' ' << m_runFailTimer << ' ' << m_auriusPositionReady
+        << ' ' << m_auriusPosition.x << ' ' << m_auriusPosition.y << ' ' << m_auriusPosition.z << ' ' << m_auriusPosition.o
+        << ' ' << m_slaughterSquareTimer << ' ' << m_mindlessSummonTimer;
+    for (auto const& timers : m_gateTrapTimers) for (uint32 timer : timers) out << ' ' << timer;
+    out << ' ' << m_pairGeneration << ' ' << m_pairRewards.size();
+    for (auto const& request : m_pairRewards) out << ' ' << request.generation << ' ' << request.owner.GetRawValue();
+    auto writeSet = [&](std::set<uint32> const& values) { out << ' ' << values.size(); for (uint32 value : values) out << ' ' << value; };
+    writeSet(m_staticDead); writeSet(m_postboxGuids);
+    out << ' ' << m_spawns.size();
+    for (auto const& slot : m_spawns)
+        out << ' ' << slot.kind << ' ' << slot.entry << ' ' << slot.created << ' ' << slot.killed << ' ' << slot.expires
+            << ' ' << slot.x << ' ' << slot.y << ' ' << slot.z << ' ' << slot.o << ' ' << slot.dx << ' ' << slot.dy << ' ' << slot.dz;
+    out << " END";
+    m_strInstData = out.str();
+}
+
+void instance_stratholme::SaveState() { BuildSaveData(); SaveToDB(); }
+
+void instance_stratholme::BuildStaticMembers()
+{
+    if (m_staticReady) return;
+    auto worker = [&](CreatureDataPair const& pair) -> bool
+    {
+        CreatureData const& data = pair.second;
+        if (data.mapid != instance->GetId()) return false;
+        if (data.id == NPC_ABOM_BILE || data.id == NPC_ABOM_VENOM) m_abomExpected.insert(pair.first);
+        if (data.id == NPC_THUZADIN_ACOLYTE)
+        {
+            float const doors[3][2] = {{3853.47f,-3722.94f},{3851.70f,-3522.96f},{4038.13f,-3649.91f}};
+            for (uint32 i = 0; i < 3; ++i)
+                if (std::hypot(data.posX - doors[i][0], data.posY - doors[i][1]) < 35.0f) m_towerExpected[i].insert(pair.first);
+        }
+        auto eligible = [](uint32 entry) { return entry == NPC_CRIMSON_INITIATE || entry == NPC_CRIMSON_GALLANT || entry == NPC_CRIMSON_GUARDSMAN || entry == NPC_CRIMSON_CONJURER || entry == NPC_CRIMSON_BATTLE_MAGE; };
+        bool defender = eligible(data.id);
+        if (!data.id)
+        {
+            auto actual = m_staticEntries.find(pair.first);
+            if (actual != m_staticEntries.end()) defender = eligible(actual->second);
+            else if (auto entries = sObjectMgr.GetAllRandomCreatureEntries(pair.first))
+                for (uint32 entry : *entries) defender = defender || eligible(entry);
+        }
+        if (defender)
+        {
+            if (std::hypot(data.posX - defensePoints[TIMMY].x, data.posY - defensePoints[TIMMY].y) <= 40.0f) m_defenseExpected[TIMMY].insert(pair.first);
+            for (uint32 i = 0; i < MAX_DEFENSE_POINTS; ++i)
+                if (i != TIMMY && std::hypot(data.posX - defensePoints[i].x, data.posY - defensePoints[i].y) <= 8.0f) { m_defenseExpected[i].insert(pair.first); break; }
+        }
+        return false;
+    };
+    sObjectMgr.DoCreatureData(worker);
+    m_staticReady = true;
+}
+
+bool instance_stratholme::StaticMembersDead(std::set<uint32> const& members) const
+{
+    if (members.empty()) return false;
+    for (uint32 guid : members) if (!m_staticDead.count(guid)) return false;
+    return true;
+}
+
+bool instance_stratholme::StartBaronRun(Player* player)
+{
+    if (!player || !player->IsAlive() || player->IsGameMaster() || player->GetMap() != instance || GetData(TYPE_BARON_RUN) != NOT_STARTED) return false;
+    m_auiEncounter[0] = IN_PROGRESS; m_baronRunTimer = 45 * MINUTE * IN_MILLISECONDS; m_yellCounter = 0; m_runPaused = false;
+    SaveState();
+    DoOrSimulateScriptTextForThisInstance(SAY_ANNOUNCE_RUN_START, NPC_BARON);
+    for (auto const& ref : instance->GetPlayers()) if (Player* target = ref.getSource()) SyncRunAura(target);
+    m_ysidaAttempts = 0; m_ysidaTimer = 1;
+    return true;
+}
+
+void instance_stratholme::SyncRunAura(Player* player)
+{
+    if (!player || player->GetMap() != instance || !player->IsAlive() || player->IsGameMaster()) return;
+    if (GetData(TYPE_BARON_RUN) == IN_PROGRESS && m_baronRunTimer)
+    {
+        if (!player->HasAura(SPELL_BARON_ULTIMATUM)) player->CastSpell(player, SPELL_BARON_ULTIMATUM, TRIGGERED_OLD_TRIGGERED);
+        if (SpellAuraHolder* aura = player->GetSpellAuraHolder(SPELL_BARON_ULTIMATUM)) aura->SetAuraDuration(m_baronRunTimer);
+    }
+    else player->RemoveAurasDueToSpell(SPELL_BARON_ULTIMATUM);
+}
+
+bool instance_stratholme::IsSlaughterParticipant(Player* player) const
+{
+    // The two approach ports are at y=-3504/-3469; the fighting square is north
+    // of both, at floor 115..122. Do not close the approach on somebody outside.
+    return player && player->GetMap() == instance && player->IsAlive() && !player->IsGameMaster() &&
+        player->GetPositionX() >= 3965 && player->GetPositionX() <= 4110 && player->GetPositionY() >= -3462 && player->GetPositionY() <= -3370 &&
+        player->GetPositionZ() >= 110 && player->GetPositionZ() <= 130;
+}
+
+Player* instance_stratholme::GetSlaughterParticipant() const
+{
+    for (auto const& ref : instance->GetPlayers()) if (IsSlaughterParticipant(ref.getSource())) return ref.getSource();
+    return nullptr;
+}
+
+void instance_stratholme::QueueSpawn(uint32 kind, uint32 entry, Position const& pos, Position const& dest)
+{
+    StratholmeSpawn slot; slot.kind = kind; slot.entry = entry;
+    slot.x = pos.x; slot.y = pos.y; slot.z = pos.z; slot.o = pos.o;
+    slot.dx = dest.x; slot.dy = dest.y; slot.dz = dest.z;
+    m_spawns.push_back(slot);
+}
+
+bool instance_stratholme::AllKilled(uint32 kind, uint32 count) const
+{
+    uint32 found = 0;
+    for (auto const& slot : m_spawns) if (slot.kind == kind) { ++found; if (!slot.created || !slot.killed) return false; }
+    return found == count;
+}
+
+void instance_stratholme::AdvanceSlaughter()
+{
+    if (!m_staticReady) return;
+    bool changed = false;
+    if (!m_slaughterPhase && m_abomExpected.size() == 13 && StaticMembersDead(m_abomExpected) &&
+        m_auiEncounter[1] == SPECIAL && m_auiEncounter[2] == SPECIAL && m_auiEncounter[3] == SPECIAL)
+    {
+        m_slaughterPhase = 1; m_slaughterSquareTimer = 0;
+        QueueSpawn(1, NPC_RAMSTEIN, stratholmeLocation[2], stratholmeLocation[5]);
+        changed = true;
+    }
+    if (m_slaughterPhase == 1 && AllKilled(1, 1))
+    {
+        m_slaughterPhase = 2; m_auiEncounter[TYPE_RAMSTEIN] = DONE;
+        m_mindlessCount = 0; m_mindlessSummonTimer = 500;
+        DoOpenSlaughterhouseDoor(false);
+        for (uint32 i = 0; i < 30; ++i)
+        {
+            Position dest = stratholmeLocation[5];
+            if (Player* player = GetSlaughterParticipant()) player->GetRandomPoint(dest.x, dest.y, dest.z, 20.0f, dest.x, dest.y, dest.z);
+            QueueSpawn(2, NPC_MINDLESS_UNDEAD, stratholmeLocation[4], dest);
+        }
+        for (uint32 i = 0; i < 5; ++i) QueueSpawn(3, NPC_BLACK_GUARD, stratholmeLocation[6], stratholmeLocation[5]);
+        changed = true;
+    }
+    if (m_slaughterPhase == 2 && AllKilled(2, 30)) { m_slaughterPhase = 3; m_blackGuardsTimer = 60000; changed = true; }
+    if (m_slaughterPhase == 4 && AllKilled(3, 5))
+    {
+        m_slaughterPhase = 6; m_auiEncounter[TYPE_BLACK_GUARDS] = DONE; m_slaughterResumePending = false;
+        DoOpenSlaughterhouseDoor(true);
+        DoOrSimulateScriptTextForThisInstance(SAY_UNDEAD_DEFEAT, NPC_BARON);
+        changed = true;
+    }
+    if (changed) { SaveState(); SyncObjects(); }
+}
+
+bool instance_stratholme::SpawnSlot(StratholmeSpawn& slot)
+{
+    uint64 const now = uint64(time(nullptr));
+    if (slot.killed) return true;
+    if (slot.expires && slot.expires <= now) return true;
+    if (Creature* actor = instance->GetCreature(slot.guid)) return actor->IsAlive();
+    if (slot.attempts >= 5) return false;
+    WorldObject* owner = slot.kind <= 3 ? static_cast<WorldObject*>(GetSlaughterParticipant()) :
+        slot.kind == 50 || slot.kind == 51 ? static_cast<WorldObject*>(instance->GetCreature(m_pairSpawner)) : static_cast<WorldObject*>(GetPlayerInMap());
+    if (!owner) return false;
+    ++slot.attempts;
+    Creature* actor;
+    if (slot.kind == 40)
+    {
+        TempSpawnSettings settings(owner, slot.entry, slot.x, slot.y, slot.z, slot.o, TEMPSPAWN_TIMED_OR_DEAD_DESPAWN,
+            slot.expires ? uint32(slot.expires - now) * 1000 : 180000, false, false, 0, 0, 0, false, false, SPELL_SUMMON_POSTMASTER, -1, 60);
+        actor = WorldObject::SummonCreature(settings, instance);
+        if (actor && !slot.expires) { slot.expires = now + 180; m_auiEncounter[9] = DONE; }
+    }
+    else
+    {
+        m_internalSpawnKind = slot.kind;
+        bool pair = slot.kind == 50 || slot.kind == 51;
+        actor = owner->SummonCreature(slot.entry, slot.x, slot.y, slot.z, slot.o, pair ? TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN : TEMPSPAWN_DEAD_DESPAWN,
+            pair ? uint32(slot.expires > now ? slot.expires - now : 7200) * 1000 : 0);
+        m_internalSpawnKind = 0;
+    }
+    if (!actor) return false;
+    slot.guid = actor->GetObjectGuid(); slot.created = true; slot.attempts = 0;
+    if (slot.kind == 1) { DoOpenSlaughterhouseDoor(true); m_slaughterDoorTimer = 10000; }
+    if (slot.kind == 1 || slot.kind == 2 || (slot.kind == 3 && m_slaughterPhase >= 4) || (slot.kind >= 16 && slot.kind <= 24 && slot.kind != 18))
+    { actor->SetWalk(false); actor->GetMotionMaster()->MovePoint(0, slot.dx, slot.dy, slot.dz); }
+    SaveState();
+    return true;
+}
+
+void instance_stratholme::ProcessSpawns(uint32 diff)
+{
+    if (m_spawnTimer > diff) { m_spawnTimer -= diff; return; }
+    m_spawnTimer = 1000;
+    bool blocked = false;
+    // Each kind is a fixed persisted request. Failed slots never reroll or duplicate siblings.
+    for (auto& slot : m_spawns)
+    {
+        if (slot.kind == 50 || slot.kind == 51)
+            if (Creature* actor = instance->GetCreature(slot.guid)) if (actor->IsAlive() && actor->IsInCombat()) slot.expires = uint64(time(nullptr)) + 7200;
+        if (slot.kind == 2 || slot.kind == 40 || slot.killed) continue;
+        if (slot.kind <= 3 && (m_slaughterResumePending || m_retryBlocked)) continue;
+        if (!SpawnSlot(slot) && slot.kind <= 3 && slot.attempts >= 5) blocked = true;
+    }
+    if (blocked)
+    {
+        m_retryBlocked = true;
+        m_auiEncounter[m_slaughterPhase == 1 ? TYPE_RAMSTEIN : TYPE_BLACK_GUARDS] = FAIL;
+        SaveState(); SyncObjects();
+    }
+    for (auto& slot : m_spawns) if (slot.kind == 40 && !slot.killed && !instance->GetCreature(slot.guid))
+        SpawnSlot(slot);
+    UpdatePairReward();
+}
+
+bool instance_stratholme::PairEnded() const
+{
+    uint32 found = 0;
+    for (auto const& slot : m_spawns) if (slot.kind == 50 || slot.kind == 51)
+    {
+        ++found;
+        if (!slot.killed)
+        {
+            if (!slot.expires || slot.expires > uint64(time(nullptr))) return false;
+            if (Creature* actor = instance->GetCreature(slot.guid)) if (actor->IsAlive()) return false;
+        }
+    }
+    return found == 2;
+}
+
+void instance_stratholme::BeginNewPair()
+{
+    // Current earned corpses and earlier unconfirmed box requests survive a new
+    // legitimate SpellHit request on the same static trigger.
+    m_spawns.erase(std::remove_if(m_spawns.begin(), m_spawns.end(), [](StratholmeSpawn const& slot) { return slot.kind == 50 || slot.kind == 51; }), m_spawns.end());
+    ++m_pairGeneration; m_pairBox = false;
+    SaveState();
+}
+
+void instance_stratholme::UpdatePairReward()
+{
+    if (!m_pairBox && AllKilled(50, 1) && AllKilled(51, 1))
+    {
+        bool queued = false;
+        for (auto const& request : m_pairRewards) if (request.generation == m_pairGeneration) queued = true;
+        if (!queued) { StratholmeBoxRequest request; request.generation = m_pairGeneration; request.owner = m_pairSpawner; m_pairRewards.push_back(request); SaveState(); }
+    }
+    std::vector<uint32> generations;
+    for (auto const& request : m_pairRewards) if (request.attempts < 5) generations.push_back(request.generation);
+    for (uint32 generation : generations)
+        for (auto& request : m_pairRewards) if (request.generation == generation)
+        {
+            Creature* owner = instance->GetCreature(request.owner);
+            if (!owner) break;
+            ++request.attempts;
+            m_pairBoxCastingOwner = request.owner; m_pairBoxCastingGeneration = request.generation; m_pairBoxCasting = true;
+            owner->CastSpell(nullptr, SPELL_SUMMON_WINNER_BOX, TRIGGERED_OLD_TRIGGERED);
+            m_pairBoxCasting = false;
+            break; // OnObjectSpawn may have removed this request synchronously.
+        }
+}
+
+void instance_stratholme::SyncObjects()
+{
+    auto door = [&](uint32 entry, bool open) { if (GameObject* go = GetSingleGameObjectFromStorage(entry, true)) go->SetGoState(open ? GO_STATE_ACTIVE : GO_STATE_READY); };
+    for (uint32 i = 0; i < 3; ++i) door(i == 0 ? GO_ZIGGURAT_DOOR_1 : i == 1 ? GO_ZIGGURAT_DOOR_2 : GO_ZIGGURAT_DOOR_3, m_auiEncounter[i + 1] == DONE || m_auiEncounter[i + 1] == SPECIAL);
+    bool ready = m_auiEncounter[1] == SPECIAL && m_auiEncounter[2] == SPECIAL && m_auiEncounter[3] == SPECIAL;
+    bool fighting = (m_slaughterPhase > 0 && m_slaughterPhase < 6 && !m_slaughterResumePending && !m_retryBlocked && GetData(TYPE_RAMSTEIN) != FAIL && GetData(TYPE_BLACK_GUARDS) != FAIL) ||
+        (!m_slaughterPhase && GetData(TYPE_RAMSTEIN) == SPECIAL && !m_slaughterResumePending && !m_retryBlocked) || GetData(TYPE_BARON) == IN_PROGRESS;
+    door(GO_PORT_GAUNTLET, ready && !fighting);
+    door(GO_PORT_SLAUGHTER, ready);
+    door(GO_PORT_SLAUGHTER_GATE, m_slaughterPhase >= 2);
+    door(GO_ZIGGURAT_DOOR_4, m_isSlaughterDoorOpen || m_slaughterPhase == 6);
+    door(GO_ZIGGURAT_DOOR_5, m_slaughterPhase == 6 && GetData(TYPE_BARON) != IN_PROGRESS);
+    door(GO_YSIDA_CAGE, GetData(TYPE_BARON_RUN) == DONE || GetData(TYPE_BARON_RUN) == FAIL);
+    for (uint32 i = 0; i < 2; ++i) { door(gates[2 * i], !m_gateTrapTimers[i][1]); door(gates[2 * i + 1], !m_gateTrapTimers[i][1]); }
+}
+
+void instance_stratholme::EnsureYsida()
+{
+    uint32 state = GetData(TYPE_BARON_RUN);
+    if (state == NOT_STARTED) return;
+    Creature* ysida = GetSingleCreatureFromStorage(NPC_YSIDA, true);
+    if (ysida && !ysida->IsAlive()) return; // A real Soul Drain corpse is already the single failed-event actor.
+    if (!ysida || !ysida->IsAlive())
+    {
+        if (m_ysidaAttempts++ >= 5) return;
+        WorldObject* owner = GetPlayerInMap();
+        if (!owner) return;
+        Position const& pos = stratholmeLocation[state == IN_PROGRESS ? 7 : 8];
+        ysida = owner->SummonCreature(NPC_YSIDA, pos.x, pos.y, pos.z, pos.o, TEMPSPAWN_DEAD_DESPAWN, 0);
+        if (!ysida) return;
+    }
+    if (state == IN_PROGRESS) ysida->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER | UNIT_NPC_FLAG_GOSSIP);
+    else if (state == DONE) ysida->SetFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER | UNIT_NPC_FLAG_GOSSIP);
+    else if (!m_runFailTimer && !ysida->HasAura(29266)) ysida->CastSpell(ysida, 29266, TRIGGERED_OLD_TRIGGERED);
+}
+
+void instance_stratholme::SyncAurius()
+{
+    Creature* aurius = GetSingleCreatureFromStorage(NPC_AURIUS, true);
+    if (!aurius || !aurius->IsAlive()) return; // Never resurrect his real death/cooldown.
+    if (GetData(TYPE_AURIUS) == DONE && GetData(TYPE_BARON) == DONE)
+    {
+        Position const& pos = m_auriusPositionReady ? m_auriusPosition : stratholmeLocation[8];
+        aurius->NearTeleportTo(pos.x, pos.y, pos.z, pos.o);
+        aurius->SetFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER | UNIT_NPC_FLAG_GOSSIP);
+        aurius->SetHealth(1); aurius->SetStandState(UNIT_STAND_STATE_DEAD);
+    }
+    else if (GetData(TYPE_AURIUS) == DONE) aurius->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER);
+    else aurius->SetStandState(UNIT_STAND_STATE_KNEEL);
+}
+
+void instance_stratholme::RestoreProgress()
+{
+    BuildStaticMembers();
+    auto absorb = [&](std::set<uint32> const& members)
+    {
+        for (uint32 guid : members) if (instance->GetPersistentState()->GetCreatureRespawnTime(guid) > time(nullptr)) m_staticDead.insert(guid);
+    };
+    absorb(m_abomExpected);
+    for (auto const& members : m_towerExpected) absorb(members);
+    for (auto const& members : m_defenseExpected) absorb(members);
+    DoSortZiggurats();
+    ThazudinAcolyteJustDied(nullptr);
+    CheckDefenses();
+    uint32 const oldPhase = m_slaughterPhase;
+    AdvanceSlaughter();
+    if (!oldPhase && m_slaughterPhase && m_slaughterPhase < 6) m_slaughterResumePending = true;
+    SyncAurius(); SyncObjects();
+    SaveState();
+}
+
+void instance_stratholme::CheckDefenses(Creature* speaker)
+{
+    if (!m_staticReady) return;
+    for (uint32 step = 0; step < FIRST_BARRICADES; ++step)
+        if (!(m_defenseTriggered & (1u << step)) && StaticMembersDead(m_defenseExpected[step]))
+        {
+            m_defenseTriggered |= 1u << step;
+            if (m_legacy) { SaveState(); continue; } // Unknown old Timmy/wave rewards stay settled.
+            if (step == BARRICADE || step == STAIRS) DoMoveBackDefenders(step, speaker);
+            else if (step != TIMMY && speaker) DoScriptText(ScarletEventYells[step], speaker);
+            if (step == TIMMY) QueueSpawn(16 + step, NPC_TIMMY_THE_CRUEL, scourgeInvaders[0], scourgeInvaders[0]);
+            if (step == HALL_OF_LIGHTS || step == INNER_BASTION_2)
+            {
+                uint32 start = step == HALL_OF_LIGHTS ? 0 : 3;
+                for (uint32 i = 0; i < 2; ++i) QueueSpawn(16 + step, step == HALL_OF_LIGHTS ? uint32(NPC_CRIMSON_GALLANT) : i ? uint32(NPC_CRIMSON_SORCERER) : uint32(NPC_CRIMSON_MONK), scarletGuards[start], scarletGuards[start + i + 1]);
+            }
+            if (step == ENTRANCE || step == INNER_BASTION_1 || step == CRIMSON_THRONE)
+            {
+                uint32 start = step == ENTRANCE ? 1 : step == INNER_BASTION_1 ? 3 : 5;
+                std::vector<uint32> entries = {NPC_SKELETAL_GUARDIAN, NPC_SKELETAL_GUARDIAN, NPC_SKELETAL_BERSERKER, NPC_SKELETAL_BERSERKER, urand(0, 1) ? uint32(NPC_SKELETAL_GUARDIAN) : uint32(NPC_SKELETAL_BERSERKER)};
+                std::shuffle(entries.begin(), entries.end(), *GetRandomGenerator());
+                for (uint32 entry : entries)
+                {
+                    Position dest = scourgeInvaders[start + 1];
+                    if (Player* player = GetPlayerInMap()) player->GetRandomPoint(dest.x, dest.y, dest.z, 6, dest.x, dest.y, dest.z);
+                    QueueSpawn(16 + step, entry, scourgeInvaders[start], dest);
+                }
+            }
+            SaveState();
+        }
+}
+
+bool instance_stratholme::UsePostbox(Player* player, GameObject* go)
+{
+    if (m_legacy) return false; // Old records do not identify already awarded mailbox spawns.
+    if (!player || !go || !player->IsAlive() || player->IsGameMaster() || player->GetMap() != instance || go->GetMap() != instance || !go->GetDbGuid() ||
+        instance->GetGameObject(go->GetObjectGuid()) != go || m_postboxGuids.count(go->GetDbGuid())) return false;
+    uint32 const entries[] = {176346,176349,176350,176351,176352,176353};
+    if (std::find(std::begin(entries), std::end(entries), go->GetEntry()) == std::end(entries)) return false;
+    uint32 index = uint32(m_postboxGuids.size());
+    if (index >= 6) return false;
+    m_postboxGuids.insert(go->GetDbGuid()); m_postboxesUsed = uint8(m_postboxGuids.size());
+    if (index >= 3) { SaveState(); return true; }
+    Position pos{player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(), player->GetOrientation()};
+    for (uint32 i = 0; i < 3; ++i)
+    {
+        Position spawn = pos; player->GetRandomPoint(pos.x, pos.y, pos.z, 3, spawn.x, spawn.y, spawn.z);
+        QueueSpawn(32 + index, NPC_UNDEAD_POSTMAN, spawn, spawn);
+    }
+    if (index == 2)
+    {
+        QueueSpawn(40, 11143, pos, pos); m_auiEncounter[9] = SPECIAL;
+        SaveState();
+        m_postmasterOwner = player->GetObjectGuid(); m_postmasterCasting = true;
+        player->CastSpell(player, SPELL_SUMMON_POSTMASTER, TRIGGERED_OLD_TRIGGERED);
+        m_postmasterCasting = false;
+    }
+    SaveState();
+    return true;
 }
 
 InstanceData* GetInstanceData_instance_stratholme(Map* map)

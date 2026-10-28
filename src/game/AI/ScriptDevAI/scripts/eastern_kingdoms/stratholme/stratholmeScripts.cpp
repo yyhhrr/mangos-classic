@@ -41,7 +41,7 @@ EndContentData */
 
 bool GOUse_go_service_gate(Player* /*pPlayer*/, GameObject* pGo)
 {
-    ScriptedInstance* pInstance = (ScriptedInstance*)pGo->GetInstanceData();
+    instance_stratholme* pInstance = dynamic_cast<instance_stratholme*>(pGo->GetInstanceData());
 
     if (!pInstance)
         return false;
@@ -60,33 +60,11 @@ bool GOUse_go_service_gate(Player* /*pPlayer*/, GameObject* pGo)
 
 bool GOUse_go_gauntlet_gate(Player* pPlayer, GameObject* pGo)
 {
-    ScriptedInstance* pInstance = (ScriptedInstance*)pGo->GetInstanceData();
-
-    if (!pInstance)
-        return false;
-
-    if (pInstance->GetData(TYPE_BARON_RUN) != NOT_STARTED)
-        return false;
-
-    if (Group* pGroup = pPlayer->GetGroup())
+    if (instance_stratholme* pInstance = dynamic_cast<instance_stratholme*>(pGo->GetInstanceData()))
     {
-        for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
-        {
-            Player* pGroupie = itr->getSource();
-            if (!pGroupie)
-                continue;
-
-            if (!pGroupie->HasAura(SPELL_BARON_ULTIMATUM))
-                pGroupie->CastSpell(pGroupie, SPELL_BARON_ULTIMATUM, TRIGGERED_OLD_TRIGGERED);
-        }
+        if (pGo->GetEntry() == GO_GAUNTLET_GATE1 && pPlayer->GetMap() == pGo->GetMap())
+            pInstance->StartBaronRun(pPlayer);
     }
-    else
-    {
-        if (!pPlayer->HasAura(SPELL_BARON_ULTIMATUM))
-            pPlayer->CastSpell(pPlayer, SPELL_BARON_ULTIMATUM, TRIGGERED_OLD_TRIGGERED);
-    }
-
-    pInstance->SetData(TYPE_BARON_RUN, IN_PROGRESS);
     return false;
 }
 
@@ -96,31 +74,12 @@ bool GOUse_go_gauntlet_gate(Player* pPlayer, GameObject* pGo)
 
 bool GOUse_go_stratholme_postbox(Player* pPlayer, GameObject* pGo)
 {
-    ScriptedInstance* pInstance = (ScriptedInstance*)pGo->GetInstanceData();
-
-    if (!pInstance)
-        return false;
-
-    if (pInstance->GetData(TYPE_POSTMASTER) == DONE)
-        return false;
-
-    // When the data is Special, spawn the postmaster
-    if (pInstance->GetData(TYPE_POSTMASTER) == SPECIAL)
+    if (instance_stratholme* pInstance = dynamic_cast<instance_stratholme*>(pGo->GetInstanceData()))
     {
-        pPlayer->CastSpell(pPlayer, SPELL_SUMMON_POSTMASTER, TRIGGERED_OLD_TRIGGERED);
-        pInstance->SetData(TYPE_POSTMASTER, DONE);
+        // Accepted uses keep the existing parcel DB script. Repeated identities
+        // suppress that script as well as duplicate encounter summons.
+        return !pInstance->UsePostbox(pPlayer, pGo);
     }
-    else
-        pInstance->SetData(TYPE_POSTMASTER, IN_PROGRESS);
-
-    // Summon 3 postmen for each postbox
-    float fX, fY, fZ;
-    for (uint8 i = 0; i < 3; ++i)
-    {
-        pPlayer->GetRandomPoint(pPlayer->GetPositionX(), pPlayer->GetPositionY(), pPlayer->GetPositionZ(), 3.0f, fX, fY, fZ);
-        pPlayer->SummonCreature(NPC_UNDEAD_POSTMAN, fX, fY, fZ, 0.0f, TEMPSPAWN_DEAD_DESPAWN, 0);
-    }
-
     return false;
 }
 
@@ -234,6 +193,8 @@ struct mobs_spectral_ghostly_citizenAI : public ScriptedAI
     void JustRespawned() override
     {
         ScriptedAI::JustRespawned();
+        m_bIsTagged = false;
+        m_uiDieTimer = 2000;
         SetCombatScriptStatus(false);
         SetCombatMovement(true);
     }
@@ -315,7 +276,7 @@ enum
 
 bool QuestRewarded_npc_aurius(Player* /*pPlayer*/, Creature* pCreature, const Quest* pQuest)
 {
-    ScriptedInstance* pInstance = (ScriptedInstance*)pCreature->GetInstanceData();
+    instance_stratholme* pInstance = dynamic_cast<instance_stratholme*>(pCreature->GetInstanceData());
 
     if (!pInstance)
         return false;
@@ -331,7 +292,7 @@ bool QuestRewarded_npc_aurius(Player* /*pPlayer*/, Creature* pCreature, const Qu
 
 bool GossipHello_npc_aurius(Player* pPlayer, Creature* pCreature)
 {
-    ScriptedInstance* pInstance = (ScriptedInstance*)pCreature->GetInstanceData();
+    instance_stratholme* pInstance = dynamic_cast<instance_stratholme*>(pCreature->GetInstanceData());
     if (!pInstance)
         return false;
 
