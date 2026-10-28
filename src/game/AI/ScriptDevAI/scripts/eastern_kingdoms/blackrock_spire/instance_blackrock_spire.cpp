@@ -119,7 +119,8 @@ instance_blackrock_spire::instance_blackrock_spire(Map* pMap) : ScriptedInstance
     m_uiStadiumEventTimer(0),
     m_uiStadiumWaves(0),
     m_uiStadiumMobsAlive(0),
-    m_stadiumResetObjects(false)
+    m_stadiumResetObjects(false),
+    m_lower(*this, [this]() { SaveState(); })
 {
     Initialize();
 }
@@ -129,10 +130,12 @@ void instance_blackrock_spire::Initialize()
     memset(&m_auiEncounter, 0, sizeof(m_auiEncounter));
     memset(&m_aRoomRuneGuid, 0, sizeof(m_aRoomRuneGuid));
     InitializeDialogueHelper(this);
+    m_strInstData = BuildSave();
 }
 
 void instance_blackrock_spire::OnObjectCreate(GameObject* pGo)
 {
+    m_lower.OnObjectCreate(pGo);
     switch (pGo->GetEntry())
     {
         case GO_EMBERSEER_IN:
@@ -193,6 +196,7 @@ void instance_blackrock_spire::OnObjectCreate(GameObject* pGo)
 
 void instance_blackrock_spire::OnCreatureCreate(Creature* pCreature)
 {
+    m_lower.OnCreatureCreate(pCreature);
     if (IsStadiumEventActor(pCreature))
         m_sStadiumEventActors.insert(pCreature->GetObjectGuid());
     switch (pCreature->GetEntry())
@@ -311,36 +315,67 @@ void instance_blackrock_spire::SetData(uint32 uiType, uint32 uiData)
     {
         OUT_SAVE_INST_DATA;
 
-        std::ostringstream saveStream;
-        saveStream << m_auiEncounter[0] << " " << m_auiEncounter[1] << " " << m_auiEncounter[2] << " " << m_auiEncounter[3] << " " << m_auiEncounter[4] << " " << m_auiEncounter[5];
-
-        m_strInstData = saveStream.str();
-
-        SaveToDB();
+        SaveState();
         OUT_SAVE_INST_DATA_COMPLETE;
     }
 }
 
-void instance_blackrock_spire::Load(const char* chrIn)
+namespace
 {
-    if (!chrIn)
+bool ParseBlackrockSave(char const* text, std::array<uint32, MAX_ENCOUNTER>& states, std::string& lower)
+{
+    if (!text) return false;
+    std::istringstream stream(text);
+    for (uint32& state : states)
+        if (!(stream >> state) || state > SPECIAL) return false;
+    stream >> std::ws;
+    lower.assign(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+    return true;
+}
+}
+
+std::string instance_blackrock_spire::BuildSave(bool resetStadium) const
+{
+    std::ostringstream stream;
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+    {
+        if (i) stream << ' ';
+        stream << (resetStadium && i == TYPE_STADIUM ? uint32(NOT_STARTED) : m_auiEncounter[i]);
+    }
+    stream << ' ' << m_lower.Save();
+    return stream.str();
+}
+
+void instance_blackrock_spire::SaveState()
+{
+    m_strInstData = BuildSave();
+    SaveToDB();
+}
+
+void instance_blackrock_spire::Load(char const* text)
+{
+    std::array<uint32, MAX_ENCOUNTER> candidate{};
+    std::string lower;
+    if (!ParseBlackrockSave(text, candidate, lower) || !m_lower.Load(lower))
     {
         OUT_LOAD_INST_DATA_FAIL;
         return;
     }
-
-    OUT_LOAD_INST_DATA(chrIn);
-
-    std::istringstream loadStream(chrIn);
-    loadStream >> m_auiEncounter[0] >> m_auiEncounter[1] >> m_auiEncounter[2] >> m_auiEncounter[3] >> m_auiEncounter[4] >> m_auiEncounter[5];
-
-    for (uint32& i : m_auiEncounter)
-    {
-        if (i == IN_PROGRESS)
-            i = NOT_STARTED;
-    }
-
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+        m_auiEncounter[i] = candidate[i] == IN_PROGRESS ? uint32(NOT_STARTED) : candidate[i];
+    m_strInstData = BuildSave();
     OUT_LOAD_INST_DATA_COMPLETE;
+}
+
+void instance_blackrock_spire::OnCreatureRespawn(Creature* creature) { m_lower.OnCreatureRespawn(creature); }
+void instance_blackrock_spire::OnPlayerEnter(Player* player) { m_lower.OnPlayerEnter(player); }
+void instance_blackrock_spire::OnPlayerLeave(Player* player) { m_lower.OnPlayerLeave(player); }
+
+void instance_blackrock_spire::SetData64(uint32 type, uint64 value)
+{
+    if (type != 1000) return;
+    if (Creature* trigger = instance->GetCreature(ObjectGuid(value)))
+        m_lower.HandleGrayhoofSpellHit(trigger, nullptr);
 }
 
 uint32 instance_blackrock_spire::GetData(uint32 uiType) const
@@ -365,14 +400,7 @@ bool instance_blackrock_spire::GetEventResetData(uint32 eventId, std::string& da
             if (actor->IsInCombat())
                 return false;
 
-    std::ostringstream stream;
-    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
-    {
-        if (i)
-            stream << ' ';
-        stream << (i == TYPE_STADIUM ? uint32(NOT_STARTED) : m_auiEncounter[i]);
-    }
-    data = stream.str();
+    data = BuildSave(true);
     return true;
 }
 
@@ -399,14 +427,14 @@ void instance_blackrock_spire::ApplyEventReset(uint32 eventId, std::string const
 {
     if (eventId != TYPE_STADIUM)
         return;
-    uint32 states[MAX_ENCOUNTER];
-    std::istringstream stream(data);
-    for (uint32& state : states)
-        if (!(stream >> state))
-            return;
-    stream >> std::ws;
-    if (!stream.eof())
+    std::array<uint32, MAX_ENCOUNTER> states{};
+    std::string lower;
+    // Reset only the stadium. Loading the lower ledger here would discard its
+    // live actor GUIDs and turn the same pending slots into duplicate summons.
+    if (!ParseBlackrockSave(data.c_str(), states, lower) || lower != m_lower.Save() || states[TYPE_STADIUM] != NOT_STARTED)
         return;
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+        if (i != TYPE_STADIUM && states[i] != m_auiEncounter[i]) return;
 
     DisableDialogue();
     for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
@@ -466,6 +494,7 @@ void instance_blackrock_spire::DoSortRoomEventMobs()
 
 void instance_blackrock_spire::OnCreatureDeath(Creature* pCreature)
 {
+    m_lower.OnCreatureDeath(pCreature);
     switch (pCreature->GetEntry())
     {
         case NPC_BLACKHAND_SUMMONER:
@@ -561,6 +590,7 @@ void instance_blackrock_spire::OnCreatureDeath(Creature* pCreature)
 
 void instance_blackrock_spire::OnCreatureEvade(Creature* pCreature)
 {
+    m_lower.OnCreatureEvade(pCreature);
     switch (pCreature->GetEntry())
     {
         // Emberseer should evade if the incarcerators evade
@@ -600,6 +630,7 @@ void instance_blackrock_spire::OnCreatureEnterCombat(Creature* pCreature)
 
 void instance_blackrock_spire::OnCreatureDespawn(Creature* pCreature)
 {
+    m_lower.OnCreatureDespawn(pCreature);
     m_sStadiumEventActors.erase(pCreature->GetObjectGuid());
     if (pCreature->GetEntry() == NPC_THE_BEAST)
         pCreature->CastSpell(pCreature, SPELL_FINKLE_IS_EINHORN, TRIGGERED_OLD_TRIGGERED);
@@ -832,6 +863,7 @@ void instance_blackrock_spire::DoSendNextFlamewreathWave()
 
 void instance_blackrock_spire::Update(uint32 uiDiff)
 {
+    m_lower.Update(uiDiff);
     DialogueUpdate(uiDiff);
 
     if (m_uiStadiumEventTimer)
@@ -1138,8 +1170,26 @@ UnitAI* GetAI_npc_rookery_hatcher(Creature* pCreature)
     return new npc_rookery_hatcherAI(pCreature);
 }
 
+bool ProcessEventId_event_lbrs_urok(uint32 eventId, Object* source, Object* target, bool isStart)
+{
+    if (eventId != 4845 || !source || !isStart || !source->isType(TYPEMASK_WORLDOBJECT)) return false;
+    WorldObject* object = static_cast<WorldObject*>(source);
+    if (object->GetMapId() != 229) return false;
+    if (auto* data = static_cast<instance_blackrock_spire*>(object->GetInstanceData()))
+    {
+        data->StartUrok(source, target);
+        return true; // The instance confirms the existing DB batch; never run it twice.
+    }
+    return false;
+}
+
 void AddSC_instance_blackrock_spire()
 {
+    Script* lowerEvent = new Script;
+    lowerEvent->Name = "event_lbrs_urok";
+    lowerEvent->pProcessEventId = &ProcessEventId_event_lbrs_urok;
+    lowerEvent->RegisterSelf();
+
     Script* pNewScript = new Script;
     pNewScript->Name = "instance_blackrock_spire";
     pNewScript->GetInstanceData = &GetInstanceData_instance_blackrock_spire;

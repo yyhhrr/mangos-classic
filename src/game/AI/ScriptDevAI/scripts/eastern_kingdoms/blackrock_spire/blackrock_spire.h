@@ -5,6 +5,9 @@
 #ifndef DEF_BLACKROCK_SPIRE_H
 #define DEF_BLACKROCK_SPIRE_H
 
+#include "blackrock_spire_lower.h"
+#include <array>
+
 enum
 {
     MAX_ENCOUNTER               = 6,
@@ -157,6 +160,9 @@ class instance_blackrock_spire : public ScriptedInstance, private DialogueHelper
 
         void OnObjectCreate(GameObject* pGo) override;
         void OnCreatureCreate(Creature* pCreature) override;
+        void OnCreatureRespawn(Creature* pCreature) override;
+        void OnPlayerEnter(Player* player) override;
+        void OnPlayerLeave(Player* player) override;
 
         void OnCreatureDeath(Creature* pCreature) override;
         void OnCreatureEvade(Creature* pCreature) override;
@@ -164,6 +170,8 @@ class instance_blackrock_spire : public ScriptedInstance, private DialogueHelper
         void OnCreatureDespawn(Creature* pCreature) override;
 
         void SetData(uint32 uiType, uint32 uiData) override;
+        void SetData64(uint32 type, uint64 value) override;
+        bool StartUrok(Object* source, Object* target) { return m_lower.StartUrok(source, target); }
         uint32 GetData(uint32 uiType) const override;
 
         std::vector<InstanceEventReset> GetResettableEvents() const override;
@@ -192,6 +200,8 @@ class instance_blackrock_spire : public ScriptedInstance, private DialogueHelper
         void DoSendNextStadiumWave();
         void DoSendNextFlamewreathWave();
         void RestoreStadiumDoor(GameObject* go);
+        std::string BuildSave(bool resetStadium = false) const;
+        void SaveState();
 
         bool m_bUpperDoorOpened;
 
@@ -214,6 +224,7 @@ class instance_blackrock_spire : public ScriptedInstance, private DialogueHelper
         GuidList m_lEmberseerRunesGUIDList;
         GuidList m_lStadiumSpectatorsGUIDList;
         GuidSet m_sStadiumEventActors;
+        BlackrockSpireLower m_lower;
 };
 
 #endif

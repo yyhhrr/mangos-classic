@@ -218,6 +218,9 @@ enum FriendlyMissingBuffFlags
     // Existing low bits select combat mode;0x4 optionally restricts spawn group.
     // This filter is used only by explicitly opted-in Fortitude events.
     FRIENDLY_BUFF_SAME_OR_STRONGER = 0x8,
+    // Opt-in random cast event: resolve the missing aura from the selected
+    // action, retaining one random roll and one shared event cooldown.
+    FRIENDLY_BUFF_ACTION_SPELL = 0x10,
 };
 
 enum SpawnedEventMode

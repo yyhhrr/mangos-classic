@@ -24,13 +24,11 @@ EndScriptData
 */
 
 #include "AI/ScriptDevAI/include/sc_common.h"
+#include <array>
 
 enum
 {
-    SPELL_BLASTWAVE            = 11130,
-    SPELL_SHOUT                = 23511,
-    SPELL_CLEAVE               = 20691,
-    SPELL_KNOCKAWAY            = 20686,
+    SPELL_LIST_WYRMTHALAK      = 956897,
 
     NPC_SPIRESTONE_WARLORD     = 9216,
     NPC_SMOLDERTHORN_BERSERKER = 9268,
@@ -51,24 +49,40 @@ struct boss_overlordwyrmthalakAI : public ScriptedAI
 {
     boss_overlordwyrmthalakAI(Creature* pCreature) : ScriptedAI(pCreature) {Reset();}
 
-    uint32 m_uiBlastWaveTimer;
-    uint32 m_uiShoutTimer;
-    uint32 m_uiCleaveTimer;
-    uint32 m_uiKnockawayTimer;
-    bool m_bSummoned;
+    struct GuardRequest
+    {
+        uint32 entry = 0;
+        ObjectGuid guid;
+        uint8 attempts = 0;
+        bool created = false;
+    };
+
+    std::array<GuardRequest, 2> m_guards{};
+    uint32 m_guardRetryTimer = 0;
+    bool m_guardsRequested = false;
 
     void Reset() override
     {
-        m_uiBlastWaveTimer = 20000;
-        m_uiShoutTimer     = 2000;
-        m_uiCleaveTimer    = 6000;
-        m_uiKnockawayTimer = 12000;
-        m_bSummoned = false;
+        // Detach before despawn callbacks can alter this round's requests.
+        auto guards = m_guards;
+        m_guards = {};
+        m_guardRetryTimer = 0;
+        m_guardsRequested = false;
+        for (auto const& guard : guards)
+            if (Creature* summoned = m_creature->GetMap()->GetAnyTypeCreature(guard.guid))
+                if (summoned->IsAlive() && summoned->GetEntry() == guard.entry &&
+                    (summoned->GetSpawnerGuid() == m_creature->GetObjectGuid() || summoned->GetOwnerGuid() == m_creature->GetObjectGuid()))
+                    summoned->ForcedDespawn();
+        ScriptedAI::Reset();
+        m_creature->SetSpellList(SPELL_LIST_WYRMTHALAK);
     }
 
     void JustSummoned(Creature* pSummoned) override
     {
         if (pSummoned->GetEntry() != NPC_SPIRESTONE_WARLORD && pSummoned->GetEntry() != NPC_SMOLDERTHORN_BERSERKER && pSummoned->GetEntry() != NPC_BLOODAXE_VETERAN)
+            return;
+
+        if (pSummoned->GetSpawnerGuid() != m_creature->GetObjectGuid() && pSummoned->GetOwnerGuid() != m_creature->GetObjectGuid())
             return;
 
         if (m_creature->GetVictim())
@@ -78,68 +92,48 @@ struct boss_overlordwyrmthalakAI : public ScriptedAI
         }
     }
 
+    void SummonedCreatureJustDied(Creature* summoned) override { ForgetGuard(summoned); }
+    void SummonedCreatureDespawn(Creature* summoned) override { ForgetGuard(summoned); }
+
+    void ForgetGuard(Creature* summoned)
+    {
+        for (auto& guard : m_guards)
+            if (guard.guid == summoned->GetObjectGuid()) guard.guid.Clear();
+        // A created guard remains fulfilled, including after death or expiry.
+    }
+
     void UpdateAI(const uint32 uiDiff) override
     {
-        // Return since we have no target
-        if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
+        // The inherited implementation advances the native list scheduler and
+        // its 1.2s retry timer, selects the target and performs normal melee.
+        ScriptedAI::UpdateAI(uiDiff);
+        if (!m_creature->IsInCombat() || !m_creature->GetVictim() || !CanExecuteCombatAction())
             return;
 
-        // BlastWave
-        if (m_uiBlastWaveTimer < uiDiff)
+        if (!m_guardsRequested && m_creature->GetHealthPercent() < 51.0f)
         {
-            DoCastSpellIfCan(m_creature, SPELL_BLASTWAVE);
-            m_uiBlastWaveTimer = 20000;
+            m_guardsRequested = true;
+            for (auto& guard : m_guards) guard.entry = uSummons[urand(0, 2)];
         }
-        else
-            m_uiBlastWaveTimer -= uiDiff;
+        if (!m_guardsRequested) return;
+        if (m_guardRetryTimer > uiDiff) { m_guardRetryTimer -= uiDiff; return; }
+        m_guardRetryTimer = 0;
 
-        // Shout
-        if (m_uiShoutTimer < uiDiff)
+        for (uint32 i = 0; i < m_guards.size(); ++i)
         {
-            DoCastSpellIfCan(m_creature, SPELL_SHOUT);
-            m_uiShoutTimer = 10000;
-        }
-        else
-            m_uiShoutTimer -= uiDiff;
-
-        // Cleave
-        if (m_uiCleaveTimer < uiDiff)
-        {
-            DoCastSpellIfCan(m_creature->GetVictim(), SPELL_CLEAVE);
-            m_uiCleaveTimer = 7000;
-        }
-        else
-            m_uiCleaveTimer -= uiDiff;
-
-        // Knockaway
-        if (m_uiKnockawayTimer < uiDiff)
-        {
-            DoCastSpellIfCan(m_creature, SPELL_KNOCKAWAY);
-            m_uiKnockawayTimer = 14000;
-        }
-        else
-            m_uiKnockawayTimer -= uiDiff;
-
-        // Summon two Beserks
-        if (!m_bSummoned && m_creature->GetHealthPercent() < 51.0f)
-        {
-            Creature* pGuard1 = m_creature->SummonCreature(uSummons[urand(0, 2)], afLocations[0][0], afLocations[0][1], afLocations[0][2], afLocations[0][3], TEMPSPAWN_TIMED_DESPAWN, 300000);
-            Creature* pGuard2 = m_creature->SummonCreature(uSummons[urand(0, 2)], afLocations[1][0], afLocations[1][1], afLocations[1][2], afLocations[1][3], TEMPSPAWN_TIMED_DESPAWN, 300000);
-            if (pGuard1)
+            auto& guard = m_guards[i];
+            if (guard.created || guard.attempts >= 5) continue;
+            ++guard.attempts;
+            if (Creature* summoned = m_creature->SummonCreature(guard.entry, afLocations[i][0], afLocations[i][1], afLocations[i][2], afLocations[i][3], TEMPSPAWN_TIMED_DESPAWN, 300000))
             {
-                pGuard1->SetWalk(false);
-                pGuard1->GetMotionMaster()->MovePoint(0, afLocations[2][0], afLocations[2][1], afLocations[2][2]);
+                guard.guid = summoned->GetObjectGuid();
+                guard.created = true;
+                summoned->SetWalk(false);
+                summoned->GetMotionMaster()->MovePoint(0, afLocations[i + 2][0], afLocations[i + 2][1], afLocations[i + 2][2]);
             }
-            if (pGuard2)
-            {
-                pGuard2->SetWalk(false);
-                pGuard2->GetMotionMaster()->MovePoint(0, afLocations[3][0], afLocations[3][1], afLocations[3][2]);
-            }
-
-            m_bSummoned = true;
+            else
+                m_guardRetryTimer = 1000;
         }
-
-        DoMeleeAttackIfReady();
     }
 };
 

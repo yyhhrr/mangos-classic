@@ -463,6 +463,17 @@ bool CreatureEventAI::CheckEvent(CreatureEventAIHolder& holder, Unit* actionInvo
         }
         case EVENT_T_FRIENDLY_MISSING_BUFF:
         {
+            if ((event.friendly_buff.flags & FRIENDLY_BUFF_ACTION_SPELL) != 0)
+            {
+                // The chosen action determines the aura. A fixed event spell
+                // must not prevent another randomly chosen buff from finding a target.
+                uint32 mode = event.friendly_buff.flags & 0x3;
+                if (!(event.event_flags & EFLAG_RANDOM_ACTION) ||
+                    (mode == 0 && !m_creature->IsInCombat()) || (mode == 2 && m_creature->IsInCombat()))
+                    return false;
+                holder.eventTarget = nullptr;
+                break;
+            }
             // 0 = Only in combat
             // 1 = Out and in combat
             // 2 = Only out of combat
@@ -722,6 +733,42 @@ bool CreatureEventAI::ProcessEvent(CreatureEventAIHolder& holder, Unit* actionIn
                         break;
                     --idx;
                 }
+            }
+
+            if (holder.event.event_type == EVENT_T_FRIENDLY_MISSING_BUFF &&
+                (holder.event.friendly_buff.flags & FRIENDLY_BUFF_ACTION_SPELL) != 0)
+            {
+                auto const& action = holder.event.action[j];
+                if (action.type != ACTION_T_CAST || action.cast.target != TARGET_T_EVENT_SPECIFIC)
+                {
+                    holder.inProgress = false;
+                    return false;
+                }
+                uint32 flags = holder.event.friendly_buff.flags;
+                uint32 mode = flags & 0x3;
+                if ((mode == 0 && !m_creature->IsInCombat()) || (mode == 2 && m_creature->IsInCombat()))
+                {
+                    holder.inProgress = false;
+                    return false;
+                }
+                uint32 group = (flags & 0x4) && m_creature->GetCreatureGroup() ? m_creature->GetCreatureGroup()->GetGroupId() : 0;
+                bool combat = mode == 0 || (mode != 2 && m_creature->IsInCombat());
+                CreatureList targets = DoFindFriendlyMissingBuff(float(holder.event.friendly_buff.radius), action.cast.spellId, combat, true, group);
+                if ((flags & FRIENDLY_BUFF_SAME_OR_STRONGER) != 0)
+                    targets.remove_if([&](Creature* candidate)
+                    {
+                        return !candidate || candidate->IsControlledByPlayer() ||
+                            !m_creature->IsWithinDistInMap(candidate, float(holder.event.friendly_buff.radius)) ||
+                            HasSameOrStrongerEventAIFortitude(candidate, m_creature, action.cast.spellId);
+                    });
+                if (targets.empty())
+                {
+                    // A failed selected action does not consume the shared
+                    // combat-action timer or silently roll another spell.
+                    holder.inProgress = false;
+                    return false;
+                }
+                holder.eventTarget = targets.front();
             }
 
             rnd = urand(); // need to randomize again to prevent always same result when both event and action are randomized
