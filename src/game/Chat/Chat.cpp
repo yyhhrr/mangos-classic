@@ -364,6 +364,8 @@ ChatCommand* ChatHandler::getCommandTable()
 
     static ChatCommand instanceCommandTable[] =
     {
+        { "events",         SEC_ADMINISTRATOR, false, &ChatHandler::HandleInstanceEventsCommand, "Syntax: .instance events - List supported reward events in this instance.", nullptr },
+        { "resetevent",     SEC_ADMINISTRATOR, false, &ChatHandler::HandleInstanceResetEventCommand, "Syntax: .instance resetevent [event ID] - Reset a listed reward event in place. Without an ID, use the selected boss. Players stay in this instance. Use .respawn separately for ordinary dead bosses.", nullptr },
         { "listbinds",      SEC_ADMINISTRATOR,  false, &ChatHandler::HandleInstanceListBindsCommand,   "", nullptr },
         { "unbind",         SEC_ADMINISTRATOR,  false, &ChatHandler::HandleInstanceUnbindCommand,      "", nullptr },
         { "stats",          SEC_ADMINISTRATOR,  true,  &ChatHandler::HandleInstanceStatsCommand,       "", nullptr },

@@ -355,6 +355,43 @@ uint64 instance_uldaman::GetData64(uint32 type) const
     return type == DATA_EVENT_STARTER ? m_playerGuid.GetRawValue() : 0;
 }
 
+std::vector<InstanceEventReset> instance_uldaman::GetResettableEvents() const
+{
+    return {{TYPE_ARCHAEDAS, "Archaedas / Ancient Treasure", {NPC_ARCHAEDAS}, GO_ANCIENT_TREASURE}};
+}
+
+bool instance_uldaman::GetEventResetData(uint32 eventId, std::string& data) const
+{
+    if (eventId != TYPE_ARCHAEDAS || GetData(TYPE_ARCHAEDAS) == IN_PROGRESS || GetData(TYPE_ARCHAEDAS) == SPECIAL)
+        return false;
+    instance_uldaman pending(*this);
+    pending.m_auiEncounter[1] = NOT_STARTED;
+    pending.m_treasureState = TREASURE_UNAVAILABLE;
+    pending.m_treasureExpires = 0;
+    pending.m_treasureSnapshot.clear();
+    pending.BuildSaveData();
+    data = pending.m_strInstData;
+    return true;
+}
+
+void instance_uldaman::ApplyEventReset(uint32 eventId, std::string const& data)
+{
+    if (eventId != TYPE_ARCHAEDAS)
+        return;
+    m_auiEncounter[1] = NOT_STARTED;
+    m_treasureState = TREASURE_UNAVAILABLE;
+    m_treasureExpires = 0;
+    m_treasureSnapshot.clear();
+    m_playerGuid.Clear();
+    m_strInstData = data;
+    ResetEventRewardGameObject(GO_ANCIENT_TREASURE);
+    if (Creature* boss = GetSingleCreatureFromStorage(NPC_ARCHAEDAS, true))
+        if (boss->IsAlive() && boss->AI())
+            boss->AI()->JustRespawned();
+    // Keep the completed keeper altar, Ironaya and Annora progress unchanged.
+    SyncObjects();
+}
+
 bool instance_uldaman::GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const
 {
     if (bossEntry != NPC_ARCHAEDAS)

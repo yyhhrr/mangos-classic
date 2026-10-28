@@ -316,6 +316,92 @@ void instance_blackrock_depths::SetData(uint32 type, uint32 data)
     SyncObjects();
 }
 
+std::vector<InstanceEventReset> instance_blackrock_depths::GetResettableEvents() const
+{
+    return {
+        {TYPE_RING_OF_LAW, "Ring of the Law / Arena Spoils",
+            {NPC_THELDREN, NPC_GOROSH, NPC_GRIZZLE, NPC_EVISCERATOR, NPC_OKTHOR, NPC_ANUBSHIAH, NPC_HEDRUM}, GO_ARENA_SPOILS},
+        {TYPE_TOMB_OF_SEVEN, "Tomb of the Seven",
+            {NPC_HATEREL, NPC_ANGERREL, NPC_VILEREL, NPC_GLOOMREL, NPC_SEETHREL, NPC_DOOMREL, NPC_DOPEREL}, GO_CHEST_SEVEN}
+    };
+}
+
+void instance_blackrock_depths::ClearRewardEventState(uint32 eventId)
+{
+    if (eventId == TYPE_RING_OF_LAW)
+    {
+        m_auiEncounter[TYPE_RING_OF_LAW - 1] = NOT_STARTED;
+        m_arenaController.Clear();
+        m_arenaSummons.clear();
+        m_arenaChallenge = m_arenaRewardWaveStarted = m_arenaSelectionStored = false;
+        m_arenaMobIndex = m_arenaBossEntry = 0;
+        m_arenaGladiators.clear();
+        m_arenaKilled.clear();
+        m_rewards[1] = SavedReward();
+    }
+    else if (eventId == TYPE_TOMB_OF_SEVEN)
+    {
+        m_auiEncounter[TYPE_TOMB_OF_SEVEN - 1] = NOT_STARTED;
+        m_tombDeadMask = m_tombActivatedMask = 0;
+        m_uiDwarfRound = 0;
+        m_uiDwarfFightTimer = m_tombResetTimer = 0;
+        m_tombResumePending = m_tombRecoveredRun = m_resettingTomb = false;
+        m_rewards[0] = SavedReward();
+    }
+}
+
+bool instance_blackrock_depths::GetEventResetData(uint32 eventId, std::string& data) const
+{
+    if (eventId != TYPE_RING_OF_LAW && eventId != TYPE_TOMB_OF_SEVEN)
+        return false;
+    // A detached copy preserves the BR2 extension and unrelated reward snapshots.
+    instance_blackrock_depths pending(*this);
+    pending.ClearRewardEventState(eventId);
+    pending.BuildSaveData();
+    data = pending.m_strInstData;
+    return true;
+}
+
+void instance_blackrock_depths::ApplyEventReset(uint32 eventId, std::string const& data)
+{
+    GuidSet summons;
+    ObjectGuid controller;
+    if (eventId == TYPE_RING_OF_LAW)
+    {
+        summons = m_arenaSummons;
+        controller = m_arenaController;
+    }
+    ClearRewardEventState(eventId);
+    m_strInstData = data;
+    ResetEventRewardGameObject(eventId == TYPE_RING_OF_LAW ? GO_ARENA_SPOILS : GO_CHEST_SEVEN);
+    if (eventId == TYPE_RING_OF_LAW)
+    {
+        // Release ownership before despawning; callbacks cannot restart the old wave.
+        if (controller) summons.insert(controller);
+        for (ObjectGuid guid : summons)
+            if (Creature* actor = instance->GetCreature(guid))
+                actor->ForcedDespawn();
+        for (ObjectGuid guid : m_sArenaCrowdNpcGuids)
+            if (Creature* spectator = instance->GetCreature(guid))
+                spectator->ClearTemporaryFaction();
+    }
+    else if (eventId == TYPE_TOMB_OF_SEVEN)
+    {
+        // These seven actors have no individual loot. Reset the entire reward event,
+        // including unloaded death timers that RestoreProgress would otherwise merge.
+        auto clearDeaths = [&](CreatureDataPair const& row)
+        {
+            if (row.second.mapid == instance->GetId() &&
+                std::find(std::begin(aTombDwarfes), std::end(aTombDwarfes), row.second.id) != std::end(aTombDwarfes))
+                instance->GetPersistentState()->SaveCreatureRespawnTime(row.first, 0);
+            return false;
+        };
+        sObjectMgr.DoCreatureData(clearDeaths);
+        ResetTomb();
+    }
+    SyncObjects();
+}
+
 bool instance_blackrock_depths::GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const
 {
     // Theldren is summoned only for the challenge variant, which awards Arena Spoils.

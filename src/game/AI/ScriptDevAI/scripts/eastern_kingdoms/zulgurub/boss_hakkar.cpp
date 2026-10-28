@@ -76,6 +76,23 @@ struct boss_hakkarAI : public CombatAI
         DoScriptText(SAY_AGGRO, m_creature);
     }
 
+    void ReceiveAIEvent(AIEventType eventType, Unit* /*sender*/, Unit* /*invoker*/, uint32 miscValue) override
+    {
+        if (eventType != AI_EVENT_CUSTOM_B || !m_creature->IsAlive() || m_creature->IsInCombat())
+            return;
+        if (miscValue == ZG_RESET_HAKKAR_POWER)
+            InitiateHakkarPowerStacks();
+        else if (miscValue == ZG_RESET_HAKKAR_EVENT)
+        {
+            for (uint32 spell : {uint32(SPELL_ASPECT_OF_JEKLIK), uint32(SPELL_ASPECT_OF_VENOXIS),
+                uint32(SPELL_ASPECT_OF_MARLI), uint32(SPELL_ASPECT_OF_THEKAL), uint32(SPELL_ASPECT_OF_ARLOKK),
+                uint32(SPELL_ENRAGE)})
+                m_creature->RemoveAurasDueToSpell(spell);
+            m_creature->RemoveAllCooldowns();
+            JustRespawned();
+        }
+    }
+
     // For each of the High Priests that is alive, update Hakkar's Power Stacks (updating Hakkar's HP)
     void InitiateHakkarPowerStacks()
     {

@@ -10,6 +10,10 @@ enum
     MAX_ENCOUNTER           = 8,
     MAX_PRIESTS             = 5,
 
+    RESET_EVENT_HAKKAR      = MAX_ENCOUNTER,
+    ZG_RESET_HAKKAR_POWER   = 1,
+    ZG_RESET_HAKKAR_EVENT   = 2,
+
     TYPE_JEKLIK             = 0,
     TYPE_VENOXIS            = 1,
     TYPE_MARLI              = 2,
@@ -27,6 +31,9 @@ enum
     NPC_PANTHER_TRIGGER     = 15091,
     NPC_BLOODLORD_MANDOKIR  = 11382,
     NPC_MARLI               = 14510,
+    NPC_JEKLIK              = 14517,
+    NPC_VENOXIS             = 14507,
+    NPC_ARLOKK              = 14515,
 
     GO_SPIDER_EGG           = 179985,
     GO_GONG_OF_BETHEKK      = 180526,
@@ -60,6 +67,10 @@ class instance_zulgurub : public ScriptedInstance
         void SetData(uint32 type, uint32 data) override;
         uint32 GetData(uint32 type) const override;
 
+        std::vector<InstanceEventReset> GetResettableEvents() const override;
+        bool GetEventResetData(uint32 eventId, std::string& data) const override;
+        void ApplyEventReset(uint32 eventId, std::string const& data) override;
+
         const char* Save() const override { return m_strInstData.c_str(); }
         void Load(const char* chrIn) override;
 
@@ -69,6 +80,9 @@ class instance_zulgurub : public ScriptedInstance
 
     protected:
         void RemoveHakkarPowerStack();
+        void RestoreEventObject(GameObject* go, uint32 eventId);
+        void RestoreEventObjects(uint32 eventId);
+        void RemoveEventSummons(uint32 eventId);
 
         uint32 m_auiEncounter[MAX_ENCOUNTER];
         std::string m_strInstData;
@@ -80,6 +94,8 @@ class instance_zulgurub : public ScriptedInstance
 
         bool m_bHasIntroYelled;
         bool m_bHasAltarYelled;
+        bool m_resetMarliObjects;
+        bool m_resetArlokkObjects;
 };
 
 #endif

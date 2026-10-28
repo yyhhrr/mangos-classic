@@ -166,6 +166,10 @@ class instance_blackrock_spire : public ScriptedInstance, private DialogueHelper
         void SetData(uint32 uiType, uint32 uiData) override;
         uint32 GetData(uint32 uiType) const override;
 
+        std::vector<InstanceEventReset> GetResettableEvents() const override;
+        bool GetEventResetData(uint32 eventId, std::string& data) const override;
+        void ApplyEventReset(uint32 eventId, std::string const& data) override;
+
         const char* Save() const override { return m_strInstData.c_str(); }
         void Load(const char* chrIn) override;
 
@@ -187,6 +191,7 @@ class instance_blackrock_spire : public ScriptedInstance, private DialogueHelper
         void JustDidDialogueStep(int32 iEntry) override;
         void DoSendNextStadiumWave();
         void DoSendNextFlamewreathWave();
+        void RestoreStadiumDoor(GameObject* go);
 
         bool m_bUpperDoorOpened;
 
@@ -200,6 +205,7 @@ class instance_blackrock_spire : public ScriptedInstance, private DialogueHelper
         uint32 m_uiStadiumEventTimer;
         uint8 m_uiStadiumWaves;
         uint8 m_uiStadiumMobsAlive;
+        bool m_stadiumResetObjects;
 
         ObjectGuid m_aRoomRuneGuid[MAX_ROOMS];
         GuidList m_alRoomEventMobGUIDSorted[MAX_ROOMS];
@@ -207,6 +213,7 @@ class instance_blackrock_spire : public ScriptedInstance, private DialogueHelper
         GuidList m_lIncarceratorGUIDList;
         GuidList m_lEmberseerRunesGUIDList;
         GuidList m_lStadiumSpectatorsGUIDList;
+        GuidSet m_sStadiumEventActors;
 };
 
 #endif

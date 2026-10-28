@@ -203,6 +203,7 @@ class DungeonPersistentState : public MapPersistentState
 
         // DBC encounter state update at kill/spell cast
         void UpdateEncounterState(EncounterCreditType type, uint32 creditEntry);
+        bool ResetRewardEvent(std::vector<uint32> const& bossEntries, std::string const& data, std::vector<uint32> const& creditSpells = {});
 
         // mask of completed encounters
         uint32 GetCompletedEncountersMask() const override { return m_completedEncountersMask; }

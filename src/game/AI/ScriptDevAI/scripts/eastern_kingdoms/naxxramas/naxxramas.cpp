@@ -730,6 +730,50 @@ void instance_naxxramas::Load(const char* chrIn)
     OUT_LOAD_INST_DATA_COMPLETE;
 }
 
+std::vector<InstanceEventReset> instance_naxxramas::GetResettableEvents() const
+{
+    return {{TYPE_FOUR_HORSEMEN, "The Four Horsemen",
+        {NPC_MOGRAINE, NPC_ZELIEK, NPC_THANE, NPC_BLAUMEUX}, GO_CHEST_HORSEMEN_NORM, {59450}}};
+}
+
+bool instance_naxxramas::GetEventResetData(uint32 eventId, std::string& data) const
+{
+    if (eventId != TYPE_FOUR_HORSEMEN || GetData(TYPE_FOUR_HORSEMEN) == IN_PROGRESS)
+        return false;
+    std::ostringstream out;
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+    {
+        if (i) out << ' ';
+        out << (i == TYPE_FOUR_HORSEMEN ? uint32(NOT_STARTED) : m_auiEncounter[i]);
+    }
+    data = out.str();
+    return true;
+}
+
+void instance_naxxramas::ApplyEventReset(uint32 eventId, std::string const& data)
+{
+    if (eventId != TYPE_FOUR_HORSEMEN)
+        return;
+    m_auiEncounter[TYPE_FOUR_HORSEMEN] = NOT_STARTED;
+    m_horsemenKilled = 0;
+    m_horsemenTauntTimer = 30 * IN_MILLISECONDS;
+    m_tauntTimer = 0;
+    m_strInstData = data;
+    ResetEventRewardGameObject(GO_CHEST_HORSEMEN_NORM);
+    ResetEventRewardGameObject(GO_MILI_PORTAL);
+    for (uint32 entry : {GO_MILI_EYE_RAMP, GO_MILI_EYE_BOSS})
+        if (GameObject* eye = GetSingleGameObjectFromStorage(entry, true))
+            eye->SetGoState(GO_STATE_READY);
+    if (GameObject* door = GetSingleGameObjectFromStorage(GO_MILI_HORSEMEN_DOOR, true))
+        door->SetGoState(GetData(TYPE_GOTHIK) == DONE ? GO_STATE_ACTIVE : GO_STATE_READY);
+    for (uint32 entry : {NPC_SPIRIT_OF_BLAUMEUX, NPC_SPIRIT_OF_MOGRAINE, NPC_SPIRIT_OF_KORTHAZZ, NPC_SPIRIT_OF_ZELIREK})
+        if (Creature* spirit = GetSingleCreatureFromStorage(entry, true))
+            spirit->ForcedDespawn();
+    for (auto const& reference : instance->GetPlayers())
+        for (uint32 spell : {28832u, 28833u, 28834u, 28835u})
+            reference.getSource()->RemoveAurasDueToSpell(spell);
+}
+
 bool instance_naxxramas::GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const
 {
     switch (bossEntry)

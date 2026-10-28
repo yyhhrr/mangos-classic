@@ -27,6 +27,7 @@
 #include <cassert>
 #include <map>
 #include <vector>
+#include <type_traits>
 #include "Common.h"
 #include "Utilities/TypeList.h"
 #include "GameSystem/GridRefManager.h"
@@ -75,18 +76,34 @@ class TypeUnorderedMapContainer
         template<class SPECIFIC_TYPE>
         typename std::unordered_map<KEY_TYPE, SPECIFIC_TYPE*>::iterator begin()
         {
-            return i_elements._elements._element.begin();
+            return elementsFor<SPECIFIC_TYPE>(i_elements).begin();
         }
 
         template<class SPECIFIC_TYPE>
         typename std::unordered_map<KEY_TYPE, SPECIFIC_TYPE*>::iterator end()
         {
-            return i_elements._elements._element.end();
+            return elementsFor<SPECIFIC_TYPE>(i_elements).end();
         }
 
     private:
 
         ContainerUnorderedMap<OBJECT_TYPES, KEY_TYPE> i_elements;
+
+        // Select the requested type, including types after the first list entry.
+        template<class SPECIFIC_TYPE>
+        static std::unordered_map<KEY_TYPE, SPECIFIC_TYPE*>& elementsFor(ContainerUnorderedMap<SPECIFIC_TYPE, KEY_TYPE>& elements)
+        {
+            return elements._element;
+        }
+
+        template<class SPECIFIC_TYPE, class H, class T>
+        static std::unordered_map<KEY_TYPE, SPECIFIC_TYPE*>& elementsFor(ContainerUnorderedMap<TypeList<H, T>, KEY_TYPE>& elements)
+        {
+            if constexpr (std::is_same<SPECIFIC_TYPE, H>::value)
+                return elementsFor<SPECIFIC_TYPE>(elements._elements);
+            else
+                return elementsFor<SPECIFIC_TYPE>(elements._TailElements);
+        }
 
         // Helpers
         // Insert helpers

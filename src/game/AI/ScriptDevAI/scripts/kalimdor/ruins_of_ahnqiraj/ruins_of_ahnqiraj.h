@@ -114,6 +114,9 @@ class instance_ruins_of_ahnqiraj : public ScriptedInstance
 
         void SetData(uint32 type, uint32 data) override;
         uint32 GetData(uint32 type) const override;
+        std::vector<InstanceEventReset> GetResettableEvents() const override;
+        bool GetEventResetData(uint32 eventId, std::string& data) const override;
+        void ApplyEventReset(uint32 eventId, std::string const& data) override;
 
         void GetKaldoreiGuidList(GuidList& lList) const { lList = m_kaldoreiGuidList; }
 
@@ -133,6 +136,7 @@ class instance_ruins_of_ahnqiraj : public ScriptedInstance
         GuidList m_kaldoreiGuidList;
 
         uint32 m_armyDelayTimer;
+        uint32 m_rajaxxResetTimer;
         uint8 m_currentArmyWave;
 };
 #endif

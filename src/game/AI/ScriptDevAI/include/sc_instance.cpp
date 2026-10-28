@@ -4,6 +4,35 @@
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "Maps/MapPersistentStateMgr.h"
+#include "Loot/LootMgr.h"
+
+void ScriptedInstance::ResetEventRewardGameObject(uint32 entry)
+{
+    ClearBossLootItems(entry);
+    auto& objects = instance->GetObjectsStore();
+    GuidVector rewards;
+    for (auto itr = objects.begin<GameObject>(); itr != objects.end<GameObject>(); ++itr)
+        if (itr->second->GetEntry() == entry)
+            rewards.push_back(itr->first);
+    for (ObjectGuid guid : rewards)
+    {
+        GameObject* go = instance->GetGameObject(guid);
+        if (!go)
+            continue;
+        delete go->m_loot; // closes any currently open loot windows
+        go->m_loot = nullptr;
+        go->SetLootRecipient(nullptr);
+        go->ForcedDespawn();
+        go->Update(0);
+    }
+    auto clearTimer = [this, entry](GameObjectDataPair const& spawn)
+    {
+        if (spawn.second.mapid == instance->GetId() && spawn.second.id == entry)
+            instance->GetPersistentState()->SaveGORespawnTime(spawn.first, 0);
+        return false;
+    };
+    sObjectMgr.DoGOData(clearTimer);
+}
 
 /**
    Function that uses a door or a button

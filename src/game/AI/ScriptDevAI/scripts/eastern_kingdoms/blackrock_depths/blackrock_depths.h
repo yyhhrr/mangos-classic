@@ -236,6 +236,9 @@ class instance_blackrock_depths : public ScriptedInstance
         void SetData(uint32 uiType, uint32 uiData) override;
         uint32 GetData(uint32 uiType) const override;
         bool GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const override;
+        std::vector<InstanceEventReset> GetResettableEvents() const override;
+        bool GetEventResetData(uint32 eventId, std::string& data) const override;
+        void ApplyEventReset(uint32 eventId, std::string const& data) override;
         bool GetGameObjectLootSnapshot(uint32 entry, std::string& snapshot) const override;
         void OnGameObjectLootSnapshot(uint32 entry, std::string const& snapshot, bool exhausted) override;
 
@@ -279,6 +282,7 @@ class instance_blackrock_depths : public ScriptedInstance
 
         void SaveState();
         void BuildSaveData();
+        void ClearRewardEventState(uint32 eventId);
         void SyncObjects();
         void RestoreProgress();
         void ResetTomb();

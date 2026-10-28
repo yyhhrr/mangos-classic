@@ -25,12 +25,88 @@ EndScriptData
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "ruins_of_ahnqiraj.h"
+#include "Maps/MapPersistentStateMgr.h"
 
 instance_ruins_of_ahnqiraj::instance_ruins_of_ahnqiraj(Map* map) : ScriptedInstance(map),
     m_armyDelayTimer(0),
+    m_rajaxxResetTimer(0),
     m_currentArmyWave(0)
 {
     Initialize();
+}
+
+// The whole Rajaxx encounter owns these eight groups. They must be rebuilt
+// together; reviving Rajaxx alone leaves the original army waves exhausted.
+static char const* const aRajaxxResetGroups[] = {
+    "AQ20_RAJAXX", "AQ20_QEEZ", "AQ20_TUUBID", "AQ20_DRENN",
+    "AQ20_XURREM", "AQ20_YEGGETH", "AQ20_PAKKON", "AQ20_ZERRAN"
+};
+
+std::vector<InstanceEventReset> instance_ruins_of_ahnqiraj::GetResettableEvents() const
+{
+    return {{TYPE_RAJAXX, "General Rajaxx / Andorov's Army",
+        {NPC_RAJAXX, NPC_GENERAL_ANDOROV, NPC_CAPTAIN_QEEZ, NPC_CAPTAIN_TUUBID, NPC_CAPTAIN_DRENN,
+         NPC_CAPTAIN_XURREM, NPC_MAJOR_YEGGETH, NPC_MAJOR_PAKKON, NPC_COLONEL_ZERRAN}, 0}};
+}
+
+bool instance_ruins_of_ahnqiraj::GetEventResetData(uint32 eventId, std::string& data) const
+{
+    if (eventId != TYPE_RAJAXX || m_rajaxxResetTimer || GetData(TYPE_KURINNAXX) != DONE)
+        return false;
+    // Refuse unsupported/partial army data before changing any live event state.
+    for (char const* name : aRajaxxResetGroups)
+        if (!instance->GetSpawnManager().GetSpawnGroup(std::string(name)))
+            return false;
+    std::ostringstream out;
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+    {
+        if (i) out << ' ';
+        out << (i == TYPE_RAJAXX ? uint32(NOT_STARTED) : m_encounter[i]);
+    }
+    data = out.str();
+    return true;
+}
+
+void instance_ruins_of_ahnqiraj::ApplyEventReset(uint32 eventId, std::string const& data)
+{
+    if (eventId != TYPE_RAJAXX)
+        return;
+    // Stop the wave scheduler before despawning anything: group callbacks cannot
+    // schedule the final wave or finish an encounter during this reconstruction.
+    m_encounter[TYPE_RAJAXX] = NOT_STARTED;
+    m_armyDelayTimer = 0;
+    m_currentArmyWave = 0;
+    m_strInstData = data;
+    for (char const* name : aRajaxxResetGroups)
+        if (SpawnGroup* group = instance->GetSpawnManager().GetSpawnGroup(std::string(name)))
+        {
+            group->SetEnabled(false);
+            group->Despawn();
+            for (auto const& member : group->GetGroupEntry().DbGuids)
+                instance->GetPersistentState()->SaveCreatureRespawnTime(member.DbGuid, 0);
+        }
+    // A fresh helper generation also discards Andorov's old dialogue, waypoint,
+    // vendor and delayed-despawn timers. Only these event-owned summons are removed.
+    GuidVector helpers;
+    auto& objects = instance->GetObjectsStore();
+    for (auto itr = objects.begin<Creature>(); itr != objects.end<Creature>(); ++itr)
+    {
+        Creature* actor = itr->second;
+        if ((actor->GetEntry() == NPC_GENERAL_ANDOROV || actor->GetEntry() == NPC_KALDOREI_ELITE) &&
+            !actor->HasStaticDBSpawnData())
+            helpers.push_back(actor->GetObjectGuid());
+    }
+    m_npcEntryGuidStore.erase(NPC_GENERAL_ANDOROV);
+    m_kaldoreiGuidList.clear();
+    for (ObjectGuid guid : helpers)
+        if (Creature* actor = instance->GetCreature(guid))
+        {
+            actor->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP | UNIT_NPC_FLAG_VENDOR);
+            actor->ForcedDespawn();
+        }
+    // CreatureGroup::Despawn clears membership immediately, while old objects are
+    // removed at the end of the map update. Keep spawning disabled until then.
+    m_rajaxxResetTimer = IN_MILLISECONDS;
 }
 
 void instance_ruins_of_ahnqiraj::Initialize()
@@ -51,7 +127,7 @@ bool instance_ruins_of_ahnqiraj::IsEncounterInProgress() const
 void instance_ruins_of_ahnqiraj::OnPlayerEnter(Player* /*player*/)
 {
     // Spawn andorov if necessary
-    if (GetData(TYPE_KURINNAXX) == DONE)
+    if (!m_rajaxxResetTimer && GetData(TYPE_KURINNAXX) == DONE)
         DoSpawnAndorovIfCan();
 }
 
@@ -301,6 +377,23 @@ void instance_ruins_of_ahnqiraj::Load(const char* chrIn)
 
 void instance_ruins_of_ahnqiraj::Update(uint32 diff)
 {
+    if (m_rajaxxResetTimer)
+    {
+        if (m_rajaxxResetTimer > diff)
+        {
+            m_rajaxxResetTimer -= diff;
+            return;
+        }
+        m_rajaxxResetTimer = 0;
+        for (char const* name : aRajaxxResetGroups)
+            if (SpawnGroup* group = instance->GetSpawnManager().GetSpawnGroup(std::string(name)))
+            {
+                group->SetEnabled(true);
+                group->Spawn(true, true);
+            }
+        DoSpawnAndorovIfCan();
+    }
+
     if (GetData(TYPE_RAJAXX) == IN_PROGRESS)
     {
         if (m_armyDelayTimer)

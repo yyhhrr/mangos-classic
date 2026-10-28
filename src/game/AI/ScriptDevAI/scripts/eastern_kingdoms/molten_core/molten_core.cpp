@@ -25,6 +25,9 @@ EndScriptData
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "molten_core.h"
+#include "Globals/ObjectMgr.h"
+#include "Maps/MapPersistentStateMgr.h"
+#include "Maps/SpawnManager.h"
 
 static SpawnLocation m_aBosspawnLocs[MAX_MAJORDOMO_ADDS] =
 {
@@ -73,6 +76,13 @@ void instance_molten_core::OnCreatureCreate(Creature* pCreature)
         case NPC_GARR:
         case NPC_SULFURON:
         case NPC_MAJORDOMO:
+        case NPC_LUCIFRON:
+        case NPC_MAGMADAR:
+        case NPC_GEHENNAS:
+        case NPC_SHAZZRAH:
+        case NPC_GEDDON:
+        case NPC_GOLEMAGG:
+        case NPC_RAGNAROS:
             m_npcEntryGuidStore[pCreature->GetEntry()] = pCreature->GetObjectGuid();
             break;
     }
@@ -129,6 +139,9 @@ void instance_molten_core::OnObjectCreate(GameObject* pGo)
             m_goEntryGuidStore[pGo->GetEntry()] = pGo->GetObjectGuid();
             break;
     }
+    for (uint32 eventId : m_resetRuneEvents)
+        if (GetData(eventId) == NOT_STARTED)
+            RestoreResetRune(pGo, eventId);
 }
 
 void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
@@ -206,6 +219,155 @@ uint32 instance_molten_core::GetData(uint32 uiType) const
         return m_auiEncounter[uiType];
 
     return 0;
+}
+
+std::vector<InstanceEventReset> instance_molten_core::GetResettableEvents() const
+{
+    return
+    {
+        {TYPE_LUCIFRON, "Lucifron", {NPC_LUCIFRON}},
+        {TYPE_MAGMADAR, "Magmadar", {NPC_MAGMADAR}},
+        {TYPE_GEHENNAS, "Gehennas", {NPC_GEHENNAS}},
+        {TYPE_GARR, "Garr", {NPC_GARR}},
+        {TYPE_SHAZZRAH, "Shazzrah", {NPC_SHAZZRAH}},
+        {TYPE_GEDDON, "Baron Geddon", {NPC_GEDDON}},
+        {TYPE_GOLEMAGG, "Golemagg", {NPC_GOLEMAGG}},
+        {TYPE_SULFURON, "Sulfuron Harbinger", {NPC_SULFURON}},
+        {TYPE_MAJORDOMO, "Majordomo Executus", {NPC_MAJORDOMO}, GO_CACHE_OF_THE_FIRE_LORD},
+        {TYPE_RAGNAROS, "Ragnaros", {NPC_RAGNAROS}}
+    };
+}
+
+bool instance_molten_core::GetEventResetData(uint32 eventId, std::string& data) const
+{
+    if (eventId >= MAX_ENCOUNTER)
+        return false;
+    std::ostringstream stream;
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+    {
+        if (i)
+            stream << ' ';
+        stream << (i == eventId ? uint32(NOT_STARTED) : m_auiEncounter[i]);
+    }
+    data = stream.str();
+    return true;
+}
+
+void instance_molten_core::RestoreResetRune(GameObject* go, uint32 eventId)
+{
+    if (!go || !go->HasStaticDBSpawnData())
+        return;
+    for (sRuneEncounters const& rune : m_aMoltenCoreRunes)
+    {
+        if (rune.m_uiType != eventId ||
+            (go->GetEntry() != rune.m_uiRuneEntry && go->GetEntry() != rune.m_uiFlamesCircleEntry))
+            continue;
+        go->Respawn();
+        go->ResetDoorOrButton();
+        go->ClearAllUsesData();
+        go->SetUInt32Value(GAMEOBJECT_FLAGS, go->GetGOInfo()->flags);
+        go->SetLootState(GO_READY);
+        GameObjectData const* spawn = sObjectMgr.GetGOData(go->GetDbGuid());
+        go->SetGoState(spawn ? GOState(spawn->goState) : GO_STATE_READY);
+        break;
+    }
+}
+
+void instance_molten_core::RestoreResetRuneObjects(uint32 eventId)
+{
+    for (sRuneEncounters const& rune : m_aMoltenCoreRunes)
+    {
+        if (rune.m_uiType != eventId)
+            continue;
+        auto restoreSpawn = [this, &rune, eventId](GameObjectDataPair const& pair)
+        {
+            GameObjectData const& spawn = pair.second;
+            if (spawn.mapid != instance->GetId() ||
+                (spawn.id != rune.m_uiRuneEntry && spawn.id != rune.m_uiFlamesCircleEntry))
+                return false;
+            instance->GetPersistentState()->SaveGORespawnTime(pair.first, 0);
+            if (GameObject* go = instance->GetGameObject(pair.first))
+                RestoreResetRune(go, eventId);
+            else if (sObjectMgr.IsGameObjectDbGuidDynGuided(pair.first))
+                instance->GetSpawnManager().RespawnGameObject(pair.first);
+            return false;
+        };
+        sObjectMgr.DoGOData(restoreSpawn);
+        break;
+    }
+}
+
+void instance_molten_core::RemoveResetActors(bool majordomo, bool ragnaros)
+{
+    std::vector<ObjectGuid> actors;
+    auto& objects = instance->GetObjectsStore();
+    for (auto itr = objects.begin<Creature>(); itr != objects.end<Creature>(); ++itr)
+    {
+        Creature* creature = itr->second;
+        if (!creature->IsTemporarySummon())
+            continue;
+        uint32 entry = creature->GetEntry();
+        uint32 ownerEntry = creature->GetSpawnerGuid().GetEntry();
+        if ((majordomo && (entry == NPC_MAJORDOMO || (ownerEntry == NPC_MAJORDOMO && entry != NPC_RAGNAROS))) ||
+            (ragnaros && (entry == NPC_RAGNAROS || ownerEntry == NPC_RAGNAROS)))
+            actors.push_back(itr->first);
+    }
+    for (ObjectGuid guid : actors)
+        if (Creature* creature = instance->GetCreature(guid))
+        {
+            auto stored = m_npcEntryGuidStore.find(creature->GetEntry());
+            if (stored != m_npcEntryGuidStore.end() && stored->second == guid)
+                m_npcEntryGuidStore.erase(stored);
+            creature->ForcedDespawn();
+        }
+}
+
+void instance_molten_core::ApplyEventReset(uint32 eventId, std::string const& data)
+{
+    if (eventId >= MAX_ENCOUNTER)
+        return;
+    uint32 states[MAX_ENCOUNTER];
+    std::istringstream stream(data);
+    for (uint32& state : states)
+        if (!(stream >> state))
+            return;
+    stream >> std::ws;
+    if (!stream.eof())
+        return;
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+        m_auiEncounter[i] = states[i];
+    m_strInstData = data;
+
+    if (eventId >= TYPE_MAGMADAR && eventId <= TYPE_SULFURON)
+    {
+        m_resetRuneEvents.insert(eventId);
+        RestoreResetRuneObjects(eventId);
+        // An unfinished Majordomo must wait for all seven runes again. His
+        // completed event and Ragnaros progress remain independent records.
+        if (GetData(TYPE_MAJORDOMO) != DONE)
+            RemoveResetActors(true, false);
+    }
+    else if (eventId == TYPE_MAJORDOMO || eventId == TYPE_RAGNAROS)
+    {
+        bool resetRagnarosScene = eventId == TYPE_RAGNAROS || GetData(TYPE_RAGNAROS) != DONE;
+        RemoveResetActors(true, resetRagnarosScene);
+        if (eventId == TYPE_MAJORDOMO)
+            ResetEventRewardGameObject(GO_CACHE_OF_THE_FIRE_LORD);
+        if (resetRagnarosScene)
+        {
+            ResetEventRewardGameObject(GO_LAVA_STEAM);
+            ResetEventRewardGameObject(GO_LAVA_SPLASH);
+        }
+        // A new actor also clears Majordomo AI's private completed flag and
+        // any old summon dialogue/Ragnaros GUID. Static bosses use RSP later.
+        if (GetData(TYPE_MAJORDOMO) == DONE)
+        {
+            if (Player* player = GetPlayerInMap())
+                SpawnMajordomo(player, false, 1);
+        }
+        else
+            DoSpawnMajordomoIfCan(true);
+    }
 }
 
 // Handle Majordomo summon here

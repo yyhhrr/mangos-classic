@@ -333,6 +333,53 @@ void DungeonPersistentState::UpdateEncounterState(EncounterCreditType type, uint
     }
 }
 
+bool DungeonPersistentState::ResetRewardEvent(std::vector<uint32> const& bossEntries, std::string const& data, std::vector<uint32> const& creditSpells)
+{
+    Map* map = GetMap();
+    if (!map || !map->IsDungeon() || !GetInstanceId())
+        return false;
+
+    uint32 mask = m_completedEncountersMask;
+    std::vector<DungeonEncounterEntry const*> encounters;
+    auto resetCredit = [&](EncounterCreditType creditType, uint32 creditEntry)
+    {
+        auto bounds = sObjectMgr.GetDungeonEncounterBounds(creditEntry);
+        for (auto itr = bounds.first; itr != bounds.second; ++itr)
+        {
+            auto const* encounter = itr->second.dbcEntry;
+            if (itr->second.creditType != creditType || encounter->mapId != GetMapId() || encounter->encounterIndex >= 32)
+                continue;
+            mask &= ~(uint32(1) << encounter->encounterIndex);
+            encounters.push_back(encounter);
+        }
+    };
+    for (uint32 bossEntry : bossEntries)
+        resetCredit(ENCOUNTER_CREDIT_KILL_CREATURE, bossEntry);
+    for (uint32 spell : creditSpells)
+        resetCredit(ENCOUNTER_CREDIT_CAST_SPELL, spell);
+
+    std::string escaped = data;
+    CharacterDatabase.escape_string(escaped);
+    // One ordered write keeps the script state and completion mask consistent.
+    // Use the normal save queue so earlier kill saves cannot overwrite the reset.
+    // Reward snapshots may exceed the formatted-query buffer size.
+    std::ostringstream query;
+    query << "UPDATE instance SET data = '" << escaped << "', encountersMask = '" << mask
+          << "' WHERE id = '" << GetInstanceId() << "' AND map = '" << GetMapId() << "'";
+    if (!CharacterDatabase.Execute(query.str().c_str()))
+        return false;
+
+    m_completedEncountersMask = mask;
+    for (auto const* encounter : encounters)
+    {
+        if (encounter->CompleteWorldStateID)
+            map->GetVariableManager().SetVariable(encounter->CompleteWorldStateID, false);
+        else
+            map->GetVariableManager().SetEncounterVariable(encounter->Id, false);
+    }
+    return true;
+}
+
 //== BattleGroundPersistentState functions =================
 
 bool BattleGroundPersistentState::CanBeUnload() const

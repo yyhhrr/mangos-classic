@@ -6131,6 +6131,101 @@ bool ChatHandler::HandleInstanceStatsCommand(char* /*args*/)
     return true;
 }
 
+bool ChatHandler::HandleInstanceEventsCommand(char* args)
+{
+    SkipWhiteSpaces(&args);
+    if (*args)
+        return false;
+    Map* map = m_session->GetPlayer()->GetMap();
+    if (!map->IsDungeon() || !map->GetInstanceId() || !map->GetInstanceData())
+    {
+        SendSysMessage("Enter a dungeon or raid instance first.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+    auto events = map->GetInstanceData()->GetResettableEvents();
+    if (events.empty())
+        SendSysMessage("This instance has no supported reward event resets yet.");
+    for (auto const& event : events)
+        PSendSysMessage("%u: %s%s", event.id, event.name, event.rewardGameObjectEntry ? " (reward chest)" : "");
+    return true;
+}
+
+bool ChatHandler::HandleInstanceResetEventCommand(char* args)
+{
+    Map* map = m_session->GetPlayer()->GetMap();
+    InstanceData* script = map->GetInstanceData();
+    if (!map->IsDungeon() || !map->GetInstanceId() || !script)
+    {
+        SendSysMessage("Enter a dungeon or raid instance first.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    auto events = script->GetResettableEvents();
+    SkipWhiteSpaces(&args);
+    uint32 eventId = 0;
+    bool explicitId = *args != '\0';
+    Creature* target = nullptr;
+    if (explicitId)
+    {
+        if (!ExtractUInt32(&args, eventId))
+            return false;
+        SkipWhiteSpaces(&args);
+        if (*args)
+            return false;
+    }
+    else
+        target = getSelectedCreature();
+
+    InstanceEventReset const* selected = nullptr;
+    for (auto const& event : events)
+    {
+        if ((explicitId && event.id == eventId) || (!explicitId && target && target->GetMap() == map &&
+            std::find(event.bossEntries.begin(), event.bossEntries.end(), target->GetEntry()) != event.bossEntries.end()))
+        {
+            selected = &event;
+            break;
+        }
+    }
+    if (!selected)
+    {
+        SendSysMessage("Select a supported event boss, or use an ID from .instance events.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    bool busy = script->IsEncounterInProgress();
+    for (auto const& reference : map->GetPlayers())
+        busy = busy || reference.getSource()->IsInCombat();
+    auto& objects = map->GetObjectsStore();
+    for (auto itr = objects.begin<Creature>(); itr != objects.end<Creature>(); ++itr)
+        busy = busy || itr->second->IsInCombat();
+    if (busy)
+    {
+        SendSysMessage("Finish combat in this instance before resetting a reward event.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    std::string data;
+    if (!script->GetEventResetData(selected->id, data))
+    {
+        SendSysMessage("This event cannot be reset in its current phase. Finish or let the event reset first.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+    if (!static_cast<DungeonMap*>(map)->GetPersistanceState()->ResetRewardEvent(selected->bossEntries, data, selected->creditSpells))
+    {
+        SendSysMessage("Unable to save the event reset. No event state was changed.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+    script->ApplyEventReset(selected->id, data);
+    PSendSysMessage("Reset event %u: %s (instance %u). Use .respawn for ordinary dead bosses.", selected->id, selected->name, map->GetInstanceId());
+    return true;
+}
+
 bool ChatHandler::HandleInstanceSaveDataCommand(char* /*args*/)
 {
     Player* pl = m_session->GetPlayer();

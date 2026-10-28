@@ -52,6 +52,16 @@ enum InstanceConditionIDs                                   // Suggested values 
     INSTANCE_CONDITION_ID_TEAM_ALLIANCE     = 469,
 };
 
+// An opt-in reward event may contain several bosses sharing one completion/reward.
+struct InstanceEventReset
+{
+    uint32 id;
+    char const* name;
+    std::vector<uint32> bossEntries;
+    uint32 rewardGameObjectEntry = 0;
+    std::vector<uint32> creditSpells;
+};
+
 struct BossLootReward
 {
     uint32 gameObjectEntry = 0;
@@ -140,6 +150,12 @@ class InstanceData
         // All-purpose data storage 32 bit
         virtual uint32 GetData(uint32 /*Type*/) const { return 0; }
         virtual void SetData(uint32 /*Type*/, uint32 /*Data*/) {}
+
+        // Preparing reset data must be read-only. Apply is called only after the
+        // matching script data and completed encounter mask have been queued together.
+        virtual std::vector<InstanceEventReset> GetResettableEvents() const { return {}; }
+        virtual bool GetEventResetData(uint32 /*eventId*/, std::string& /*data*/) const { return false; }
+        virtual void ApplyEventReset(uint32 /*eventId*/, std::string const& /*data*/) {}
 
         // Instance scripts declare ownership of encounter reward chests. Reservations remain
         // here until first normal loot generation, even if their boss has despawned.

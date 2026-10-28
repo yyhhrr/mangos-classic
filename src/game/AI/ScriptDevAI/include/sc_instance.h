@@ -66,6 +66,7 @@ class ScriptedInstance : public InstanceData
         }
 
         void BanPlayersIfNoGm(const std::string& reason);
+        void ResetEventRewardGameObject(uint32 entry);
 
     protected:
         void DespawnGuids(GuidVector& spawns); // despawns all creature guids and clears contents

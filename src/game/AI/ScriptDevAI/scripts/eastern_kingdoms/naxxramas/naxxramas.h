@@ -274,6 +274,9 @@ class instance_naxxramas : public ScriptedInstance, private DialogueHelper
         void SetData(uint32 type, uint32 data) override;
         uint32 GetData(uint32 type) const override;
         bool GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const override;
+        std::vector<InstanceEventReset> GetResettableEvents() const override;
+        bool GetEventResetData(uint32 eventId, std::string& data) const override;
+        void ApplyEventReset(uint32 eventId, std::string const& data) override;
 
         const char* Save() const override { return m_strInstData.c_str(); }
         void Load(const char* chrIn) override;

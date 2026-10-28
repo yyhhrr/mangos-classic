@@ -98,6 +98,16 @@ static const DialogueEntry aStadiumDialogue[] =
 
 static const float rookeryEventSpawnPos[3] = {51.11098f, -266.0549f, 92.87846f};
 
+static bool IsStadiumEventActor(Creature const* creature)
+{
+    if (!creature || !creature->IsTemporarySummon())
+        return false;
+    uint32 entry = creature->GetEntry();
+    uint32 ownerEntry = creature->GetSpawnerGuid().GetEntry();
+    return entry == NPC_LORD_VICTOR_NEFARIUS || entry == NPC_REND_BLACKHAND || entry == NPC_GYTH ||
+        ownerEntry == NPC_LORD_VICTOR_NEFARIUS || ownerEntry == NPC_REND_BLACKHAND || ownerEntry == NPC_GYTH;
+}
+
 instance_blackrock_spire::instance_blackrock_spire(Map* pMap) : ScriptedInstance(pMap), DialogueHelper(aStadiumDialogue),
     m_bUpperDoorOpened(false),
     m_uiDragonspineDoorTimer(0),
@@ -108,7 +118,8 @@ instance_blackrock_spire::instance_blackrock_spire(Map* pMap) : ScriptedInstance
     m_uiFlamewreathWaveCount(0),
     m_uiStadiumEventTimer(0),
     m_uiStadiumWaves(0),
-    m_uiStadiumMobsAlive(0)
+    m_uiStadiumMobsAlive(0),
+    m_stadiumResetObjects(false)
 {
     Initialize();
 }
@@ -175,11 +186,15 @@ void instance_blackrock_spire::OnObjectCreate(GameObject* pGo)
         default:
             return;
     }
+    if (m_stadiumResetObjects && GetData(TYPE_STADIUM) == NOT_STARTED)
+        RestoreStadiumDoor(pGo);
     m_goEntryGuidStore[pGo->GetEntry()] = pGo->GetObjectGuid();
 }
 
 void instance_blackrock_spire::OnCreatureCreate(Creature* pCreature)
 {
+    if (IsStadiumEventActor(pCreature))
+        m_sStadiumEventActors.insert(pCreature->GetObjectGuid());
     switch (pCreature->GetEntry())
     {
         case NPC_PYROGUARD_EMBERSEER:
@@ -336,6 +351,98 @@ uint32 instance_blackrock_spire::GetData(uint32 uiType) const
     return 0;
 }
 
+std::vector<InstanceEventReset> instance_blackrock_spire::GetResettableEvents() const
+{
+    return {{TYPE_STADIUM, "Rend Blackhand Stadium", {NPC_REND_BLACKHAND, NPC_GYTH}}};
+}
+
+bool instance_blackrock_spire::GetEventResetData(uint32 eventId, std::string& data) const
+{
+    if (eventId != TYPE_STADIUM)
+        return false;
+    for (ObjectGuid guid : m_sStadiumEventActors)
+        if (Creature* actor = instance->GetCreature(guid))
+            if (actor->IsInCombat())
+                return false;
+
+    std::ostringstream stream;
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+    {
+        if (i)
+            stream << ' ';
+        stream << (i == TYPE_STADIUM ? uint32(NOT_STARTED) : m_auiEncounter[i]);
+    }
+    data = stream.str();
+    return true;
+}
+
+void instance_blackrock_spire::RestoreStadiumDoor(GameObject* go)
+{
+    if (!go || !go->HasStaticDBSpawnData())
+        return;
+    switch (go->GetEntry())
+    {
+        case GO_GYTH_ENTRY_DOOR:
+        case GO_GYTH_COMBAT_DOOR:
+        case GO_GYTH_EXIT_DOOR:
+            go->Respawn();
+            go->SetUInt32Value(GAMEOBJECT_FLAGS, go->GetGOInfo()->flags);
+            go->SetLootState(GO_READY);
+            go->SetGoState(go->GetEntry() == GO_GYTH_ENTRY_DOOR ? GO_STATE_ACTIVE : GO_STATE_READY);
+            break;
+        default:
+            break;
+    }
+}
+
+void instance_blackrock_spire::ApplyEventReset(uint32 eventId, std::string const& data)
+{
+    if (eventId != TYPE_STADIUM)
+        return;
+    uint32 states[MAX_ENCOUNTER];
+    std::istringstream stream(data);
+    for (uint32& state : states)
+        if (!(stream >> state))
+            return;
+    stream >> std::ws;
+    if (!stream.eof())
+        return;
+
+    DisableDialogue();
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+        m_auiEncounter[i] = states[i];
+    m_strInstData = data;
+    m_uiStadiumEventTimer = 0;
+    m_uiStadiumWaves = 0;
+    m_uiStadiumMobsAlive = 0;
+    m_stadiumResetObjects = true;
+
+    GuidSet actors = m_sStadiumEventActors;
+    auto& objects = instance->GetObjectsStore();
+    for (auto itr = objects.begin<Creature>(); itr != objects.end<Creature>(); ++itr)
+        if (IsStadiumEventActor(itr->second))
+            actors.insert(itr->first);
+    actors.insert(m_lStadiumSpectatorsGUIDList.begin(), m_lStadiumSpectatorsGUIDList.end());
+    m_sStadiumEventActors.clear();
+    m_lStadiumSpectatorsGUIDList.clear();
+    for (ObjectGuid guid : actors)
+    {
+        Creature* actor = instance->GetCreature(guid);
+        if (!actor || !actor->IsTemporarySummon())
+            continue;
+        // Spectators share entries with the static room-event guards.
+        m_lRoomEventMobGUIDList.remove(guid);
+        for (GuidList& room : m_alRoomEventMobGUIDSorted)
+            room.remove(guid);
+        auto stored = m_npcEntryGuidStore.find(actor->GetEntry());
+        if (stored != m_npcEntryGuidStore.end() && stored->second == guid)
+            m_npcEntryGuidStore.erase(stored);
+        actor->ForcedDespawn();
+    }
+    for (auto itr = objects.begin<GameObject>(); itr != objects.end<GameObject>(); ++itr)
+        RestoreStadiumDoor(itr->second);
+}
+
 void instance_blackrock_spire::DoSortRoomEventMobs()
 {
     if (GetData(TYPE_ROOM_EVENT) != NOT_STARTED)
@@ -397,8 +504,10 @@ void instance_blackrock_spire::OnCreatureDeath(Creature* pCreature)
         case NPC_CHROMATIC_DRAGON:
         case NPC_BLACKHAND_HANDLER:
             // check if it's summoned - some npcs with the same entry are already spawned in the instance
-            if (!pCreature->IsTemporarySummon())
+            if (!pCreature->IsTemporarySummon() || GetData(TYPE_STADIUM) != IN_PROGRESS ||
+                !m_sStadiumEventActors.count(pCreature->GetObjectGuid()) || !m_uiStadiumMobsAlive)
                 break;
+            m_sStadiumEventActors.erase(pCreature->GetObjectGuid());
 
             // 5% chance for Rend or Lord Victor Nefarius to taunt players when one of the creature is killed (% is guesswork)
             // Lord Victor Nefarius
@@ -439,6 +548,10 @@ void instance_blackrock_spire::OnCreatureDeath(Creature* pCreature)
             break;
         case NPC_GYTH:
         case NPC_REND_BLACKHAND:
+            if (GetData(TYPE_STADIUM) != IN_PROGRESS ||
+                !m_sStadiumEventActors.count(pCreature->GetObjectGuid()) || !m_uiStadiumMobsAlive)
+                break;
+            m_sStadiumEventActors.erase(pCreature->GetObjectGuid());
             --m_uiStadiumMobsAlive;
             if (m_uiStadiumMobsAlive == 0)
                 StartNextDialogueText(SAY_NEFARIUS_VICTORY);
@@ -487,6 +600,7 @@ void instance_blackrock_spire::OnCreatureEnterCombat(Creature* pCreature)
 
 void instance_blackrock_spire::OnCreatureDespawn(Creature* pCreature)
 {
+    m_sStadiumEventActors.erase(pCreature->GetObjectGuid());
     if (pCreature->GetEntry() == NPC_THE_BEAST)
         pCreature->CastSpell(pCreature, SPELL_FINKLE_IS_EINHORN, TRIGGERED_OLD_TRIGGERED);
 }

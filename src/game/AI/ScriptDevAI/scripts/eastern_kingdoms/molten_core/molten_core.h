@@ -104,6 +104,10 @@ class instance_molten_core : public ScriptedInstance
         uint32 GetData(uint32 uiType) const override;
         bool GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const override;
 
+        std::vector<InstanceEventReset> GetResettableEvents() const override;
+        bool GetEventResetData(uint32 eventId, std::string& data) const override;
+        void ApplyEventReset(uint32 eventId, std::string const& data) override;
+
         const char* Save() const override { return m_strInstData.c_str(); }
         void Load(const char* chrIn) override;
 
@@ -113,9 +117,13 @@ class instance_molten_core : public ScriptedInstance
     protected:
         void DoSpawnMajordomoIfCan(bool bByPlayerEnter);
         void SpawnMajordomo(Unit* summoner, bool initialSummon, uint8 summonPos);
+        void RestoreResetRune(GameObject* go, uint32 eventId);
+        void RestoreResetRuneObjects(uint32 eventId);
+        void RemoveResetActors(bool majordomo, bool ragnaros);
 
         std::string m_strInstData;
         uint32 m_auiEncounter[MAX_ENCOUNTER];
+        std::set<uint32> m_resetRuneEvents;
 };
 
 #endif

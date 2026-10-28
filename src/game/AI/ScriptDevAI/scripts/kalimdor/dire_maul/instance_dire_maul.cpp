@@ -383,6 +383,54 @@ void instance_dire_maul::SetData(uint32 uiType, uint32 uiData)
     }
 }
 
+std::vector<InstanceEventReset> instance_dire_maul::GetResettableEvents() const
+{
+    return {{TYPE_KING_GORDOK, "King Gordok / Gordok Tribute", {NPC_KING_GORDOK}, GO_GORDOK_TRIBUTE}};
+}
+
+bool instance_dire_maul::GetEventResetData(uint32 eventId, std::string& data) const
+{
+    if (eventId != TYPE_KING_GORDOK || GetData(TYPE_KING_GORDOK) == IN_PROGRESS)
+        return false;
+    std::ostringstream out;
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+    {
+        if (i) out << ' ';
+        out << (i == TYPE_KING_GORDOK ? uint32(NOT_STARTED) : m_auiEncounter[i]);
+    }
+    data = out.str();
+    return true;
+}
+
+void instance_dire_maul::ApplyEventReset(uint32 eventId, std::string const& data)
+{
+    if (eventId != TYPE_KING_GORDOK)
+        return;
+    m_auiEncounter[TYPE_KING_GORDOK] = NOT_STARTED;
+    m_strInstData = data;
+    ResetEventRewardGameObject(GO_GORDOK_TRIBUTE);
+    GuidVector mizzles;
+    auto& objects = instance->GetObjectsStore();
+    for (auto itr = objects.begin<Creature>(); itr != objects.end<Creature>(); ++itr)
+        if (itr->second->GetEntry() == NPC_MIZZLE_THE_CRAFTY && !itr->second->HasStaticDBSpawnData())
+            mizzles.push_back(itr->first);
+    for (ObjectGuid guid : mizzles)
+        if (Creature* mizzle = instance->GetCreature(guid))
+        {
+            mizzle->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
+            mizzle->ForcedDespawn();
+        }
+    for (uint32 entry : {NPC_CAPTAIN_KROMCRUSH, NPC_CHO_RUSH_THE_OBSERVER})
+        if (Creature* guard = GetSingleCreatureFromStorage(entry, true))
+        {
+            guard->ClearTemporaryFaction();
+            if (guard->IsAlive()) guard->SetStandState(UNIT_STAND_STATE_STAND);
+        }
+    for (auto const& reference : instance->GetPlayers())
+        reference.getSource()->RemoveAurasDueToSpell(SPELL_KING_OF_GORDOK);
+    // Surviving tribute guards retain their own kill records and reward quality.
+}
+
 bool instance_dire_maul::GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const
 {
     if (bossEntry != NPC_KING_GORDOK)
