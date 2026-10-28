@@ -369,6 +369,8 @@ class Loot
 
         Loot(Player* player, Creature* creature, LootType type, std::vector<uint32> const& guaranteedItemIds = {});
         Loot(Player* player, GameObject* gameObject, LootType type);
+        // Restore an already generated non-group chest without a new loot roll.
+        Loot(GameObject* gameObject, std::string const& instanceSnapshot);
         Loot(Player* player, Corpse* corpse, LootType type);
         Loot(Player* player, Item* item, LootType type);
         Loot(Player* player, uint32 id, LootType type);

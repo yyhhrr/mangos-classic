@@ -756,6 +756,19 @@ void GameObject::SetChestDespawn()
     m_despawnTimer = GetMap()->GetCurrentClockTime() + std::chrono::minutes(5);
 }
 
+uint32 GameObject::GetChestDespawnRemainingMS() const
+{
+    if (m_despawnTimer == TimePoint::max()) return 0;
+    auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(m_despawnTimer - GetMap()->GetCurrentClockTime()).count();
+    if (remaining <= 0) return 1;
+    return remaining > std::numeric_limits<uint32>::max() ? std::numeric_limits<uint32>::max() : uint32(remaining);
+}
+
+void GameObject::RestoreChestDespawnRemainingMS(uint32 remaining)
+{
+    m_despawnTimer = remaining ? GetMap()->GetCurrentClockTime() + std::chrono::milliseconds(remaining) : TimePoint::max();
+}
+
 void GameObject::Refresh()
 {
     // not refresh despawned not casted GO (despawned casted GO destroyed in all cases anyway)

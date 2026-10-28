@@ -170,6 +170,13 @@ class InstanceData
         virtual bool GetGameObjectLootSnapshot(uint32 /*entry*/, std::string& /*snapshot*/) const { return false; }
         virtual void OnGameObjectLootSnapshot(uint32 /*entry*/, std::string const& /*snapshot*/, bool /*exhausted*/) {}
 
+        // Multiple static objects may share one entry. Existing entry-only
+        // instance implementations keep their original dispatch by default.
+        virtual bool GetGameObjectLootSnapshot(ObjectGuid const& /*guid*/, uint32 entry, std::string& snapshot) const
+        { return GetGameObjectLootSnapshot(entry, snapshot); }
+        virtual void OnGameObjectLootSnapshot(ObjectGuid const& /*guid*/, uint32 entry, std::string const& snapshot, bool exhausted)
+        { OnGameObjectLootSnapshot(entry, snapshot, exhausted); }
+
         // Condition criteria additional requirements check
         // This is used for such things are heroic loot
         // See ObjectMgr.h enum ConditionSource for possible values of conditionSourceType

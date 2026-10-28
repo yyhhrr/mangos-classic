@@ -772,6 +772,9 @@ class GameObject : public WorldObject
         void SetRespawnDelay(uint32 delay, bool once = false) { m_respawnDelay = delay; m_respawnOverriden = true; m_respawnOverrideOnce = once; }
         void SetForcedDespawn() { m_forcedDespawn = true; };
         void SetChestDespawn();
+        // Snapshot helpers:0 means no native deadline; expired finite timers return1ms.
+        uint32 GetChestDespawnRemainingMS() const;
+        void RestoreChestDespawnRemainingMS(uint32 remaining);
         void Refresh();
         void Delete();
 

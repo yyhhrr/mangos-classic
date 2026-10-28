@@ -1402,11 +1402,11 @@ void Loot::PersistForInstance()
         return;
     InstanceData* instance = go->GetMap()->GetInstanceData();
     std::string previous;
-    if (!instance || !instance->GetGameObjectLootSnapshot(go->GetEntry(), previous))
+    if (!instance || !instance->GetGameObjectLootSnapshot(go->GetObjectGuid(), go->GetEntry(), previous))
         return;
     std::string snapshot = SerializeInstanceSnapshot();
     if (!snapshot.empty())
-        instance->OnGameObjectLootSnapshot(go->GetEntry(), snapshot, go->GetLootState() == GO_JUST_DEACTIVATED);
+        instance->OnGameObjectLootSnapshot(go->GetObjectGuid(), go->GetEntry(), snapshot, go->GetLootState() == GO_JUST_DEACTIVATED);
 }
 
 // Get loot status for a specified player
@@ -2151,6 +2151,24 @@ Loot::Loot(Player* player, Creature* creature, LootType type, std::vector<uint32
     return;
 }
 
+Loot::Loot(GameObject* gameObject, std::string const& instanceSnapshot) :
+    m_lootTarget(gameObject), m_itemTarget(nullptr), m_guidTarget(gameObject ? gameObject->GetObjectGuid() : ObjectGuid()),
+    m_gold(0), m_maxSlot(0), m_lootType(LOOT_CORPSE), m_clientLootType(CLIENT_LOOT_PICKPOCKETING),
+    m_lootMethod(NOT_GROUP_TYPE_LOOT), m_threshold(ITEM_QUALITY_UNCOMMON), m_maxEnchantSkill(0), m_haveItemOverThreshold(false),
+    m_isChecked(false), m_isChest(true), m_isChanged(false), m_isFakeLoot(false), m_createTime(World::GetCurrentClockTime())
+{
+    if (!gameObject)
+        return;
+    if (gameObject->GetGoType() != GAMEOBJECT_TYPE_CHEST || gameObject->GetGOInfo()->chest.groupLootRules ||
+        !RestoreInstanceSnapshot(instanceSnapshot))
+    {
+        sLog.outError("Cannot restore detached instance loot snapshot for gameobject %u; refusing a new roll", gameObject->GetEntry());
+        gameObject->SetLootState(GO_JUST_DEACTIVATED);
+        return;
+    }
+    gameObject->SetLootState(GO_ACTIVATED);
+}
+
 Loot::Loot(Player* player, GameObject* gameObject, LootType type) :
     m_lootTarget(nullptr), m_itemTarget(nullptr), m_gold(0), m_maxSlot(0), m_lootType(type),
     m_clientLootType(CLIENT_LOOT_CORPSE), m_lootMethod(NOT_GROUP_TYPE_LOOT), m_threshold(ITEM_QUALITY_UNCOMMON), m_maxEnchantSkill(0), m_haveItemOverThreshold(false),
@@ -2225,7 +2243,7 @@ Loot::Loot(Player* player, GameObject* gameObject, LootType type) :
                     std::string snapshot;
                     InstanceData* instance = gameObject->GetMap()->GetInstanceData();
                     bool const persistent = m_isChest && !gameObject->GetGOInfo()->chest.groupLootRules &&
-                                            instance && instance->GetGameObjectLootSnapshot(gameObject->GetEntry(), snapshot);
+                                            instance && instance->GetGameObjectLootSnapshot(gameObject->GetObjectGuid(), gameObject->GetEntry(), snapshot);
                     if (persistent && !snapshot.empty())
                     {
                         // A damaged/closed snapshot must never silently create another random reward.

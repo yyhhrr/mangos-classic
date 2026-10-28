@@ -29,6 +29,9 @@ EndContentData */
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "dire_maul.h"
+#include "dire_maul_east_creatures.h"
+
+void AddSC_boss_alzzin();
 
 /*######
 ## event_spells_warlock_dreadsteed
@@ -326,6 +329,9 @@ struct SummonNetherWalker : public SpellScript
 
 void AddSC_dire_maul()
 {
+    AddSC_boss_alzzin();
+    AddSC_dire_maul_east_creatures();
+    AddSC_dire_maul_east_objects();
     Script* pNewScript = new Script;
     pNewScript->Name = "event_spells_warlock_dreadsteed";
     pNewScript->pProcessEventId = &ProcessEventId_event_spells_warlock_dreadsteed;

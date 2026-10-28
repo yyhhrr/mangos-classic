@@ -5,6 +5,8 @@
 #ifndef DEF_DM_H
 #define DEF_DM_H
 
+#include "dire_maul_east.h"
+
 enum
 {
     MAX_ENCOUNTER               = 19,
@@ -12,7 +14,7 @@ enum
     MAX_PORTALS                 = 19,
 
     // East
-    TYPE_ALZZIN                 = 0,                        // Do not change - Handled with Acid
+    TYPE_ALZZIN                 = 0,                        // Stable original encounter index
     TYPE_ZEVRIM                 = 1,
     TYPE_IRONBARK               = 2,
 
@@ -136,10 +138,18 @@ class instance_dire_maul : public ScriptedInstance
 
         void OnCreatureCreate(Creature* pCreature) override;
         void OnObjectCreate(GameObject* pGo) override;
+        void OnCreatureRespawn(Creature*) override;
+        void OnCreatureEvade(Creature*) override;
+        void OnCreatureDespawn(Creature*) override;
+        void SetData64(uint32, uint64) override;
+        DireMaulEast& East() { return m_east; }
+        DireMaulEast const& East() const { return m_east; }
 
         void SetData(uint32 uiType, uint32 uiData) override;
         uint32 GetData(uint32 uiType) const override;
         bool GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const override;
+        bool GetGameObjectLootSnapshot(ObjectGuid const& guid, uint32 entry, std::string& snapshot) const override;
+        void OnGameObjectLootSnapshot(ObjectGuid const& guid, uint32 entry, std::string const& snapshot, bool exhausted) override;
         std::vector<InstanceEventReset> GetResettableEvents() const override;
         bool GetEventResetData(uint32 eventId, std::string& data) const override;
         void ApplyEventReset(uint32 eventId, std::string const& data) override;
@@ -165,9 +175,8 @@ class instance_dire_maul : public ScriptedInstance
         uint32 m_auiEncounter[MAX_ENCOUNTER];
         std::string m_strInstData;
 
-        // East
-        bool m_bWallDestroyed;
-        GuidList m_lFelvineShardGUIDs;
+        void SaveState();
+        std::string BuildSave(std::array<uint32, MAX_ENCOUNTER> const* prefix = nullptr) const;
 
         // West
         ObjectGuid m_aCrystalGeneratorGuid[MAX_GENERATORS];
@@ -181,6 +190,7 @@ class instance_dire_maul : public ScriptedInstance
 
         // North
         bool m_bDoNorthBeforeWest;
+        DireMaulEast m_east;
 };
 
 #endif

@@ -17,7 +17,7 @@
 /* ScriptData
 SDName: instance_dire_maul
 SD%Complete: 70
-SDComment: Ogre costume suit missing for Tribute Run, Cho'Rush spells randomisation is not handled properly, Warpwood pods are not implemented, the Maul event is not handled
+SDComment: East CreatureAI scenes use a versioned coordinator; West and North retain their existing behaviour
 SDCategory: Dire Maul
 EndScriptData
 
@@ -26,9 +26,57 @@ EndScriptData
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "dire_maul.h"
 
+
+namespace
+{
+bool ParseDireMaulSave(char const* text, std::array<uint32, MAX_ENCOUNTER>& prefix, std::string& east)
+{
+    if (!text || std::char_traits<char>::length(text) > 65536) return false;
+    std::istringstream in(text);
+    for (uint32& value : prefix)
+    {
+        std::string token;
+        if (!(in >> token) || token.size() != 1 || token[0] < '0' || token[0] > '0' + SPECIAL) return false;
+        value = uint32(token[0] - '0');
+    }
+    in >> std::ws;
+    east.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return true;
+}
+}
+
+std::string instance_dire_maul::BuildSave(std::array<uint32, MAX_ENCOUNTER> const* prefix) const
+{
+    std::ostringstream out;
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+    {
+        if (i) out << ' ';
+        out << (prefix ? (*prefix)[i] : GetData(i));
+    }
+    out << ' ' << m_east.Save();
+    return out.str();
+}
+void instance_dire_maul::SaveState() { m_strInstData = BuildSave(); SaveToDB(); }
+void instance_dire_maul::OnCreatureRespawn(Creature* actor) { m_east.OnCreatureRespawn(actor); }
+void instance_dire_maul::OnCreatureEvade(Creature* actor) { m_east.OnCreatureEvade(actor); }
+void instance_dire_maul::OnCreatureDespawn(Creature* actor) { m_east.OnCreatureDespawn(actor); }
+void instance_dire_maul::SetData64(uint32 type, uint64 value)
+{
+    if (type == 1002)
+        if (Creature* trigger = instance->GetCreature(ObjectGuid(value))) m_east.RequestIsalien(trigger);
+}
+bool instance_dire_maul::GetGameObjectLootSnapshot(ObjectGuid const& guid, uint32 entry, std::string& snapshot) const
+{
+    return m_east.GetFelvineLootSnapshot(guid, entry, snapshot);
+}
+void instance_dire_maul::OnGameObjectLootSnapshot(ObjectGuid const& guid, uint32 entry, std::string const& snapshot, bool exhausted)
+{
+    m_east.OnFelvineLootSnapshot(guid, entry, snapshot, exhausted);
+}
+
 instance_dire_maul::instance_dire_maul(Map* pMap) : ScriptedInstance(pMap),
-    m_bWallDestroyed(false),
-    m_bDoNorthBeforeWest(false)
+    m_bDoNorthBeforeWest(false),
+    m_east(*this, [this]() { SaveState(); })
 {
     Initialize();
 }
@@ -36,10 +84,12 @@ instance_dire_maul::instance_dire_maul(Map* pMap) : ScriptedInstance(pMap),
 void instance_dire_maul::Initialize()
 {
     memset(&m_auiEncounter, 0, sizeof(m_auiEncounter));
+    m_strInstData = BuildSave();
 }
 
-void instance_dire_maul::Update(uint32 /*uiDiff*/)
+void instance_dire_maul::Update(uint32 diff)
 {
+    m_east.Update(diff);
     if (GetData(TYPE_DREADSTEED) == IN_PROGRESS)
     {
         // While J'eevee is spawned, failure condition is simply no players found
@@ -61,6 +111,7 @@ void instance_dire_maul::Update(uint32 /*uiDiff*/)
 
 void instance_dire_maul::OnPlayerEnter(Player* pPlayer)
 {
+    m_east.OnPlayerEnter(pPlayer);
     // figure where to enter to set library doors accordingly
     // Enter DM North first
     if (pPlayer->IsWithinDist2d(260.0f, -20.0f, 20.0f) && m_auiEncounter[TYPE_WARPWOOD] != DONE)
@@ -73,6 +124,7 @@ void instance_dire_maul::OnPlayerEnter(Player* pPlayer)
 }
 
 void instance_dire_maul::OnPlayerLeave(Player* pPlayer) {
+    m_east.OnPlayerLeave(pPlayer);
     // Remove King of the Gordok aura
     if (pPlayer->HasAura(SPELL_KING_OF_GORDOK))
         pPlayer->RemoveAurasDueToSpell(SPELL_KING_OF_GORDOK);
@@ -80,10 +132,12 @@ void instance_dire_maul::OnPlayerLeave(Player* pPlayer) {
 
 void instance_dire_maul::OnCreatureCreate(Creature* pCreature)
 {
+    m_east.OnCreatureCreate(pCreature);
     switch (pCreature->GetEntry())
     {
         // East
         case NPC_OLD_IRONBARK:
+        case NPC_IRONBARK_REDEEMED:
             break;
 
         // West
@@ -121,23 +175,14 @@ void instance_dire_maul::OnCreatureCreate(Creature* pCreature)
 
 void instance_dire_maul::OnObjectCreate(GameObject* pGo)
 {
+    m_east.OnObjectCreate(pGo);
     switch (pGo->GetEntry())
     {
-        // East
+        // East object state is synchronized by the versioned coordinator.
         case GO_CONSERVATORY_DOOR:
-            if (m_auiEncounter[TYPE_IRONBARK] == DONE)
-                pGo->SetGoState(GO_STATE_ACTIVE);
-            break;
         case GO_CRUMBLE_WALL:
-            if (m_bWallDestroyed || m_auiEncounter[TYPE_ALZZIN] == DONE)
-                pGo->SetGoState(GO_STATE_ACTIVE);
-            break;
         case GO_CORRUPT_VINE:
-            if (m_auiEncounter[TYPE_ALZZIN] == DONE)
-                pGo->SetGoState(GO_STATE_ACTIVE);
-            break;
         case GO_FELVINE_SHARD:
-            m_lFelvineShardGUIDs.push_back(pGo->GetObjectGuid());
             break;
 
         // West
@@ -209,49 +254,10 @@ void instance_dire_maul::OnObjectCreate(GameObject* pGo)
 
 void instance_dire_maul::SetData(uint32 uiType, uint32 uiData)
 {
+    if (uiType < 3) { m_east.SetData(uiType, uiData); return; }
+    if (uiType >= MAX_ENCOUNTER || uiData > SPECIAL) return;
     switch (uiType)
     {
-        // East
-        case TYPE_ZEVRIM:
-            if (uiData == DONE)
-            {
-                // Update Old Ironbark so he can open the conservatory door
-                if (Creature* pIronbark = GetSingleCreatureFromStorage(NPC_OLD_IRONBARK))
-                {
-                    DoScriptText(SAY_IRONBARK_REDEEM, pIronbark);
-                    pIronbark->UpdateEntry(NPC_IRONBARK_REDEEMED);
-                }
-            }
-            m_auiEncounter[uiType] = uiData;
-            break;
-        case TYPE_IRONBARK:
-            m_auiEncounter[uiType] = uiData;
-            break;
-        case TYPE_ALZZIN:                                   // This Encounter is expected to be handled within Acid (reason handling at 50% hp)
-            if (uiData == DONE)
-            {
-                if (!m_bWallDestroyed)
-                {
-                    DoUseDoorOrButton(GO_CRUMBLE_WALL);
-                    m_bWallDestroyed = true;
-                }
-
-                DoUseDoorOrButton(GO_CORRUPT_VINE);
-
-                if (!m_lFelvineShardGUIDs.empty())
-                {
-                    for (GuidList::const_iterator itr = m_lFelvineShardGUIDs.begin(); itr != m_lFelvineShardGUIDs.end(); ++itr)
-                        DoRespawnGameObject(*itr);
-                }
-            }
-            else if (uiData == SPECIAL && !m_bWallDestroyed)
-            {
-                DoUseDoorOrButton(GO_CRUMBLE_WALL);
-                m_bWallDestroyed = true;
-            }
-            m_auiEncounter[uiType] = uiData;
-            break;
-
         // West
         case TYPE_WARPWOOD:
             if (uiData == DONE)
@@ -366,19 +372,7 @@ void instance_dire_maul::SetData(uint32 uiType, uint32 uiData)
     if (uiData == DONE)
     {
         OUT_SAVE_INST_DATA;
-
-        std::ostringstream saveStream;
-        saveStream    << m_auiEncounter[0] << " " << m_auiEncounter[1] << " " << m_auiEncounter[2] << " "
-                      << m_auiEncounter[3] << " " << m_auiEncounter[4] << " " << m_auiEncounter[5] << " "
-                      << m_auiEncounter[6] << " " << m_auiEncounter[7] << " " << m_auiEncounter[8] << " "
-                      << m_auiEncounter[9] << " " << m_auiEncounter[10] << " " << m_auiEncounter[11] << " "
-                      << m_auiEncounter[12] << " " << m_auiEncounter[13] << " " << m_auiEncounter[14] << " "
-                      << m_auiEncounter[15] << " " << m_auiEncounter[16] << " " << m_auiEncounter[17] << " "
-                      << m_auiEncounter[18];
-
-        m_strInstData = saveStream.str();
-
-        SaveToDB();
+        SaveState();
         OUT_SAVE_INST_DATA_COMPLETE;
     }
 }
@@ -390,24 +384,25 @@ std::vector<InstanceEventReset> instance_dire_maul::GetResettableEvents() const
 
 bool instance_dire_maul::GetEventResetData(uint32 eventId, std::string& data) const
 {
-    if (eventId != TYPE_KING_GORDOK || GetData(TYPE_KING_GORDOK) == IN_PROGRESS)
-        return false;
-    std::ostringstream out;
-    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
-    {
-        if (i) out << ' ';
-        out << (i == TYPE_KING_GORDOK ? uint32(NOT_STARTED) : m_auiEncounter[i]);
-    }
-    data = out.str();
+    if (eventId != TYPE_KING_GORDOK || GetData(TYPE_KING_GORDOK) == IN_PROGRESS) return false;
+    std::array<uint32, MAX_ENCOUNTER> prefix{};
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i) prefix[i] = GetData(i);
+    prefix[TYPE_KING_GORDOK] = NOT_STARTED;
+    data = BuildSave(&prefix);
     return true;
 }
 
 void instance_dire_maul::ApplyEventReset(uint32 eventId, std::string const& data)
 {
-    if (eventId != TYPE_KING_GORDOK)
-        return;
+    if (eventId != TYPE_KING_GORDOK) return;
+    std::array<uint32, MAX_ENCOUNTER> prefix{};
+    std::string east;
+    if (!ParseDireMaulSave(data.c_str(), prefix, east) || east != m_east.Save() || prefix[TYPE_KING_GORDOK] != NOT_STARTED) return;
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+        if (i != TYPE_KING_GORDOK && prefix[i] != GetData(i)) return;
+    // Reset only North. Loading East here would detach its live actor GUIDs.
     m_auiEncounter[TYPE_KING_GORDOK] = NOT_STARTED;
-    m_strInstData = data;
+    m_strInstData = BuildSave();
     ResetEventRewardGameObject(GO_GORDOK_TRIBUTE);
     GuidVector mizzles;
     auto& objects = instance->GetObjectsStore();
@@ -443,6 +438,7 @@ bool instance_dire_maul::GetBossLootReward(uint32 bossEntry, BossLootReward& rew
 
 uint32 instance_dire_maul::GetData(uint32 uiType) const
 {
+    if (uiType < 3) return m_east.GetData(uiType);
     if (uiType < MAX_ENCOUNTER)
         return m_auiEncounter[uiType];
 
@@ -468,17 +464,9 @@ void instance_dire_maul::OnCreatureEnterCombat(Creature* pCreature)
 
 void instance_dire_maul::OnCreatureDeath(Creature* pCreature)
 {
+    m_east.OnCreatureDeath(pCreature);
     switch (pCreature->GetEntry())
     {
-        // East
-        // - Handling Zevrim and Old Ironbark for the door event
-        case NPC_ZEVRIM_THORNHOOF:
-            SetData(TYPE_ZEVRIM, DONE);
-            break;
-        case NPC_IRONBARK_REDEEMED:
-            SetData(TYPE_IRONBARK, DONE);
-            break;
-
         // West
         // - Handling of guards of generators
         case NPC_ARCANE_ABERRATION:
@@ -523,34 +511,20 @@ void instance_dire_maul::OnCreatureDeath(Creature* pCreature)
     }
 }
 
-void instance_dire_maul::Load(const char* chrIn)
+void instance_dire_maul::Load(char const* text)
 {
-    if (!chrIn)
+    std::array<uint32, MAX_ENCOUNTER> prefix{};
+    std::string east;
+    if (!ParseDireMaulSave(text, prefix, east) ||
+        !DireMaulEast::ValidateSave({{prefix[0], prefix[1], prefix[2]}}, east))
     {
         OUT_LOAD_INST_DATA_FAIL;
         return;
     }
-
-    OUT_LOAD_INST_DATA(chrIn);
-
-    std::istringstream loadStream(chrIn);
-    loadStream >>   m_auiEncounter[0] >> m_auiEncounter[1] >> m_auiEncounter[2] >>
-               m_auiEncounter[3] >> m_auiEncounter[4] >> m_auiEncounter[5] >>
-               m_auiEncounter[6] >> m_auiEncounter[7] >> m_auiEncounter[8] >>
-               m_auiEncounter[9] >> m_auiEncounter[10] >> m_auiEncounter[11] >>
-               m_auiEncounter[12] >> m_auiEncounter[13] >> m_auiEncounter[14] >>
-               m_auiEncounter[15] >> m_auiEncounter[16] >> m_auiEncounter[17] >>
-               m_auiEncounter[18];
-
-    if (m_auiEncounter[TYPE_ALZZIN] >= DONE)
-        m_bWallDestroyed = true;
-
-    for (uint32& i : m_auiEncounter)
-    {
-        if (i == IN_PROGRESS)
-            i = NOT_STARTED;
-    }
-
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+        m_auiEncounter[i] = i >= 3 && prefix[i] == IN_PROGRESS ? uint32(NOT_STARTED) : prefix[i];
+    m_east.Load({{prefix[0], prefix[1], prefix[2]}}, east);
+    m_strInstData = BuildSave();
     OUT_LOAD_INST_DATA_COMPLETE;
 }
 
