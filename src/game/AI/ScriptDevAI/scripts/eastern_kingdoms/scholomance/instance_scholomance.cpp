@@ -25,503 +25,679 @@ EndScriptData
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "scholomance.h"
+#include "scholomance_spawns.h"
 #include "GameEvents/GameEventMgr.h"
+#include "Maps/MapPersistentStateMgr.h"
+#include "Spells/SpellMgr.h"
 
-instance_scholomance::instance_scholomance(Map* pMap) : ScriptedInstance(pMap),
-    m_uiGambitTransformTimer(0),
-    m_uiGandlingEvent(0),
-    m_bIsRoomReset(false)
+namespace
+{
+uint32 const roomDoors[MAX_EVENTS] = {GO_GATE_POLKELT, GO_GATE_THEOLEN, GO_GATE_MALICIA, GO_GATE_ILLUCIA, GO_GATE_BAROV, GO_GATE_RAVENIAN};
+uint32 const roomBosses[MAX_EVENTS] = {TYPE_POLKELT, TYPE_THEOLEN, TYPE_MALICIA, TYPE_ILLUCIA_BAROV, TYPE_ALEXEI_BAROV, TYPE_RAVENIAN};
+
+uint32 BossType(uint32 entry)
+{
+    switch (entry)
+    {
+        case NPC_KIRTONOS: return TYPE_KIRTONOS;
+        case NPC_RATTLEGORE: return TYPE_RATTLEGORE;
+        case NPC_RAS_FROSTWHISPER: return TYPE_RAS_FROSTWHISPER;
+        case NPC_INSTRUCTOR_MALICIA: return TYPE_MALICIA;
+        case NPC_THEOLEN_KRASTINOV: return TYPE_THEOLEN;
+        case NPC_LOREKEEPER_POLKELT: return TYPE_POLKELT;
+        case NPC_RAVENIAN: return TYPE_RAVENIAN;
+        case NPC_ALEXEI_BAROV: return TYPE_ALEXEI_BAROV;
+        case NPC_ILLUCIA_BAROV: return TYPE_ILLUCIA_BAROV;
+        case NPC_DARKMASTER_GANDLING: return TYPE_GANDLING;
+        default: return MAX_ENCOUNTER;
+    }
+}
+
+bool IsEntranceActor(Creature* creature)
+{
+    uint32 entry = creature->GetEntry();
+    return creature->HasStaticDBSpawnData() &&
+        (entry == NPC_REANIMATED_CORPSE || entry == NPC_DISEASED_GHOUL || entry == NPC_RISEN_ABERRATION) &&
+        creature->GetPositionX() >= aEntranceRoom.m_fCornerX && creature->GetPositionX() < aEntranceRoom.m_fCornerX + aEntranceRoom.m_uiLength &&
+        creature->GetPositionY() >= aEntranceRoom.m_fCornerY && creature->GetPositionY() < aEntranceRoom.m_fCornerY + aEntranceRoom.m_uiWidth &&
+        creature->GetPositionZ() > aEntranceRoom.m_fCenterZ && creature->GetPositionZ() < aEntranceRoom.m_fCenterZ + 6.0f;
+}
+
+void DespawnLiving(Map* map, ObjectGuid guid)
+{
+    if (Creature* creature = map->GetAnyTypeCreature(guid))
+        if (creature->IsAlive()) creature->ForcedDespawn();
+}
+}
+
+instance_scholomance::instance_scholomance(Map* map) : ScriptedInstance(map)
 {
     Initialize();
 }
 
 void instance_scholomance::Initialize()
 {
-    memset(&m_auiEncounter, 0, sizeof(m_auiEncounter));
-
-    for (unsigned int aGandlingEvent : aGandlingEvents)
-        m_mGandlingData[aGandlingEvent] = GandlingEventData();
+    m_progress = ScholomanceProgress();
+    m_strInstData = m_progress.Encode();
 }
 
-void instance_scholomance::OnPlayerEnter(Player* pPlayer)
+void instance_scholomance::SaveState()
 {
-    // Summon Gandling if can
-    DoSpawnGandlingIfCan(true);
-
-    if (GetData(TYPE_RATTLEGORE) == DONE)
-        DoRespawnEntranceRoom(pPlayer);
+    m_strInstData = m_progress.Encode();
+    SaveToDB();
 }
 
-void instance_scholomance::OnCreatureCreate(Creature* pCreature)
+void instance_scholomance::Load(char const* data)
 {
-    switch (pCreature->GetEntry())
-    {
-        // Store the Guids of the NPCs in the entrance room to remove them
-        // and spawn their replacement or Rattlegore's death
-        // (only store those located in the room volume)
-        case NPC_REANIMATED_CORPSE:
-        case NPC_DISEASED_GHOUL:
-        case NPC_RISEN_ABERRATION:
-            if (GetData(TYPE_RATTLEGORE) != DONE && (pCreature->GetPositionZ() > aEntranceRoom.m_fCenterZ) && (pCreature->GetPositionX() - aEntranceRoom.m_fCornerX < aEntranceRoom.m_uiLength) && (pCreature->GetPositionY() - aEntranceRoom.m_fCornerY < aEntranceRoom.m_uiWidth))
-                m_sEntranceRoomGuids.insert(pCreature->GetObjectGuid());
-            break;
-        case NPC_SCHOLOMANCE_STUDENT:
-            m_sViewingRoomGuids.insert(pCreature->GetObjectGuid());
-            break;
-        case NPC_VECTUS:
-        case NPC_MARDUK_BLACKPOOL:
-        case NPC_DARKMASTER_GANDLING:
-            m_npcEntryGuidStore[pCreature->GetEntry()] = pCreature->GetObjectGuid();
-            break;
-        case NPC_RISEN_GUARDIAN:
-            GandlingEventMap::iterator find = m_mGandlingData.find(m_uiGandlingEvent);
-            if (find != m_mGandlingData.end())
-                find->second.m_sAddGuids.insert(pCreature->GetGUIDLow());
-            break;
-    }
-}
-
-void instance_scholomance::OnObjectCreate(GameObject* pGo)
-{
-    switch (pGo->GetEntry())
-    {
-        case GO_VIEWING_ROOM_DOOR:
-            // In normal flow of the instance, this door is opened by a dropped key
-            if (m_auiEncounter[TYPE_RATTLEGORE] == DONE)
-                pGo->SetGoState(GO_STATE_ACTIVE);
-        case GO_GATE_KIRTONOS:
-        case GO_GATE_RAS:
-        case GO_GATE_GANDLING:
-            m_goEntryGuidStore[pGo->GetEntry()] = pGo->GetObjectGuid();
-            break;
-
-        case GO_GATE_MALICIA:  m_mGandlingData[EVENT_ID_MALICIA].m_doorGuid  = pGo->GetObjectGuid(); break;
-        case GO_GATE_THEOLEN:  m_mGandlingData[EVENT_ID_THEOLEN].m_doorGuid  = pGo->GetObjectGuid(); break;
-        case GO_GATE_POLKELT:  m_mGandlingData[EVENT_ID_POLKELT].m_doorGuid  = pGo->GetObjectGuid(); break;
-        case GO_GATE_RAVENIAN: m_mGandlingData[EVENT_ID_RAVENIAN].m_doorGuid = pGo->GetObjectGuid(); break;
-        case GO_GATE_BAROV:    m_mGandlingData[EVENT_ID_BAROV].m_doorGuid    = pGo->GetObjectGuid(); break;
-        case GO_GATE_ILLUCIA:  m_mGandlingData[EVENT_ID_ILLUCIA].m_doorGuid  = pGo->GetObjectGuid(); break;
-    }
-}
-
-void instance_scholomance::DoRespawnEntranceRoom(Player* pSummoner)
-{
-    // safety check to avoid the room being reset for each OnPlayerEnter() call if Rattlegore is dead
-    if (m_bIsRoomReset)
-        return;
-
-    if (!pSummoner)
-        return;
-
-    // Despawn the mobs already in the room with the exception of the necrofiend (not stored, so not despawned)
-    for (auto m_sEntranceRoomGuid : m_sEntranceRoomGuids)
-    {
-        if (Creature* pMob = instance->GetCreature(m_sEntranceRoomGuid))
-            pMob->ForcedDespawn();
-    }
-    // Spawn the new and less numerous groups instead
-    // Four groups, one in each corner
-    // The creatures in each point are random
-    // but follow the generic rule for each group of 4 NPCs:
-    // 2 risen aberrations, 1 diseased ghoul, 1 diseased ghoul/reanimated corpse
-    for (uint8 i = 0; i < MAX_GROUPS; ++i)
-    {
-        std::vector<uint32> uiMobList;              // Vector holding the 4 creatures entries for each spawned group
-        uiMobList.push_back(NPC_RISEN_ABERRATION);  // 3 static NPC entries
-        uiMobList.push_back(NPC_RISEN_ABERRATION);
-        uiMobList.push_back(NPC_DISEASED_GHOUL);
-
-        uint32 uiMobEntry;                          // will hold the last random creature entry
-
-        // Pick the fourth NPC in the group and randomize the four possible spawns
-        switch (urand(0, 1))
-        {
-            case 0: uiMobEntry = NPC_REANIMATED_CORPSE; break;
-            case 1: uiMobEntry = NPC_DISEASED_GHOUL;    break;
-        }
-
-        uiMobList.push_back(uiMobEntry);
-        std::shuffle(uiMobList.begin(), uiMobList.end(), *GetRandomGenerator());
-
-        for (uint8 j = 0; j < MAX_NPC_PER_GROUP; ++j)
-            pSummoner->SummonCreature(uiMobList[j], aEntranceRoomSpawnLocs[4 * i + j].x, aEntranceRoomSpawnLocs[4 * i + j].y, aEntranceRoomSpawnLocs[4 * i + j].z, aEntranceRoomSpawnLocs[4 * i + j].o, TEMPSPAWN_DEAD_DESPAWN, 0);
-    }
-    // spawn also a patrolling necrofiend
-    // the waypoints are handled in DB creature_movement_template table (shared with the other necrofiend in the room)
-    // the two other necrofiends in the instance are using DB creature_movement table
-    if (Creature* pNecrofiend = pSummoner->SummonCreature(NPC_NECROFIEND, aEntranceRoomSpawnLocs[16].x, aEntranceRoomSpawnLocs[16].y, aEntranceRoomSpawnLocs[16].z, aEntranceRoomSpawnLocs[16].o, TEMPSPAWN_DEAD_DESPAWN, 0))
-        pNecrofiend->GetMotionMaster()->MoveWaypoint();
-
-    m_bIsRoomReset = true;
-
-    debug_log("SD2: Entrance room in Scholomance reset after Rattlegore's death");
-}
-
-void instance_scholomance::SetData(uint32 uiType, uint32 uiData)
-{
-    switch (uiType)
-    {
-        case TYPE_KIRTONOS:
-            // This door is initially closed by DB-scripts, so only use it in case of FAIL, DONE, or on aggro after wipe
-            if (m_auiEncounter[uiType] != FAIL && uiData == IN_PROGRESS)
-                return;
-            m_auiEncounter[uiType] = uiData;
-            DoUseDoorOrButton(GO_GATE_KIRTONOS);
-            break;
-        case TYPE_RATTLEGORE:
-            m_auiEncounter[uiType] = uiData;
-            if (uiData == DONE)
-            {
-                if (Player* pPlayer = GetPlayerInMap())
-                    DoRespawnEntranceRoom(pPlayer);
-            }
-            break;
-        case TYPE_RAS_FROSTWHISPER:
-            m_auiEncounter[uiType] = uiData;
-            DoUseDoorOrButton(GO_GATE_RAS);
-            break;
-        case TYPE_MALICIA:                                  // TODO this code can be simplified, when it is known which event-ids correspond to which room
-            m_auiEncounter[uiType] = uiData;
-            DoUseDoorOrButton(m_mGandlingData[EVENT_ID_MALICIA].m_doorGuid);
-            break;
-        case TYPE_THEOLEN:
-            m_auiEncounter[uiType] = uiData;
-            DoUseDoorOrButton(m_mGandlingData[EVENT_ID_THEOLEN].m_doorGuid);
-            break;
-        case TYPE_POLKELT:
-            m_auiEncounter[uiType] = uiData;
-            DoUseDoorOrButton(m_mGandlingData[EVENT_ID_POLKELT].m_doorGuid);
-            break;
-        case TYPE_RAVENIAN:
-            m_auiEncounter[uiType] = uiData;
-            DoUseDoorOrButton(m_mGandlingData[EVENT_ID_RAVENIAN].m_doorGuid);
-            break;
-        case TYPE_ALEXEI_BAROV:
-            m_auiEncounter[uiType] = uiData;
-            DoUseDoorOrButton(m_mGandlingData[EVENT_ID_BAROV].m_doorGuid);
-            break;
-        case TYPE_ILLUCIA_BAROV:
-            m_auiEncounter[uiType] = uiData;
-            DoUseDoorOrButton(m_mGandlingData[EVENT_ID_ILLUCIA].m_doorGuid);
-            break;
-        case TYPE_GANDLING:
-            m_auiEncounter[uiType] = uiData;
-            // Close the door to main room, because the encounter will take place only in the main hall and random around all the 6 rooms
-            DoUseDoorOrButton(GO_GATE_GANDLING);
-            break;
-    }
-
-    // Summon Gandling
-    if (uiData == DONE)
-        DoSpawnGandlingIfCan(false);
-
-    if (uiData == DONE)
-    {
-        OUT_SAVE_INST_DATA;
-
-        std::ostringstream saveStream;
-        saveStream << m_auiEncounter[0] << " " << m_auiEncounter[1] << " " << m_auiEncounter[2] << " "
-                   << m_auiEncounter[3] << " " << m_auiEncounter[4] << " " << m_auiEncounter[5] << " "
-                   << m_auiEncounter[6] << " " << m_auiEncounter[7] << " " << m_auiEncounter[8] << " " << m_auiEncounter[9];
-
-        m_strInstData = saveStream.str();
-
-        SaveToDB();
-        OUT_SAVE_INST_DATA_COMPLETE;
-    }
-}
-
-void instance_scholomance::DoSpawnGandlingIfCan(bool bByPlayerEnter)
-{
-    // Do not summon, if event finished
-    if (m_auiEncounter[TYPE_GANDLING] == DONE)
-        return;
-
-    // Summon only once
-    if (GetSingleCreatureFromStorage(NPC_DARKMASTER_GANDLING))
-        return;
-
-    Player* pPlayer = GetPlayerInMap();
-    if (!pPlayer)
-        return;
-
-    // Check if all the six bosses are done first
-    if (m_auiEncounter[TYPE_MALICIA] == DONE && m_auiEncounter[TYPE_THEOLEN] == DONE && m_auiEncounter[TYPE_POLKELT] == DONE &&
-            m_auiEncounter[TYPE_RAVENIAN] == DONE && m_auiEncounter[TYPE_ALEXEI_BAROV] == DONE && m_auiEncounter[TYPE_ILLUCIA_BAROV] == DONE)
-    {
-        if (Creature* pGandling = pPlayer->SummonCreature(NPC_DARKMASTER_GANDLING, aGandlingSpawnLocs[0].x, aGandlingSpawnLocs[0].y, aGandlingSpawnLocs[0].z, aGandlingSpawnLocs[0].o, TEMPSPAWN_DEAD_DESPAWN, 0))
-        {
-            // Switch model to Christmas Gandling if Winter Veil event is active
-            if (IsHolidayActive(HOLIDAY_FEAST_OF_WINTER_VEIL))
-                pGandling->CastSpell(pGandling, SPELL_XMAS_GANDLING, TRIGGERED_NONE);
-
-            if (!bByPlayerEnter)
-                DoScriptText(SAY_GANDLING_SPAWN, pGandling);
-        }
-    }
-}
-
-void instance_scholomance::HandlePortalEvent(uint32 uiEventId, uint32 uiData)
-{
-    GandlingEventMap::iterator find = m_mGandlingData.find(uiEventId);
-    if (find == m_mGandlingData.end())
-        return;
-
-    if (uiData == SPECIAL)
-    {
-        // Set current Event index
-        m_uiGandlingEvent = uiEventId;
-
-        // Close door if needed
-        if (!find->second.m_bIsActive)
-        {
-            find->second.m_bIsActive = true;
-            DoUseDoorOrButton(find->second.m_doorGuid);
-        }
-    }
-    // Toggle door and event state in case of state-switch
-    else
-    {
-        if ((uiData == IN_PROGRESS && !find->second.m_bIsActive) ||
-                (uiData == FAIL && find->second.m_bIsActive) ||
-                (uiData == DONE && find->second.m_bIsActive))
-        {
-            find->second.m_bIsActive = !find->second.m_bIsActive;
-            DoUseDoorOrButton(find->second.m_doorGuid);
-        }
-    }
-}
-
-uint32 instance_scholomance::GetData(uint32 uiType) const
-{
-    if (uiType < MAX_ENCOUNTER)
-        return m_auiEncounter[uiType];
-
-    return 0;
-}
-
-void instance_scholomance::Load(const char* chrIn)
-{
-    if (!chrIn)
+    ScholomanceProgress candidate;
+    if (!ScholomanceProgress::Decode(data, candidate))
     {
         OUT_LOAD_INST_DATA_FAIL;
         return;
     }
-
-    OUT_LOAD_INST_DATA(chrIn);
-
-    std::istringstream loadStream(chrIn);
-    loadStream >> m_auiEncounter[0] >> m_auiEncounter[1] >> m_auiEncounter[2] >> m_auiEncounter[3] >> m_auiEncounter[4]
-               >> m_auiEncounter[5] >> m_auiEncounter[6] >> m_auiEncounter[7] >> m_auiEncounter[8] >> m_auiEncounter[9];
-
-    for (uint32& i : m_auiEncounter)
-        if (i == IN_PROGRESS)
-            i = NOT_STARTED;
-
-    OUT_LOAD_INST_DATA_COMPLETE;
+    m_progress = candidate;
+    m_strInstData = m_progress.Encode();
+    m_entranceActors = {};
+    m_paladinActors = {};
+    m_portals = {};
+    m_kirtonosTimer = 0;
+    m_retryTimer = 0;
+    m_gandlingAttempts = m_chargerAttempts = 0;
+    m_paladinPaused = false;
+    SyncDoors();
 }
 
-void instance_scholomance::OnCreatureEnterCombat(Creature* pCreature)
+void instance_scholomance::OnPlayerEnter(Player* /*player*/)
 {
-    switch (pCreature->GetEntry())
-    {
-        case NPC_KIRTONOS:            SetData(TYPE_KIRTONOS, IN_PROGRESS);         break;
-        case NPC_RATTLEGORE:          SetData(TYPE_RATTLEGORE, IN_PROGRESS);       break;
-        case NPC_RAS_FROSTWHISPER:    SetData(TYPE_RAS_FROSTWHISPER, IN_PROGRESS); break;
-        case NPC_THEOLEN_KRASTINOV:   SetData(TYPE_THEOLEN, IN_PROGRESS);          break;
-        case NPC_LOREKEEPER_POLKELT:  SetData(TYPE_POLKELT, IN_PROGRESS);          break;
-        case NPC_RAVENIAN:            SetData(TYPE_RAVENIAN, IN_PROGRESS);         break;
-        case NPC_ILLUCIA_BAROV:       SetData(TYPE_ILLUCIA_BAROV, IN_PROGRESS);    break;
-        case NPC_ALEXEI_BAROV:        SetData(TYPE_ALEXEI_BAROV, IN_PROGRESS);     break;
-        case NPC_INSTRUCTOR_MALICIA:  SetData(TYPE_MALICIA, IN_PROGRESS);          break;
-        case NPC_DARKMASTER_GANDLING: SetData(TYPE_GANDLING, IN_PROGRESS);         break;
+    // A new participant can retry a request which exhausted its short retry budget.
+    m_gandlingAttempts = m_chargerAttempts = 0;
+    for (auto& actor : m_entranceActors) actor.attempts = 0;
+    for (auto& actor : m_paladinActors) actor.attempts = 0;
+    if (m_progress.gambit == DONE)
+        for (ObjectGuid guid : m_viewingRoom) m_gambitPending[guid] = 0;
+    RestoreGandling(false);
+    RestoreEntrance();
+    SyncDoors();
+}
 
-        case NPC_RISEN_GUARDIAN:
-            for (auto& itr : m_mGandlingData)
-            {
-                // if there are no minions for a room, skip it
-                if (!itr.second.m_sAddGuids.empty())
-                {
-                    // set data to fail in case of player death
-                    if (itr.second.m_sAddGuids.find(pCreature->GetGUIDLow()) != itr.second.m_sAddGuids.end())
-                    {
-                        HandlePortalEvent(itr.first, IN_PROGRESS);
-                        break;
-                    }
-                }
-            }
+void instance_scholomance::OnPlayerLeave(Player* player)
+{
+    if (m_progress.gambit == IN_PROGRESS || m_progress.paladin == IN_PROGRESS) SaveState();
+    for (auto const& ref : instance->GetPlayers())
+        if (Player* other = ref.getSource())
+            if (other != player && !other->IsGameMaster()) return;
+    // Detach GUIDs before callbacks. Completed kills remain in the durable ledger.
+    if (m_progress.paladin == IN_PROGRESS)
+    {
+        m_paladinPaused = true;
+        ClearPaladinActors();
+    }
+    for (uint32 room = 0; room < MAX_EVENTS; ++room) ClearPortal(room);
+}
+
+void instance_scholomance::OnCreatureCreate(Creature* creature)
+{
+    if (IsEntranceActor(creature))
+    {
+        m_staticEntrance.insert(creature->GetObjectGuid());
+        if (GetData(TYPE_RATTLEGORE) == DONE && creature->IsAlive())
+            creature->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PLAYER | UNIT_FLAG_UNINTERACTIBLE);
+    }
+    uint32 entry = creature->GetEntry();
+    if (entry == NPC_SCHOLOMANCE_STUDENT || entry == NPC_VECTUS || entry == NPC_MARDUK_BLACKPOOL)
+    {
+        m_viewingRoom.insert(creature->GetObjectGuid());
+        if (m_progress.gambit == DONE) m_gambitPending[creature->GetObjectGuid()] = 0;
+    }
+    if (entry == NPC_VECTUS || entry == NPC_MARDUK_BLACKPOOL || entry == NPC_DARKMASTER_GANDLING || entry == NPC_KIRTONOS)
+        m_npcEntryGuidStore[entry] = creature->GetObjectGuid();
+    if (entry == NPC_KIRTONOS && m_kirtonosTimer) m_kirtonosTimer = 600000;
+    if (entry == NPC_FALLEN_CHARGER)
+    {
+        m_charger = creature->GetObjectGuid();
+        creature->SetActiveObjectState(true);
+    }
+}
+
+void instance_scholomance::OnCreatureRespawn(Creature* creature)
+{
+    if (IsEntranceActor(creature))
+    {
+        m_staticEntrance.insert(creature->GetObjectGuid());
+        if (GetData(TYPE_RATTLEGORE) == DONE && creature->IsAlive())
+            creature->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PLAYER | UNIT_FLAG_UNINTERACTIBLE);
+    }
+    if (m_progress.gambit == DONE && m_viewingRoom.count(creature->GetObjectGuid()))
+        m_gambitPending[creature->GetObjectGuid()] = 0;
+}
+
+void instance_scholomance::OnObjectCreate(GameObject* go)
+{
+    switch (go->GetEntry())
+    {
+        case GO_VIEWING_ROOM_DOOR:
+            if (GetData(TYPE_RATTLEGORE) == DONE) go->SetGoState(GO_STATE_ACTIVE);
+            break;
+        case GO_BRAZIER_HERALD:
+        case GO_GATE_KIRTONOS: case GO_GATE_RAS: case GO_GATE_GANDLING:
+        case GO_GATE_POLKELT: case GO_GATE_THEOLEN: case GO_GATE_MALICIA:
+        case GO_GATE_ILLUCIA: case GO_GATE_BAROV: case GO_GATE_RAVENIAN:
+            m_goEntryGuidStore[go->GetEntry()] = go->GetObjectGuid();
+            SyncDoors();
             break;
     }
 }
 
-void instance_scholomance::OnCreatureEvade(Creature* pCreature)
+void instance_scholomance::SetDoor(uint32 entry, bool open)
 {
-    switch (pCreature->GetEntry())
-    {
-        case NPC_KIRTONOS:            SetData(TYPE_KIRTONOS, FAIL);         break;
-        case NPC_RATTLEGORE:          SetData(TYPE_RATTLEGORE, FAIL);       break;
-        case NPC_RAS_FROSTWHISPER:    SetData(TYPE_RAS_FROSTWHISPER, FAIL); break;
-        case NPC_THEOLEN_KRASTINOV:   SetData(TYPE_THEOLEN, FAIL);          break;
-        case NPC_LOREKEEPER_POLKELT:  SetData(TYPE_POLKELT, FAIL);          break;
-        case NPC_RAVENIAN:            SetData(TYPE_RAVENIAN, FAIL);         break;
-        case NPC_ILLUCIA_BAROV:       SetData(TYPE_ILLUCIA_BAROV, FAIL);    break;
-        case NPC_ALEXEI_BAROV:        SetData(TYPE_ALEXEI_BAROV, FAIL);     break;
-        case NPC_INSTRUCTOR_MALICIA:  SetData(TYPE_MALICIA, FAIL);          break;
-        case NPC_DARKMASTER_GANDLING: SetData(TYPE_GANDLING, FAIL);         break;
+    if (GameObject* go = GetSingleGameObjectFromStorage(entry))
+        go->SetGoState(open ? GO_STATE_ACTIVE : GO_STATE_READY);
+}
 
-        case NPC_RISEN_GUARDIAN:
-            for (auto& itr : m_mGandlingData)
-            {
-                // if there are no minions for a room, skip it
-                if (!itr.second.m_sAddGuids.empty())
-                {
-                    // set data to fail in case of player death
-                    if (itr.second.m_sAddGuids.find(pCreature->GetGUIDLow()) != itr.second.m_sAddGuids.end())
-                    {
-                        HandlePortalEvent(itr.first, FAIL);
-                        break;
-                    }
-                }
-            }
-            break;
+void instance_scholomance::SyncDoors()
+{
+    SetDoor(GO_GATE_KIRTONOS, GetData(TYPE_KIRTONOS) != IN_PROGRESS && !m_kirtonosTimer);
+    SetDoor(GO_GATE_RAS, GetData(TYPE_RAS_FROSTWHISPER) != IN_PROGRESS);
+    SetDoor(GO_GATE_GANDLING, GetData(TYPE_GANDLING) != IN_PROGRESS);
+    for (uint32 i = 0; i < MAX_EVENTS; ++i)
+        SetDoor(roomDoors[i], GetData(roomBosses[i]) != IN_PROGRESS && !m_portals[i].active);
+}
+
+uint32 instance_scholomance::GetData(uint32 type) const
+{
+    return type < MAX_ENCOUNTER ? m_progress.encounters[type] : 0;
+}
+
+void instance_scholomance::SetData(uint32 type, uint32 data)
+{
+    if (type >= MAX_ENCOUNTER || data > DONE || GetData(type) == DONE || GetData(type) == data) return;
+    m_progress.encounters[type] = data;
+    if (type == TYPE_KIRTONOS) m_kirtonosTimer = 0;
+    if (type == TYPE_RATTLEGORE && data == DONE) PrepareEntrance();
+    if (type == TYPE_GANDLING && (data == FAIL || data == DONE))
+        for (uint32 i = 0; i < MAX_EVENTS; ++i) ClearPortal(i);
+    SyncDoors();
+    SaveState();
+    if (data == DONE)
+    {
+        m_gandlingAttempts = 0;
+        RestoreGandling(true);
+        RestoreEntrance();
     }
 }
 
-void instance_scholomance::OnCreatureDeath(Creature* pCreature)
+void instance_scholomance::PrepareEntrance()
 {
-    switch (pCreature->GetEntry())
+    if (m_progress.entrance[16]) return;
+    for (uint32 group = 0; group < MAX_GROUPS; ++group)
     {
-        case NPC_KIRTONOS:            SetData(TYPE_KIRTONOS, DONE);         break;
-        case NPC_RATTLEGORE:          SetData(TYPE_RATTLEGORE, DONE);       break;
-        case NPC_RAS_FROSTWHISPER:    SetData(TYPE_RAS_FROSTWHISPER, DONE); break;
-        case NPC_THEOLEN_KRASTINOV:   SetData(TYPE_THEOLEN, DONE);          break;
-        case NPC_LOREKEEPER_POLKELT:  SetData(TYPE_POLKELT, DONE);          break;
-        case NPC_RAVENIAN:            SetData(TYPE_RAVENIAN, DONE);         break;
-        case NPC_ILLUCIA_BAROV:       SetData(TYPE_ILLUCIA_BAROV, DONE);    break;
-        case NPC_ALEXEI_BAROV:        SetData(TYPE_ALEXEI_BAROV, DONE);     break;
-        case NPC_INSTRUCTOR_MALICIA:  SetData(TYPE_MALICIA, DONE);          break;
-        case NPC_DARKMASTER_GANDLING: SetData(TYPE_GANDLING, DONE);         break;
+        std::array<uint32, 4> entries = {{NPC_RISEN_ABERRATION, NPC_RISEN_ABERRATION, NPC_DISEASED_GHOUL,
+            urand(0, 1) ? uint32(NPC_REANIMATED_CORPSE) : uint32(NPC_DISEASED_GHOUL)}};
+        std::shuffle(entries.begin(), entries.end(), *GetRandomGenerator());
+        for (uint32 slot = 0; slot < 4; ++slot) m_progress.entrance[group * 4 + slot] = entries[slot];
+    }
+    m_progress.entrance[16] = NPC_NECROFIEND;
+}
 
-        case NPC_RISEN_GUARDIAN:
-            for (auto& itr : m_mGandlingData)
-            {
-                // if there are no minions for a room, skip it
-                if (!itr.second.m_sAddGuids.empty())
-                {
-                    // search for the dead minion and erase it
-                    if (itr.second.m_sAddGuids.find(pCreature->GetGUIDLow()) != itr.second.m_sAddGuids.end())
-                    {
-                        itr.second.m_sAddGuids.erase(pCreature->GetGUIDLow());
+void instance_scholomance::SuppressEntranceActors()
+{
+    if (GetData(TYPE_RATTLEGORE) != DONE) return;
+    // Keep earned corpses. Suppression also runs for late grid loads and respawns.
+    GuidSet pending;
+    pending.swap(m_staticEntrance);
+    for (ObjectGuid guid : pending)
+        if (Creature* creature = instance->GetCreature(guid))
+        {
+            if (creature->IsAlive()) creature->ForcedDespawn();
+            time_t until = static_cast<DungeonPersistentState*>(instance->GetPersistentState())->GetResetTime();
+            if (until > time(nullptr)) instance->GetPersistentState()->SaveCreatureRespawnTime(creature->GetDbGuid(), until);
+        }
+}
 
-                        // if the current list is empty; set event id as done
-                        if (itr.second.m_sAddGuids.empty())
-                        {
-                            HandlePortalEvent(itr.first, DONE);
-                            break;
-                        }
-                    }
-                }
-            }
-            break;
+void instance_scholomance::RestoreEntrance()
+{
+    if (!m_progress.entrance[16]) return;
+    Player* player = GetPlayerInMap(true, false);
+    if (!player) return;
+    SuppressEntranceActors();
+    bool changed = false;
+    for (uint32 i = 0; i < m_entranceActors.size(); ++i)
+    {
+        auto& slot = m_entranceActors[i];
+        if ((m_progress.entranceDead & (1u << i)) || instance->GetCreature(slot.guid) || slot.attempts >= 5) continue;
+        ++slot.attempts;
+        Position const& pos = aEntranceRoomSpawnLocs[i];
+        if (Creature* actor = player->SummonCreature(m_progress.entrance[i], pos.x, pos.y, pos.z, pos.o, TEMPSPAWN_DEAD_DESPAWN, 0))
+        {
+            slot.guid = actor->GetObjectGuid();
+            slot.attempts = 0;
+            actor->SetActiveObjectState(true);
+            m_progress.entranceCreated |= 1u << i;
+            if (i == 16) actor->GetMotionMaster()->MoveWaypoint();
+            changed = true;
+        }
+    }
+    if (changed) SaveState();
+}
+
+void instance_scholomance::RestoreGandling(bool announce)
+{
+    if (GetData(TYPE_GANDLING) == DONE || m_gandlingAttempts >= 5) return;
+    if (Creature* boss = GetSingleCreatureFromStorage(NPC_DARKMASTER_GANDLING))
+        if (boss->IsAlive()) return;
+    if (GetData(TYPE_GANDLING) == IN_PROGRESS) SetData(TYPE_GANDLING, FAIL);
+    for (uint32 type : roomBosses) if (GetData(type) != DONE) return;
+    Player* player = GetPlayerInMap(true, false);
+    if (!player) return;
+    ++m_gandlingAttempts;
+    Position const& pos = aGandlingSpawnLocs[0];
+    if (Creature* boss = player->SummonCreature(NPC_DARKMASTER_GANDLING, pos.x, pos.y, pos.z, pos.o, TEMPSPAWN_DEAD_DESPAWN, 0))
+    {
+        boss->SetActiveObjectState(true);
+        m_gandlingAttempts = 0;
+        if (IsHolidayActive(HOLIDAY_FEAST_OF_WINTER_VEIL)) boss->CastSpell(boss, SPELL_XMAS_GANDLING, TRIGGERED_NONE);
+        if (announce) DoScriptText(SAY_GANDLING_SPAWN, boss);
     }
 }
 
-void instance_scholomance::Update(uint32 uiDiff)
+void instance_scholomance::HandlePortalEvent(uint32 eventId, Creature* source)
 {
-    if (m_uiGambitTransformTimer)
+    if (!source || source->GetEntry() != NPC_DARKMASTER_GANDLING || source->GetMap() != instance ||
+        source != GetSingleCreatureFromStorage(NPC_DARKMASTER_GANDLING) || GetData(TYPE_GANDLING) != IN_PROGRESS) return;
+    for (uint32 i = 0; i < MAX_EVENTS; ++i)
+        if (aGandlingEvents[i] == eventId && !m_portals[i].active)
+        {
+            m_portals[i] = GandlingEventData();
+            m_portals[i].active = true;
+            m_portals[i].timer = 2000;
+            SyncDoors();
+            return;
+        }
+    // A second player sent to an occupied room shares the existing guard batch.
+}
+
+void instance_scholomance::ClearPortal(uint32 room)
+{
+    auto guards = m_portals[room].guards;
+    m_portals[room] = GandlingEventData();
+    SyncDoors();
+    for (ObjectGuid guid : guards) DespawnLiving(instance, guid);
+}
+
+void instance_scholomance::UpdatePortals(uint32 diff)
+{
+    for (uint32 room = 0; room < MAX_EVENTS; ++room)
     {
-        if (m_uiGambitTransformTimer < uiDiff)
-            HandleDawnGambitEvent();
-        else
-            m_uiGambitTransformTimer -= uiDiff;
+        auto& batch = m_portals[room];
+        if (!batch.active) continue;
+        if (GetData(TYPE_GANDLING) != IN_PROGRESS) { ClearPortal(room); continue; }
+        bool vanished = false;
+        for (ObjectGuid guid : batch.guards)
+            if (guid && !instance->GetCreature(guid)) vanished = true;
+        if (vanished) { ClearPortal(room); continue; }
+        if (!batch.timer) continue;
+        if (batch.timer > diff) { batch.timer -= diff; continue; }
+        Creature* boss = GetSingleCreatureFromStorage(NPC_DARKMASTER_GANDLING);
+        if (!boss || !boss->IsAlive()) { ClearPortal(room); continue; }
+        bool missing = false;
+        uint32 slot = 0;
+        for (auto const& request : aPortalSpawns)
+        {
+            if (request.event != aGandlingEvents[room]) continue;
+            if (!batch.guards[slot] && !(batch.dead & (1u << slot)))
+            {
+                auto const& pos = request.position;
+                if (Creature* guard = boss->SummonCreature(request.entry, pos.x, pos.y, pos.z, pos.o, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, request.lifetime))
+                {
+                    batch.guards[slot] = guard->GetObjectGuid();
+                    guard->SetActiveObjectState(true);
+                }
+                else missing = true;
+            }
+            ++slot;
+        }
+        if (!missing) batch.timer = 0;
+        else if (++batch.attempts >= 3) ClearPortal(room);
+        else batch.timer = 1000;
     }
 }
 
 void instance_scholomance::HandleDawnGambitEvent()
 {
-    if (m_uiGambitTransformTimer == 0)
+    if (m_progress.gambit != NOT_STARTED) return;
+    m_progress.gambit = IN_PROGRESS;
+    m_progress.gambitRemaining = 12000;
+    SaveState();
+}
+
+void instance_scholomance::ApplyGambit(Creature* creature)
+{
+    if (!creature->IsAlive()) return;
+    creature->SetFactionTemporary(FACTION_SCOURGE, TEMPFACTION_RESTORE_RESPAWN);
+    if (creature->GetEntry() != NPC_SCHOLOMANCE_STUDENT) return;
+    creature->SetStandState(UNIT_STAND_STATE_STAND);
+    if (!creature->HasAura(SPELL_STUDENT_TRANSFORM))
     {
-        m_uiGambitTransformTimer = 12 * IN_MILLISECONDS;
+        creature->CastSpell(creature, SPELL_STUDENT_TRANSFORM, TRIGGERED_OLD_TRIGGERED);
+        if (!creature->IsInCombat())
+            creature->GetMotionMaster()->MoveRandomAroundPoint(creature->GetPositionX(), creature->GetPositionY(), creature->GetPositionZ(), 2.0f);
+    }
+}
+
+bool instance_scholomance::StartKirtonosEvent()
+{
+    if (GetData(TYPE_KIRTONOS) == DONE || GetData(TYPE_KIRTONOS) == IN_PROGRESS || m_kirtonosTimer) return false;
+    if (Creature* creature = GetSingleCreatureFromStorage(NPC_KIRTONOS)) if (creature->IsAlive()) return false;
+    m_kirtonosTimer = 10000; // DB summons after five seconds; release if that summon fails.
+    SyncDoors();
+    return true;
+}
+
+bool instance_scholomance::StartPaladinEvent(Player* player)
+{
+    if (!player || player->GetMap() != instance || !player->IsAlive() || player->IsGameMaster() ||
+        player->GetQuestStatus(QUEST_JUDGMENT_REDEMPTION) != QUEST_STATUS_INCOMPLETE || GetData(TYPE_RATTLEGORE) != DONE ||
+        player->GetPositionX() < 115.0f || player->GetPositionX() > 180.0f ||
+        player->GetPositionY() < 125.0f || player->GetPositionY() > 205.0f ||
+        player->GetPositionZ() < 85.0f || player->GetPositionZ() > 100.0f ||
+        m_progress.paladin == IN_PROGRESS || m_progress.paladin == DONE) return false;
+    ClearPaladinActors();
+    m_progress.paladin = IN_PROGRESS;
+    m_progress.paladinElapsed = m_progress.paladinCreated = m_progress.paladinDead = 0;
+    m_progress.chargerUntil = 0;
+    m_paladinPaused = false;
+    SaveState();
+    return true;
+}
+
+void instance_scholomance::ClearPaladinActors()
+{
+    auto actors = m_paladinActors;
+    m_paladinActors = {};
+    for (auto const& slot : actors) DespawnLiving(instance, slot.guid);
+}
+
+void instance_scholomance::FailPaladinEvent()
+{
+    if (m_progress.paladin != IN_PROGRESS) return;
+    m_progress.paladin = FAIL;
+    ClearPaladinActors();
+    SaveState();
+}
+
+void instance_scholomance::UpdatePaladin(uint32 diff)
+{
+    if (m_progress.paladin != IN_PROGRESS) return;
+    Player* player = GetPlayerInMap(true, false);
+    if (!player)
+    {
+        if (GetPlayerInMap(false, false)) FailPaladinEvent(); // All participants died.
+        else if (!m_paladinPaused)
+        {
+            m_paladinPaused = true;
+            ClearPaladinActors();
+            SaveState();
+        }
         return;
     }
-    m_uiGambitTransformTimer = 0;
-
-    // Make each of the Scholomance Student cast "Viewing Room Student Transform - Effect" on himself
-    // Change faction to hostile and roam in the room
-    for (auto m_sViewingRoomGuid : m_sViewingRoomGuids)
+    m_paladinPaused = false;
+    m_progress.paladinElapsed += std::min(diff, 300000u - m_progress.paladinElapsed);
+    bool changed = false;
+    for (uint32 i = 0; i < m_paladinActors.size(); ++i)
     {
-        if (Creature* pStudent = instance->GetCreature(m_sViewingRoomGuid))
+        auto& slot = m_paladinActors[i];
+        auto const& request = aPaladinSpawns[i];
+        if (m_progress.paladinElapsed < request.delay || (m_progress.paladinDead & (1u << i))) continue;
+        if (slot.guid)
         {
-            pStudent->SetFactionTemporary(FACTION_SCOURGE, TEMPFACTION_RESTORE_RESPAWN);
-            pStudent->SetStandState(UNIT_STAND_STATE_STAND);
-            pStudent->GetMotionMaster()->MoveRandomAroundPoint(pStudent->GetPositionX(), pStudent->GetPositionY(), pStudent->GetPositionZ(), 2.0f);
-            pStudent->CastSpell(pStudent, SPELL_STUDENT_TRANSFORM, TRIGGERED_NONE);
+            if (!instance->GetCreature(slot.guid)) { FailPaladinEvent(); return; }
+            continue;
         }
-    }
-    // Change faction to hostile for Marduk and Vectus
-    if (Creature* pMarduk = GetSingleCreatureFromStorage(NPC_MARDUK_BLACKPOOL))
-        pMarduk->SetFactionTemporary(FACTION_SCOURGE, TEMPFACTION_RESTORE_RESPAWN);
-    if (Creature* pVectus = GetSingleCreatureFromStorage(NPC_VECTUS))
-    {
-        pVectus->SetFactionTemporary(FACTION_SCOURGE, TEMPFACTION_RESTORE_RESPAWN);
-        DoScriptText(YELL_VECTUS_GAMBIT, pVectus);
-    }
-}
-
-InstanceData* GetInstanceData_instance_scholomance(Map* pMap)
-{
-    return new instance_scholomance(pMap);
-}
-
-bool ProcessEventId_event_spell_gandling_shadow_portal(uint32 uiEventId, Object* pSource, Object* /*pTarget*/, bool /*bIsStart*/)
-{
-    if (pSource->GetTypeId() == TYPEID_UNIT)
-    {
-        if (instance_scholomance* pInstance = (instance_scholomance*)((Creature*)pSource)->GetInstanceData())
+        // Retry at the shared one-second cadence, including reconstructed actors.
+        if (slot.attempts && m_retryTimer) continue;
+        auto const& pos = request.position;
+        if (Creature* actor = player->SummonCreature(request.entry, pos.x, pos.y, pos.z, pos.o, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, request.lifetime))
         {
-            // Check if we are handling an event associated with the room events of gandling
-            for (unsigned int aGandlingEvent : aGandlingEvents)
+            slot.guid = actor->GetObjectGuid();
+            slot.attempts = 0;
+            actor->SetActiveObjectState(true);
+            m_progress.paladinCreated |= 1u << i;
+            changed = true;
+        }
+        else if (++slot.attempts >= 5) { FailPaladinEvent(); return; }
+    }
+    if (changed) SaveState();
+}
+
+void instance_scholomance::RestoreCharger()
+{
+    if (m_progress.paladin != DONE || !m_progress.chargerUntil || m_progress.chargerUntil <= uint64(time(nullptr)) || m_chargerAttempts >= 5) return;
+    if (Creature* horse = instance->GetCreature(m_charger)) if (horse->IsAlive()) return;
+    Player* player = GetPlayerInMap(true, false);
+    if (!player) return;
+    ++m_chargerAttempts;
+    auto const& pos = m_progress.chargerPosition;
+    uint32 remaining = uint32(m_progress.chargerUntil - uint64(time(nullptr))) * 1000;
+    if (Creature* horse = player->SummonCreature(NPC_FALLEN_CHARGER, pos[0], pos[1], pos[2], pos[3], TEMPSPAWN_TIMED_OR_DEAD_DESPAWN, remaining))
+    {
+        m_charger = horse->GetObjectGuid();
+        m_chargerAttempts = 0;
+        horse->SetActiveObjectState(true);
+    }
+}
+
+void instance_scholomance::OnCreatureEnterCombat(Creature* creature)
+{
+    uint32 type = BossType(creature->GetEntry());
+    if (type < MAX_ENCOUNTER) SetData(type, IN_PROGRESS);
+}
+
+void instance_scholomance::OnCreatureEvade(Creature* creature)
+{
+    uint32 type = BossType(creature->GetEntry());
+    if (type < MAX_ENCOUNTER) SetData(type, FAIL);
+    for (uint32 i = 0; i < MAX_EVENTS; ++i)
+        for (ObjectGuid guid : m_portals[i].guards)
+            if (guid == creature->GetObjectGuid()) { ClearPortal(i); return; }
+    for (auto const& actor : m_paladinActors)
+        if (actor.guid == creature->GetObjectGuid()) { FailPaladinEvent(); return; }
+}
+
+void instance_scholomance::OnCreatureDeath(Creature* creature)
+{
+    uint32 type = BossType(creature->GetEntry());
+    if (type < MAX_ENCOUNTER) SetData(type, DONE);
+    ObjectGuid guid = creature->GetObjectGuid();
+    for (uint32 i = 0; i < m_entranceActors.size(); ++i)
+        if (m_entranceActors[i].guid == guid)
+        {
+            m_progress.entranceDead |= 1u << i;
+            m_entranceActors[i].guid.Clear();
+            SaveState();
+            return;
+        }
+    for (uint32 room = 0; room < MAX_EVENTS; ++room)
+        for (uint32 slot = 0; slot < 4; ++slot)
+            if (m_portals[room].guards[slot] == guid)
             {
-                if (uiEventId == aGandlingEvent)
+                auto& batch = m_portals[room];
+                batch.guards[slot].Clear();
+                batch.dead |= 1u << slot;
+                if (batch.dead == (room == 0 ? 15u : 7u)) ClearPortal(room);
+                return;
+            }
+    for (uint32 i = 0; i < m_paladinActors.size(); ++i)
+        if (m_paladinActors[i].guid == guid)
+        {
+            m_progress.paladinDead |= 1u << i;
+            m_paladinActors[i].guid.Clear();
+            if (creature->GetEntry() == NPC_DARKREAVER)
+            {
+                m_progress.paladin = DONE;
+                m_progress.chargerPosition = {{creature->GetPositionX(), creature->GetPositionY(), creature->GetPositionZ(), creature->GetOrientation()}};
+                // EventAI still performs the normal death summon. Only a missing
+                // horse is restored, without replaying the boss death or loot.
+                if (SpellEntry const* spell = sSpellTemplate.LookupEntry<SpellEntry>(23261))
                 {
-                    // Set data in progress for the current event and store current event
-                    pInstance->HandlePortalEvent(uiEventId, SPECIAL);
-                    // return false, to allow the DB-scripts to summon some NPCSs
-                    return false;
+                    int32 duration = GetSpellDuration(spell);
+                    if (duration > 0) m_progress.chargerUntil = uint64(time(nullptr)) + (duration + 999) / 1000;
                 }
+            }
+            SaveState();
+            return;
+        }
+}
+
+void instance_scholomance::OnCreatureDespawn(Creature* creature)
+{
+    ObjectGuid guid = creature->GetObjectGuid();
+    if ((creature->GetEntry() == NPC_DARKMASTER_GANDLING || creature->GetEntry() == NPC_KIRTONOS) &&
+        m_npcEntryGuidStore[creature->GetEntry()] == guid)
+    {
+        m_npcEntryGuidStore.erase(creature->GetEntry());
+        m_kirtonosTimer = creature->GetEntry() == NPC_KIRTONOS ? 0 : m_kirtonosTimer;
+        SetData(BossType(creature->GetEntry()), FAIL);
+        SyncDoors();
+    }
+    for (uint32 room = 0; room < MAX_EVENTS; ++room)
+        for (ObjectGuid guard : m_portals[room].guards)
+            if (guard == guid) { ClearPortal(room); return; }
+    for (auto& actor : m_entranceActors)
+        if (actor.guid == guid) actor.guid.Clear();
+    for (auto const& actor : m_paladinActors)
+        if (actor.guid == guid) { FailPaladinEvent(); return; }
+    if (m_charger == guid && m_progress.paladin == DONE)
+    {
+        m_charger.Clear();
+        m_progress.chargerUntil = 0;
+        SaveState();
+    }
+}
+
+void instance_scholomance::Update(uint32 diff)
+{
+    if (m_retryTimer > diff) m_retryTimer -= diff;
+    else m_retryTimer = 0;
+    if (m_kirtonosTimer)
+    {
+        if (m_kirtonosTimer > diff) m_kirtonosTimer -= diff;
+        else
+        {
+            m_kirtonosTimer = 0;
+            SyncDoors();
+            if (GameObject* brazier = GetSingleGameObjectFromStorage(GO_BRAZIER_HERALD))
+            {
+                brazier->SetLootState(GO_READY);
+                brazier->SetGoState(GO_STATE_READY);
             }
         }
     }
+    if (m_progress.gambit == IN_PROGRESS)
+    {
+        if (m_progress.gambitRemaining > diff) m_progress.gambitRemaining -= diff;
+        else
+        {
+            m_progress.gambitRemaining = 0;
+            m_progress.gambit = DONE;
+            SaveState();
+            for (ObjectGuid guid : m_viewingRoom) m_gambitPending[guid] = 0;
+            if (Creature* vectus = GetSingleCreatureFromStorage(NPC_VECTUS))
+                if (vectus->IsAlive()) DoScriptText(YELL_VECTUS_GAMBIT, vectus);
+        }
+    }
+    UpdatePortals(diff);
+    UpdatePaladin(diff);
+    if (!m_retryTimer)
+    {
+        RestoreGandling(false);
+        RestoreEntrance();
+        RestoreCharger();
+        for (auto itr = m_gambitPending.begin(); itr != m_gambitPending.end(); )
+        {
+            Creature* actor = instance->GetCreature(itr->first);
+            if (actor) ApplyGambit(actor);
+            if (!actor || !actor->IsAlive() || actor->GetEntry() != NPC_SCHOLOMANCE_STUDENT || actor->HasAura(SPELL_STUDENT_TRANSFORM) || ++itr->second >= 5)
+                itr = m_gambitPending.erase(itr);
+            else ++itr;
+        }
+        m_retryTimer = 1000;
+    }
+    if (m_checkpointTimer > diff) m_checkpointTimer -= diff;
+    else
+    {
+        if (m_progress.gambit == IN_PROGRESS || (m_progress.paladin == IN_PROGRESS && !m_paladinPaused)) SaveState();
+        m_checkpointTimer = 5000;
+    }
+}
+
+InstanceData* GetInstanceData_instance_scholomance(Map* map) { return new instance_scholomance(map); }
+
+bool ProcessEventId_event_spell_gandling_shadow_portal(uint32 eventId, Object* source, Object* /*target*/, bool isStart)
+{
+    if (!source || source->GetTypeId() != TYPEID_UNIT || !isStart) return false;
+    Creature* boss = static_cast<Creature*>(source);
+    if (boss->GetMapId() != 289 || boss->GetEntry() != NPC_DARKMASTER_GANDLING) return false;
+    if (auto* data = static_cast<instance_scholomance*>(boss->GetInstanceData()))
+    {
+        for (uint32 event : aGandlingEvents)
+            if (eventId == event)
+            {
+                data->HandlePortalEvent(eventId, boss);
+                return true; // The instance acknowledges each summon; do not also run the DB batch.
+            }
+    }
     return false;
 }
 
-bool ProcessEventId_dawn_gambit(uint32 uiEventId, Object* pSource, Object* /*pTarget*/, bool /*bIsStart*/)
+bool ProcessEventId_dawn_gambit(uint32 eventId, Object* source, Object* /*target*/, bool isStart)
 {
-    if (instance_scholomance* pInstance = (instance_scholomance*)((Creature*)pSource)->GetInstanceData())
-    {
-        if (uiEventId == EVENT_ID_DAWN_GAMBIT)
+    if (eventId != EVENT_ID_DAWN_GAMBIT || !source || !isStart || !source->isType(TYPEMASK_CREATURE_OR_GAMEOBJECT)) return false;
+    auto* object = static_cast<WorldObject*>(source);
+    if (object->GetMapId() == 289)
+        if (auto* data = static_cast<instance_scholomance*>(object->GetInstanceData()))
         {
-            pInstance->HandleDawnGambitEvent();
+            data->HandleDawnGambitEvent();
             return true;
         }
-    }
     return false;
+}
+
+bool ProcessEventId_scholomance_paladin(uint32 eventId, Object* source, Object* /*target*/, bool isStart)
+{
+    if (eventId != EVENT_ID_PALADIN || !source || source->GetTypeId() != TYPEID_PLAYER || !isStart) return false;
+    Player* player = static_cast<Player*>(source);
+    if (player->GetMapId() != 289) return true;
+    if (auto* data = static_cast<instance_scholomance*>(player->GetInstanceData())) data->StartPaladinEvent(player);
+    return true;
+}
+
+bool GOUse_scholomance_brazier(Player* player, GameObject* go)
+{
+    if (!player || !player->IsAlive() || player->GetMap() != go->GetMap() || go->GetMapId() != 289) return true;
+    if (auto* data = static_cast<instance_scholomance*>(go->GetInstanceData())) return !data->StartKirtonosEvent();
+    return true;
 }
 
 void AddSC_instance_scholomance()
 {
-    Script* pNewScript = new Script;
-    pNewScript->Name = "instance_scholomance";
-    pNewScript->GetInstanceData = &GetInstanceData_instance_scholomance;
-    pNewScript->RegisterSelf();
-
-    pNewScript = new Script;
-    pNewScript->Name = "event_spell_gandling_shadow_portal";
-    pNewScript->pProcessEventId = &ProcessEventId_event_spell_gandling_shadow_portal;
-    pNewScript->RegisterSelf();
-
-    pNewScript = new Script;
-    pNewScript->Name = "event_dawn_gambit";
-    pNewScript->pProcessEventId = &ProcessEventId_dawn_gambit;
-    pNewScript->RegisterSelf();
+    Script* script = new Script;
+    script->Name = "instance_scholomance";
+    script->GetInstanceData = &GetInstanceData_instance_scholomance;
+    script->RegisterSelf();
+    script = new Script;
+    script->Name = "event_spell_gandling_shadow_portal";
+    script->pProcessEventId = &ProcessEventId_event_spell_gandling_shadow_portal;
+    script->RegisterSelf();
+    script = new Script;
+    script->Name = "event_dawn_gambit";
+    script->pProcessEventId = &ProcessEventId_dawn_gambit;
+    script->RegisterSelf();
+    script = new Script;
+    script->Name = "event_scholomance_paladin";
+    script->pProcessEventId = &ProcessEventId_scholomance_paladin;
+    script->RegisterSelf();
+    script = new Script;
+    script->Name = "go_scholomance_brazier";
+    script->pGOUse = &GOUse_scholomance_brazier;
+    script->RegisterSelf();
 }

@@ -5,6 +5,9 @@
 #ifndef DEF_SCHOLOMANCE_H
 #define DEF_SCHOLOMANCE_H
 
+#include "scholomance_state.h"
+#include <array>
+
 enum
 {
     MAX_ENCOUNTER           = 10,
@@ -64,6 +67,11 @@ enum
     EVENT_ID_RAVENIAN       = 5623,
 
     EVENT_ID_DAWN_GAMBIT    = 5140,
+    EVENT_ID_PALADIN        = 8436,
+    QUEST_JUDGMENT_REDEMPTION = 7647,
+    NPC_DARKREAVER          = 14516,
+    NPC_FALLEN_CHARGER      = 14568,
+    GO_BRAZIER_HERALD       = 175564,
 
     FACTION_SCOURGE         = 233,
 
@@ -102,12 +110,19 @@ static const Position aEntranceRoomSpawnLocs[17] =
     {209.233f, 73.2819f, 104.80f, 1.29154f}    // patrolling necrofiend
 };
 
+struct ScholomanceActor
+{
+    ObjectGuid guid;
+    uint8 attempts = 0;
+};
+
 struct GandlingEventData
 {
-    GandlingEventData() : m_bIsActive(false) {}
-    bool m_bIsActive;
-    ObjectGuid m_doorGuid;
-    std::set<uint32> m_sAddGuids;
+    bool active = false;
+    uint32 timer = 0;
+    uint32 dead = 0;
+    uint8 attempts = 0;
+    std::array<ObjectGuid, 4> guards{};
 };
 
 struct BoxVolume
@@ -123,49 +138,61 @@ static const BoxVolume aEntranceRoom = { 174.13f, 63.84f, 104.0f, 54, 44 };
 
 static const uint32 aGandlingEvents[MAX_EVENTS] = {EVENT_ID_POLKELT, EVENT_ID_THEOLEN, EVENT_ID_MALICIA, EVENT_ID_ILLUCIA, EVENT_ID_BAROV, EVENT_ID_RAVENIAN};
 
-typedef std::map<uint32, GandlingEventData> GandlingEventMap;
-
 class instance_scholomance : public ScriptedInstance
 {
     public:
-        instance_scholomance(Map* pMap);
-        ~instance_scholomance() {}
-
+        instance_scholomance(Map* map);
         void Initialize() override;
-
-        void OnCreatureEnterCombat(Creature* pCreature) override;
-        void OnCreatureEvade(Creature* pCreature) override;
-        void OnCreatureDeath(Creature* pCreature) override;
-
-        void OnCreatureCreate(Creature* pCreature) override;
-        void OnObjectCreate(GameObject* pGo) override;
-        void OnPlayerEnter(Player* pPlayer) override;
-
-        void HandlePortalEvent(uint32 uiEventId, uint32 uiData);
+        void OnCreatureEnterCombat(Creature* creature) override;
+        void OnCreatureEvade(Creature* creature) override;
+        void OnCreatureDeath(Creature* creature) override;
+        void OnCreatureDespawn(Creature* creature) override;
+        void OnCreatureRespawn(Creature* creature) override;
+        void OnCreatureCreate(Creature* creature) override;
+        void OnObjectCreate(GameObject* go) override;
+        void OnPlayerEnter(Player* player) override;
+        void OnPlayerLeave(Player* player) override;
+        void HandlePortalEvent(uint32 eventId, Creature* source);
         void HandleDawnGambitEvent();
-
-        void SetData(uint32 uiType, uint32 uiData) override;
-        uint32 GetData(uint32 uiType) const override;
-
-        void Update(const uint32 diff) override;
-
+        bool StartPaladinEvent(Player* player);
+        bool StartKirtonosEvent();
+        void SetData(uint32 type, uint32 data) override;
+        uint32 GetData(uint32 type) const override;
+        void Update(uint32 diff) override;
         const char* Save() const override { return m_strInstData.c_str(); }
-        void Load(const char* chrIn) override;
+        void Load(char const* data) override;
 
     private:
-        void DoSpawnGandlingIfCan(bool bByPlayerEnter);
-        void DoRespawnEntranceRoom(Player* pSummoner);
+        void SaveState();
+        void SyncDoors();
+        void SetDoor(uint32 entry, bool open);
+        void PrepareEntrance();
+        void RestoreEntrance();
+        void SuppressEntranceActors();
+        void RestoreGandling(bool announce);
+        void ClearPortal(uint32 room);
+        void UpdatePortals(uint32 diff);
+        void ApplyGambit(Creature* creature);
+        void UpdatePaladin(uint32 diff);
+        void ClearPaladinActors();
+        void FailPaladinEvent();
+        void RestoreCharger();
 
-        uint32 m_uiGambitTransformTimer;
-        uint32 m_auiEncounter[MAX_ENCOUNTER];
+        ScholomanceProgress m_progress;
         std::string m_strInstData;
-
-        uint32 m_uiGandlingEvent;
-        GandlingEventMap m_mGandlingData;
-
-        bool m_bIsRoomReset;
-        GuidSet m_sEntranceRoomGuids;
-        GuidSet m_sViewingRoomGuids;
+        std::array<ScholomanceActor, 17> m_entranceActors{};
+        std::array<ScholomanceActor, 14> m_paladinActors{};
+        std::array<GandlingEventData, MAX_EVENTS> m_portals{};
+        GuidSet m_staticEntrance;
+        GuidSet m_viewingRoom;
+        std::map<ObjectGuid, uint8> m_gambitPending;
+        ObjectGuid m_charger;
+        uint32 m_retryTimer = 0;
+        uint32 m_checkpointTimer = 5000;
+        uint32 m_kirtonosTimer = 0;
+        uint8 m_gandlingAttempts = 0;
+        uint8 m_chargerAttempts = 0;
+        bool m_paladinPaused = false;
 };
 
 #endif

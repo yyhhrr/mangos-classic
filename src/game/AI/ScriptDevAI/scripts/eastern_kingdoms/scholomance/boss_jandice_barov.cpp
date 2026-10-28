@@ -16,8 +16,8 @@
 
 /* ScriptData
 SDName: Boss_jandicebarov
-SD%Complete: 90
-SDComment: Jandice's Illusions are missing their AoE immunity, they should only be vunerable to direct damage (missing core feature ?)
+SD%Complete: 100
+SDComment: Native illusion summons, direct damage vulnerability and owner-scoped cleanup
 SDCategory: Scholomance
 EndScriptData
 
@@ -28,7 +28,6 @@ EndScriptData
 enum
 {
     SPELL_CURSE_OF_BLOOD        = 16098,
-    SPELL_SPREAD_ILLUSIONS      = 17772,
     SPELL_SUMMON_ILLUSIONS      = 17773,
     SPELL_SPREAD_JANDICE        = 17774,
     SPELL_BANISH                = 8994,
@@ -41,6 +40,7 @@ struct boss_jandicebarovAI : public ScriptedAI
     uint32 m_uiCurseOfBloodTimer;
     uint32 m_uiIllusionTimer;
     uint32 m_uiBanishTimer;
+    GuidSet m_illusions;
 
     void Reset() override
     {
@@ -51,7 +51,23 @@ struct boss_jandicebarovAI : public ScriptedAI
 
     void JustSummoned(Creature* pSummoned) override
     {
-        pSummoned->CastSpell(pSummoned, SPELL_SPREAD_ILLUSIONS, TRIGGERED_OLD_TRIGGERED);
+        if (pSummoned->GetEntry() != 11439) return;
+        pSummoned->SetAOEImmune(true);
+        m_illusions.insert(pSummoned->GetObjectGuid());
+        // The existing spawn EventAI owns17772; do not cast it twice.
+    }
+
+    void SummonedCreatureJustDied(Creature* summoned) override { m_illusions.erase(summoned->GetObjectGuid()); }
+    void SummonedCreatureDespawn(Creature* summoned) override { m_illusions.erase(summoned->GetObjectGuid()); }
+
+    void EnterEvadeMode() override
+    {
+        GuidSet illusions;
+        illusions.swap(m_illusions);
+        for (ObjectGuid guid : illusions)
+            if (Creature* illusion = m_creature->GetMap()->GetAnyTypeCreature(guid))
+                if (illusion->IsAlive()) illusion->ForcedDespawn();
+        ScriptedAI::EnterEvadeMode();
     }
 
     void UpdateAI(const uint32 uiDiff) override

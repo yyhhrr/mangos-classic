@@ -23,7 +23,8 @@ EndScriptData
 
 */
 
-#include "AI/ScriptDevAI/include/sc_common.h"/* ContentData
+#include "AI/ScriptDevAI/include/sc_common.h"
+/* ContentData
 npc_spectral_tutor
 EndContentData */
 
@@ -50,10 +51,13 @@ struct npc_spectral_tutorAI : public ScriptedAI
     uint32 m_uiSilenceTimer;
     uint32 m_uiProjectionTimer;
     uint32 m_uiProjEndTimer;
+    uint32 m_projectionTimeout;
+    GuidSet m_projections;
 
     void Reset() override
     {
         m_uiProjEndTimer    = 0;
+        m_projectionTimeout = 0;
         m_uiManaBurnTimer   = urand(4000, 19000);
         m_uiSilenceTimer    = urand(0, 3000);
         m_uiProjectionTimer = urand(12000, 13000);
@@ -61,23 +65,58 @@ struct npc_spectral_tutorAI : public ScriptedAI
 
     void EnterEvadeMode() override
     {
-        if (m_uiProjEndTimer)
-            return;
-
+        CancelProjection();
         ScriptedAI::EnterEvadeMode();
+    }
+
+    void JustSummoned(Creature* summoned) override
+    {
+        if (summoned->GetEntry() == 11263) m_projections.insert(summoned->GetObjectGuid());
+    }
+
+    void SummonedCreatureJustDied(Creature* summoned) override { m_projections.erase(summoned->GetObjectGuid()); }
+    void SummonedCreatureDespawn(Creature* summoned) override { m_projections.erase(summoned->GetObjectGuid()); }
+
+    void CancelProjection()
+    {
+        m_uiProjEndTimer = m_projectionTimeout = 0;
+        m_creature->RemoveAurasDueToSpell(SPELL_IMAGE_PROJECTION);
+        GuidSet projections;
+        projections.swap(m_projections);
+        for (ObjectGuid guid : projections)
+            if (Creature* projection = m_creature->GetMap()->GetAnyTypeCreature(guid))
+                if (projection->IsAlive()) projection->ForcedDespawn();
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        CancelProjection();
+        ScriptedAI::JustDied(killer);
     }
 
     void UpdateAI(const uint32 uiDiff) override
     {
-        if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
-            return;
-
+        // Projection has a self stun/invisibility aura. Its cleanup must advance
+        // even while target selection cannot supply a victim.
         if (m_uiProjEndTimer)
         {
+            if (!m_creature->IsInCombat() || m_creature->getThreatManager().isThreatListEmpty())
+            {
+                EnterEvadeMode();
+                return;
+            }
+            if (m_projectionTimeout <= uiDiff)
+            {
+                CancelProjection();
+                return;
+            }
+            m_projectionTimeout -= uiDiff;
             if (m_uiProjEndTimer <= uiDiff)
             {
                 if (DoCastSpellIfCan(m_creature, SPELL_IMAGE_PROJECTION_HEAL) == CAST_OK)
-                    m_uiProjEndTimer = 0;
+                    CancelProjection();
+                else
+                    m_uiProjEndTimer = 250;
             }
             else
                 m_uiProjEndTimer -= uiDiff;
@@ -85,6 +124,9 @@ struct npc_spectral_tutorAI : public ScriptedAI
             // no other actions during Image Projection
             return;
         }
+
+        if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
+            return;
 
         if (m_uiManaBurnTimer < uiDiff)
         {
@@ -106,8 +148,13 @@ struct npc_spectral_tutorAI : public ScriptedAI
         {
             if (DoCastSpellIfCan(m_creature, SPELL_IMAGE_PROJECTION) == CAST_OK)
             {
-                DoCastSpellIfCan(m_creature, SPELL_IMAGE_PROJECTION_SUMMON, CAST_TRIGGERED);
-                m_uiProjEndTimer = 1000;
+                if (DoCastSpellIfCan(m_creature, SPELL_IMAGE_PROJECTION_SUMMON, CAST_TRIGGERED) == CAST_OK)
+                {
+                    m_uiProjEndTimer = 1000;
+                    m_projectionTimeout = 8000;
+                }
+                else
+                    CancelProjection();
                 m_uiProjectionTimer = urand(18000, 25000);
             }
         }
