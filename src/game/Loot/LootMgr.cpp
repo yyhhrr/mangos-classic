@@ -2668,6 +2668,10 @@ void Loot::GetLootItemsListFor(Player* player, LootItemList& lootList)
 Loot::~Loot()
 {
     SendReleaseForAll();
+
+    // Stop any ongoing group loot rolls.
+    m_roll.clear();
+
     for (auto& m_lootItem : m_lootItems)
         delete m_lootItem;
 }
@@ -2675,6 +2679,7 @@ Loot::~Loot()
 void Loot::Clear()
 {
     ClearGuaranteedItems();
+    m_roll.clear();
     for (auto& m_lootItem : m_lootItems)
         delete m_lootItem;
     m_lootItems.clear();
@@ -2683,7 +2688,6 @@ void Loot::Clear()
     m_ownerSet.clear();
     m_masterOwnerGuid.Clear();
     m_currentLooterGuid.Clear();
-    m_roll.clear();
     m_maxEnchantSkill = 0;
     m_haveItemOverThreshold = false;
     m_isChecked = false;
