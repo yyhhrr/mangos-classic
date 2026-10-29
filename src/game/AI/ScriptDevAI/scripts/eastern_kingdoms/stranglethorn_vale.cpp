@@ -17,7 +17,7 @@
 /* ScriptData
 SDName: Stranglethorn_Vale
 SD%Complete: 100
-SDComment: Quest support: 215, 592
+SDComment: Quest support: 215, 349, 592, 3625
 SDCategory: Stranglethorn Vale
 EndScriptData
 
@@ -29,11 +29,16 @@ EndScriptData
 #include "Entities/TemporarySpawn.h"
 #include "Entities/GossipDef.h"
 #include "Server/WorldSession.h"
+#include "Maps/SpawnGroup.h"
+#include "Maps/SpawnManager.h"
+#include "world_eastern_kingdoms.h"
 
 /* ContentData
 npc_private_thorsen
 mob_yenniku
 mob_colonel_kurzen
+npc_galvan_the_ancient
+npc_witch_doctor_unbagwa
 EndContentData */
 
 /*######
@@ -134,6 +139,34 @@ struct mob_colonel_kurzenAI : public CombatAI
         AddCombatAction(KURZEN_ACTION_GAROTTE, true);
     }
 
+    uint32 m_castFailures = 0;
+
+    void ClearVanish()
+    {
+        m_creature->RemoveAurasDueToSpell(SPELL_STEALTH);
+        m_creature->SetCombatOnlyStealth(false);
+        m_castFailures = 0;
+    }
+
+    void Reset() override
+    {
+        CombatAI::Reset();
+        ClearVanish();
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        ClearVanish();
+        CombatAI::JustDied(killer);
+    }
+
+    void FinishVanish()
+    {
+        ClearVanish();
+        ResetCombatAction(KURZEN_ACTION_VANISH, urand(6000, 12000));
+        DisableCombatAction(KURZEN_ACTION_GAROTTE);
+    }
+
     void ExecuteAction(uint32 action) override
     {
         switch (action)
@@ -141,25 +174,375 @@ struct mob_colonel_kurzenAI : public CombatAI
             case KURZEN_ACTION_VANISH:
             {
                 m_creature->SetCombatOnlyStealth(true); // must be before smoke bomb
-                DoCastSpellIfCan(nullptr, SPELL_SMOKE_BOMB);
-                ResetCombatAction(KURZEN_ACTION_GAROTTE, urand(2000, 6000));
-                DisableCombatAction(action);
+                if (DoCastSpellIfCan(nullptr, SPELL_SMOKE_BOMB) == CAST_OK)
+                {
+                    m_castFailures = 0;
+                    ResetCombatAction(KURZEN_ACTION_GAROTTE, urand(2000, 6000));
+                    DisableCombatAction(action);
+                }
+                else
+                {
+                    m_creature->SetCombatOnlyStealth(false);
+                    if (++m_castFailures >= 3)
+                        FinishVanish();
+                    else
+                        ResetCombatAction(action, 1000);
+                }
                 break;
             }
             case KURZEN_ACTION_GAROTTE:
             {
-                // Safety check if we still have Stealth Aura
-                if (m_creature->HasAura(SPELL_STEALTH))
-                    DoCastSpellIfCan(m_creature->GetVictim(), SPELL_GARROTE);
-
-                m_creature->SetCombatOnlyStealth(false);
-                ResetCombatAction(KURZEN_ACTION_VANISH, urand(6000, 12000));
-                DisableCombatAction(action);
+                if (!m_creature->HasAura(SPELL_STEALTH) ||
+                    DoCastSpellIfCan(m_creature->GetVictim(), SPELL_GARROTE) == CAST_OK || ++m_castFailures >= 3)
+                    FinishVanish();
+                else
+                    ResetCombatAction(action, 1000);
                 break;
             }
         }
     }
 };
+
+/* Each acceptance owns its completion; the NPC only shares the presentation. */
+struct npc_galvan_the_ancientAI : public ScriptedAI
+{
+    explicit npc_galvan_the_ancientAI(Creature* creature) : ScriptedAI(creature) {}
+
+    enum { QUEST_WEAPONRY = 3625, QUEST_EXPERT = 2765, SAY_WEAPON_READY = 4542 };
+    std::map<ObjectGuid, uint32> m_players;
+    uint32 m_otherScene = 0;
+    uint32 m_timeout = 0;
+    uint32 m_originalEmote = 0;
+    bool m_forging = false;
+    bool m_holdingActive = false;
+    bool m_originalActive = false;
+
+    void EndPresentation()
+    {
+        if (m_forging)
+            m_creature->HandleEmote(m_originalEmote);
+        m_forging = false;
+    }
+
+    void Finish()
+    {
+        EndPresentation();
+        m_players.clear();
+        m_timeout = 0;
+        if (m_holdingActive)
+            m_creature->SetActiveObjectState(m_originalActive);
+        m_holdingActive = false;
+    }
+
+    void Reset() override { Finish(); }
+    void JustDied(Unit* /*killer*/) override { Finish(); }
+    void JustRespawned() override { Finish(); m_otherScene = 0; }
+
+    void OtherSceneStarted()
+    {
+        // 2765 retains its original 54-second DB movement/completion script.
+        // Pause our presentation before that script starts changing emotes.
+        EndPresentation();
+        m_otherScene = 55000;
+        for (auto& player : m_players)
+            player.second = 5000;
+    }
+
+    void Request(Player* player)
+    {
+        if (!m_creature->IsAlive() || !player || player->GetMap() != m_creature->GetMap() ||
+            player->GetQuestStatus(QUEST_WEAPONRY) != QUEST_STATUS_INCOMPLETE)
+            return;
+        if (m_players.count(player->GetObjectGuid()))
+            return; // Reopening gossip must not reset an existing timer.
+        if (!m_holdingActive)
+        {
+            m_originalActive = m_creature->HasActiveObjectState();
+            m_creature->SetActiveObjectState(true);
+            m_holdingActive = true;
+            m_timeout = 120000;
+        }
+        m_players.emplace(player->GetObjectGuid(), 5000);
+    }
+
+    void UpdateAI(uint32 diff) override
+    {
+        if (m_otherScene)
+            m_otherScene = m_otherScene > diff ? m_otherScene - diff : 0;
+        if (!m_players.empty())
+        {
+            if (!m_creature->IsAlive() || m_timeout <= diff)
+                Finish();
+            else
+            {
+                m_timeout -= diff;
+                if (!m_otherScene && !m_creature->IsInCombat())
+                {
+                    if (!m_forging)
+                    {
+                        m_originalEmote = m_creature->GetUInt32Value(UNIT_NPC_EMOTESTATE);
+                        m_creature->HandleEmote(EMOTE_STATE_WORK);
+                        m_forging = true;
+                    }
+                    else
+                    {
+                        bool completed = false;
+                        for (auto itr = m_players.begin(); itr != m_players.end();)
+                        {
+                            Player* player = m_creature->GetMap()->GetPlayer(itr->first);
+                            if (!player || player->GetQuestStatus(QUEST_WEAPONRY) != QUEST_STATUS_INCOMPLETE)
+                                itr = m_players.erase(itr);
+                            else if (itr->second <= diff)
+                            {
+                                player->AreaExploredOrEventHappens(QUEST_WEAPONRY);
+                                completed = true;
+                                itr = m_players.erase(itr);
+                            }
+                            else
+                            {
+                                itr->second -= diff;
+                                ++itr;
+                            }
+                        }
+                        if (completed)
+                            DoBroadcastText(SAY_WEAPON_READY, m_creature);
+                        if (m_players.empty())
+                            Finish();
+                    }
+                }
+            }
+        }
+        if (m_creature->SelectHostileTarget() && m_creature->GetVictim())
+            DoMeleeAttackIfReady();
+    }
+};
+
+bool QuestAccept_npc_galvan_the_ancient(Player* player, Creature* creature, Quest const* quest)
+{
+    if (auto* ai = dynamic_cast<npc_galvan_the_ancientAI*>(creature->AI()))
+    {
+        if (quest->GetQuestId() == npc_galvan_the_ancientAI::QUEST_WEAPONRY)
+            ai->Request(player);
+        else if (quest->GetQuestId() == npc_galvan_the_ancientAI::QUEST_EXPERT)
+            ai->OtherSceneStarted();
+    }
+    return false;
+}
+
+bool GossipHello_npc_galvan_the_ancient(Player* player, Creature* creature)
+{
+    // An interrupted/offline acceptance can be resumed without abandoning it.
+    if (auto* ai = dynamic_cast<npc_galvan_the_ancientAI*>(creature->AI()))
+        ai->Request(player);
+    player->PrepareQuestMenu(creature->GetObjectGuid());
+    player->SEND_GOSSIP_MENU(player->GetGossipTextId(creature), creature->GetObjectGuid());
+    return true;
+}
+
+/* Keep the original spawn groups and paths, but count real deaths, not removal. */
+struct npc_witch_doctor_unbagwaAI : public ScriptedAI
+{
+    explicit npc_witch_doctor_unbagwaAI(Creature* creature) : ScriptedAI(creature) {}
+
+    struct Attacker { bool dead; bool originalActive; };
+    std::map<ObjectGuid, Attacker> m_attackers;
+    uint32 m_wave = 0;
+    uint32 m_delay = 0;
+    uint32 m_timeout = 0;
+    uint32 m_spawnTimeout = 0;
+    uint32 m_castAttempts = 0;
+    uint32 m_originalFaction = 0;
+    uint32 m_originalFactionFlags = 0;
+    bool m_running = false;
+    bool m_channeling = false;
+    bool m_rosterComplete = false;
+    bool m_originalActive = false;
+    bool m_originalQuestgiver = false;
+
+    CreatureGroup* Group(uint32 wave) const
+    {
+        SpawnGroup* group = m_creature->GetMap()->GetSpawnManager().GetSpawnGroup(STV_FEVER_GROUP_01 + wave - 1);
+        return group ? group->GetCreatureGroup() : nullptr;
+    }
+
+    void ReleaseAttackers()
+    {
+        for (auto const& attacker : m_attackers)
+            if (Creature* actor = m_creature->GetMap()->GetCreature(attacker.first))
+                actor->SetActiveObjectState(attacker.second.originalActive);
+        m_attackers.clear();
+    }
+
+    void Finish(bool success)
+    {
+        if (!m_running)
+            return;
+        m_running = false; // Cleanup can synchronously invoke map hooks.
+        ReleaseAttackers();
+        for (uint32 wave = 1; wave <= 3; ++wave)
+        {
+            m_creature->GetMap()->GetVariableManager().SetVariable(STV_FEVER_GROUP_01 + wave - 1, 0);
+            if (!success)
+                if (CreatureGroup* group = Group(wave))
+                    group->Despawn();
+        }
+        m_creature->InterruptNonMeleeSpells(false, 12380);
+        m_creature->RemoveAurasDueToSpell(12380);
+        m_creature->SetFactionTemporary(m_originalFaction, m_originalFactionFlags);
+        if (m_originalQuestgiver)
+            m_creature->SetFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER);
+        else
+            m_creature->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER);
+        m_creature->SetActiveObjectState(m_originalActive);
+        m_wave = m_delay = m_timeout = m_spawnTimeout = 0;
+        m_rosterComplete = m_channeling = false;
+    }
+
+    void Begin()
+    {
+        if (m_running || !m_creature->IsAlive())
+            return;
+        m_originalActive = m_creature->HasActiveObjectState();
+        m_originalQuestgiver = m_creature->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER);
+        m_originalFaction = m_creature->GetFaction();
+        m_originalFactionFlags = m_creature->GetTemporaryFactionFlags();
+        m_running = true;
+        m_channeling = m_rosterComplete = false;
+        m_wave = m_castAttempts = 0;
+        m_delay = 5000;
+        m_timeout = 600000;
+        m_creature->SetActiveObjectState(true);
+        m_creature->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER);
+        m_creature->SetFactionTemporary(495, TEMPFACTION_RESTORE_RESPAWN);
+        // Drop leftover live actors before admitting a new round. Dead loot
+        // corpses have already left their groups and are deliberately retained.
+        for (uint32 wave = 1; wave <= 3; ++wave)
+        {
+            m_creature->GetMap()->GetVariableManager().SetVariable(STV_FEVER_GROUP_01 + wave - 1, 0);
+            if (CreatureGroup* group = Group(wave))
+                group->Despawn();
+        }
+    }
+
+    void CollectAttackers()
+    {
+        CreatureGroup* group = Group(m_wave);
+        if (!group)
+            return;
+        for (auto const& slot : group->GetGroupEntry().DbGuids)
+            if (Creature* actor = m_creature->GetMap()->GetCreature(slot.DbGuid))
+                if (actor->GetCreatureGroup() == group && actor->IsAlive() && !m_attackers.count(actor->GetObjectGuid()))
+                {
+                    m_attackers.emplace(actor->GetObjectGuid(), Attacker{false, actor->HasActiveObjectState()});
+                    actor->SetActiveObjectState(true);
+                }
+        m_rosterComplete = m_attackers.size() == group->GetGroupEntry().DbGuids.size();
+    }
+
+    void SpawnWave()
+    {
+        ReleaseAttackers();
+        ++m_wave;
+        CreatureGroup* group = Group(m_wave);
+        uint32 const counts[] = {3, 5, 6};
+        if (!group || group->GetGroupEntry().DbGuids.size() != counts[m_wave - 1])
+        {
+            Finish(false);
+            return;
+        }
+        m_rosterComplete = false;
+        m_spawnTimeout = 5000;
+        m_delay = 180000; // Bounded recovery even if attackers remain in combat.
+        m_creature->GetMap()->GetVariableManager().SetVariable(group->GetGroupId(), 1);
+        group->Spawn(true, true);
+        m_creature->GetMap()->GetVariableManager().SetVariable(group->GetGroupId(), 0);
+        CollectAttackers();
+    }
+
+    void ReceiveAIEvent(AIEventType type, Unit* sender, Unit* /*invoker*/, uint32 /*misc*/) override
+    {
+        if (!m_running || !m_wave || type != AI_EVENT_CUSTOM_A || !sender || sender->IsAlive())
+            return;
+        auto itr = m_attackers.find(sender->GetObjectGuid());
+        if (itr != m_attackers.end())
+            itr->second.dead = true; // Only the map's actual death hook sends this.
+    }
+
+    void JustDied(Unit* /*killer*/) override { Finish(false); }
+    void JustRespawned() override { Finish(false); }
+    void Reset() override {} // Ordinary inter-wave combat evades do not abort the ritual.
+
+    void UpdateAI(uint32 diff) override
+    {
+        if (m_running)
+        {
+            if (!m_creature->IsAlive() || m_timeout <= diff)
+                Finish(false);
+            else
+            {
+                m_timeout -= diff;
+                if (!m_wave)
+                {
+                    if (m_delay > diff)
+                        m_delay -= diff;
+                    else if (m_channeling)
+                        SpawnWave();
+                    else if (DoCastSpellIfCan(m_creature, 12380) == CAST_OK)
+                    {
+                        m_channeling = true;
+                        m_delay = 1000;
+                    }
+                    else if (++m_castAttempts >= 3)
+                        Finish(false);
+                    else
+                        m_delay = 1000;
+                }
+                else
+                {
+                    if (!m_rosterComplete)
+                        CollectAttackers();
+                    bool allDead = m_rosterComplete;
+                    bool lost = false;
+                    for (auto const& attacker : m_attackers)
+                    {
+                        if (attacker.second.dead)
+                            continue;
+                        allDead = false;
+                        Creature* actor = m_creature->GetMap()->GetCreature(attacker.first);
+                        if (!actor || !actor->IsAlive())
+                            lost = true;
+                    }
+                    if (lost || m_delay <= diff || (!m_rosterComplete && m_spawnTimeout <= diff))
+                        Finish(false);
+                    else if (allDead)
+                    {
+                        if (m_wave == 3)
+                            Finish(true);
+                        else
+                            SpawnWave();
+                    }
+                    else
+                    {
+                        m_delay -= diff;
+                        if (!m_rosterComplete)
+                            m_spawnTimeout -= diff;
+                    }
+                }
+            }
+        }
+        if (m_creature->SelectHostileTarget() && m_creature->GetVictim())
+            DoMeleeAttackIfReady();
+    }
+};
+
+bool QuestRewarded_npc_witch_doctor_unbagwa(Player* /*player*/, Creature* creature, Quest const* quest)
+{
+    if (quest->GetQuestId() != 349)
+        return false;
+    if (auto* ai = dynamic_cast<npc_witch_doctor_unbagwaAI*>(creature->AI()))
+        ai->Begin();
+    return true;
+}
 
 /*######
 ## npc_private_thorsen
@@ -446,6 +829,19 @@ struct npc_private_thorsenAI : public CreatureEventAI
 void AddSC_stranglethorn_vale()
 {
     Script* pNewScript = new Script;
+    pNewScript->Name = "npc_galvan_the_ancient";
+    pNewScript->GetAI = &GetNewAIInstance<npc_galvan_the_ancientAI>;
+    pNewScript->pQuestAcceptNPC = &QuestAccept_npc_galvan_the_ancient;
+    pNewScript->pGossipHello = &GossipHello_npc_galvan_the_ancient;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_witch_doctor_unbagwa";
+    pNewScript->GetAI = &GetNewAIInstance<npc_witch_doctor_unbagwaAI>;
+    pNewScript->pQuestRewardedNPC = &QuestRewarded_npc_witch_doctor_unbagwa;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
     pNewScript->Name = "npc_private_thorsen";
     pNewScript->GetAI = &GetNewAIInstance<npc_private_thorsenAI>;
     pNewScript->RegisterSelf();

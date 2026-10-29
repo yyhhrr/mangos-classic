@@ -50,20 +50,8 @@ struct world_map_eastern_kingdoms : public ScriptedMap
                 break;
         }
 
-        // Quest: Stranglethorn Fever Wave Died
-        switch (creatureGroup->GetGroupId())
-        {
-            case STV_FEVER_GROUP_01: 
-                HandleSTVFeverEvent(AI_EVENT_CUSTOM_EVENTAI_A);
-                break;
-            case STV_FEVER_GROUP_02: 
-                HandleSTVFeverEvent(AI_EVENT_CUSTOM_EVENTAI_B); 
-                break;
-            case STV_FEVER_GROUP_03: 
-                HandleSTVFeverEvent(AI_EVENT_CUSTOM_EVENTAI_C); 
-                break;             
-        }
-        
+        // Fever wave completion is driven by actual deaths, not group removal:
+        // ForcedDespawn also removes actors and must abort rather than advance.
     }
 
     void OnCreatureCreate(Creature* pCreature) override
@@ -87,6 +75,8 @@ struct world_map_eastern_kingdoms : public ScriptedMap
 
     void OnCreatureDeath(Creature* pCreature) override
     {
+        if (pCreature->GetEntry() == 1511 || pCreature->GetEntry() == 1514 || pCreature->GetEntry() == 1516)
+            HandleSTVFeverDeath(pCreature);
         switch (pCreature->GetEntry())
         {
             case NPC_NECROPOLIS_HEALTH:
@@ -118,16 +108,16 @@ struct world_map_eastern_kingdoms : public ScriptedMap
 
     void SetData(uint32 /*uiType*/, uint32 /*uiData*/) override {}
 
-    // Quest: Stranglethorn Fever Wave Died
-    // Inform Quest Handler to spawn next group if still alive
-    void HandleSTVFeverEvent(AIEventType eventType)
+    // Death is reported synchronously from Unit::Kill; the receiver checks its
+    // actual current-wave roster. ForcedDespawn does not call this death hook.
+    void HandleSTVFeverDeath(Creature* attacker)
     {
         std::vector<Creature*> const* witchDoctor = instance->GetCreatures("STV_WITCH_DOCTOR_UNBAGWA");
         if (witchDoctor)
         {
             for (Creature* creature : *witchDoctor)
                 if (creature->IsAlive())
-                    creature->AI()->SendAIEvent(eventType, creature, creature);
+                    creature->AI()->ReceiveAIEvent(AI_EVENT_CUSTOM_A, attacker, attacker, 0);
         }
     }
 };
