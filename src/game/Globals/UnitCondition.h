@@ -116,6 +116,8 @@ enum class UnitCondition
     HAS_SAME_OR_STRONGER_HELPFUL_AURA         = 87,
     // Value = planned protective spell ID; source = recipient, target = caster.
     HAS_SAME_OR_STRONGER_HELPFUL_PROTECTION   = 88,
+    // Value = AuraState ID (1..32); returns that ID while the state is active.
+    HAS_AURA_STATE                           = 89,
     MAX
 };
 

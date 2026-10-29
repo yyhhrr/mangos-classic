@@ -1076,6 +1076,7 @@ class WorldObject : public Object
         static Creature* SpawnCreature(uint32 dbGuid, Map* map, uint32 forcedEntry = 0);
 
         bool isActiveObject() const { return m_isActiveObject || m_viewPoint.hasViewers(); }
+        bool HasActiveObjectState() const { return m_isActiveObject; }
         void SetActiveObjectState(bool active);
 
         ViewPoint& GetViewPoint() { return m_viewPoint; }

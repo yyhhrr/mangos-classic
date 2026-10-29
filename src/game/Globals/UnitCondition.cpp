@@ -379,6 +379,8 @@ int32 UnitConditionMgr::getConditionValue(Unit const* source, Unit const* target
         case UnitCondition::CREATURE_ID: return source->GetEntry();
         case UnitCondition::STRING_ID: return source->HasStringId(value) ? value : 0;
         case UnitCondition::HAS_AURA: return source->HasAura(value) ? value : 0;
+        case UnitCondition::HAS_AURA_STATE:
+            return value > 0 && value <= 32 && source->HasAuraState(static_cast<AuraState>(value)) ? value : 0;
         case UnitCondition::IS_ENEMY: return source->IsEnemy(target);
         case UnitCondition::IS_SPEC_MELEE: break;
         case UnitCondition::IS_SPEC_TANK: break;

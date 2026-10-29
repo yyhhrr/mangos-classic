@@ -127,6 +127,7 @@ extern void AddSC_burning_steppes();
 extern void AddSC_dun_morogh();
 extern void AddSC_eastern_plaguelands();
 extern void AddSC_elwynn_forest();
+extern void AddSC_hillsbrad_foothills();
 extern void AddSC_hinterlands();
 extern void AddSC_ironforge();
 extern void AddSC_loch_modan();
@@ -333,6 +334,7 @@ void AddScripts()
     AddSC_dun_morogh();
     AddSC_eastern_plaguelands();
     AddSC_elwynn_forest();
+    AddSC_hillsbrad_foothills();
     AddSC_hinterlands();
     AddSC_ironforge();
     AddSC_loch_modan();
