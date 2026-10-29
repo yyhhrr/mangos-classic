@@ -7,8 +7,6 @@
 #include "Maps/SpawnGroup.h"
 #include <algorithm>
 #include <ctime>
-#include <limits>
-#include <map>
 #include <sstream>
 
 namespace
@@ -16,6 +14,10 @@ namespace
 enum { DMA_NOTICE_SPAWN = 1, DMA_NOTICE_AGGRO = 2, DMA_NOTICE_KILL = 3 };
 uint64 const dmaMaximumTime = 4102444800ULL;
 uint64 const dmaMaximumPeriod = 31 * 24 * 60 * 60;
+// VM's timestamp dump uses TIME_ZONE='+00:00': Mushgog starts at
+// 2010-03-24 11:00 UTC. Three adjacent seven-hour windows form a 21h cycle.
+uint64 const dmaRotationAnchor = 1269428400ULL;
+uint64 const dmaWindowSeconds = 7 * 60 * 60;
 template<class T> bool ArenaNumber(std::istream& in, T& result, uint64 maximum)
 {
     std::string token;
@@ -40,15 +42,26 @@ uint32 ArenaText(uint32 entry, uint32 kind)
 
 DireMaulArena::DireMaulArena(ScriptedInstance& owner, std::function<void()> save) : m_owner(owner), m_save(std::move(save)) {}
 uint64 DireMaulArena::Now() { return uint64(time(nullptr)); }
+uint64 DireMaulArena::WindowStart(uint64 now)
+{
+    return now < dmaRotationAnchor ? 0 : dmaRotationAnchor + (now - dmaRotationAnchor) / dmaWindowSeconds * dmaWindowSeconds;
+}
+uint32 DireMaulArena::WindowEntry(uint64 window)
+{
+    uint32 const entries[] = {DMA_MUSHGOG, DMA_SKARR, DMA_RAZZA};
+    return window < dmaRotationAnchor ? 0 : entries[((window - dmaRotationAnchor) / dmaWindowSeconds) % 3];
+}
 bool DireMaulArena::ArenaEntry(uint32 entry) { return entry == DMA_MUSHGOG || entry == DMA_RAZZA || entry == DMA_SKARR; }
 void DireMaulArena::Commit() { if (m_valid && m_save) m_save(); }
 uint32 DireMaulArena::GetGeneration() const { return m_state.generation; }
 uint32 DireMaulArena::GetSelectedEntry() const { return m_state.entry; }
 uint64 DireMaulArena::GetNextSpawnTime() const { return m_state.next; }
+uint64 DireMaulArena::GetWindowStart() const { return m_state.window; }
 std::string DireMaulArena::Encode(State const& state)
 {
     std::ostringstream out;
-    out << "DAM1 " << state.phase << ' ' << state.entry << ' ' << state.generation << ' ' << state.spawnSaid << ' ' << state.next;
+    out << (state.legacy ? "DAM1 " : "DAM2 ") << state.phase << ' ' << state.entry << ' ' << state.generation << ' ' << state.spawnSaid << ' ' << state.next;
+    if (!state.legacy) out << ' ' << state.window;
     return out.str();
 }
 std::string DireMaulArena::Save() const { return Encode(m_state); }
@@ -58,16 +71,29 @@ bool DireMaulArena::Decode(std::string const& text, State& result)
     if (text.empty()) { result = state; return true; }
     if (text.size() > 256) return false;
     std::istringstream in(text); std::string version;
-    if (!(in >> version) || version != "DAM1" || !ArenaNumber(in, state.phase, COOLDOWN) ||
+    if (!(in >> version) || (version != "DAM1" && version != "DAM2") || !ArenaNumber(in, state.phase, COOLDOWN) ||
         !ArenaNumber(in, state.entry, DMA_SKARR) || !ArenaNumber(in, state.generation, 1000000000) ||
         !ArenaNumber(in, state.spawnSaid, 1) || !ArenaNumber(in, state.next, dmaMaximumTime)) return false;
+    state.legacy = version == "DAM1";
+    if (!state.legacy && !ArenaNumber(in, state.window, dmaMaximumTime)) return false;
     in >> std::ws; if (!in.eof()) return false;
     if ((state.generation == 0) != (state.entry == 0)) return false;
     if (state.entry && !ArenaEntry(state.entry)) return false;
     if (state.phase == EMPTY && (state.entry || state.generation || state.spawnSaid || state.next)) return false;
-    if ((state.phase == REQUESTED || state.phase == ALIVE) && (!state.entry || !state.generation || state.next)) return false;
+    if ((state.phase == REQUESTED || state.phase == ALIVE) && (!state.entry || !state.generation)) return false;
     if (state.phase == REQUESTED && state.spawnSaid) return false;
-    if (state.phase == COOLDOWN && (!state.next || state.next > Now() + dmaMaximumPeriod)) return false;
+    if (state.legacy)
+    {
+        if ((state.phase == REQUESTED || state.phase == ALIVE) && state.next) return false;
+        if (state.phase == COOLDOWN && (!state.next || state.next > Now() + dmaMaximumPeriod)) return false;
+    }
+    else if (state.phase == EMPTY)
+    {
+        if (state.window) return false;
+    }
+    else if (!state.entry || !state.generation || state.window < dmaRotationAnchor ||
+        (state.window - dmaRotationAnchor) % dmaWindowSeconds || state.window > dmaMaximumTime - dmaWindowSeconds ||
+        state.next != state.window + dmaWindowSeconds || state.entry != WindowEntry(state.window)) return false;
     if (!state.generation && state.spawnSaid) return false;
     result = state; return true;
 }
@@ -81,7 +107,7 @@ bool DireMaulArena::Load(std::string const& text)
         script_error_log("Dire Maul arena: damaged world save; scheduling disabled until valid data is loaded");
         return false;
     }
-    m_state = state; m_valid = true; m_actor.Clear(); m_spectator.Clear();
+    m_state = state; m_valid = true; m_actor.Clear(); m_spectator.Clear(); m_retiring.Clear();
     m_retryAt = m_noticeAt = 0; m_attempts = 0; m_combat = false; DropNotices();
     // Map constructs/loads its script before persistent state and SpawnManager.
     // All native reconciliation therefore belongs to the first normal Update.
@@ -92,8 +118,8 @@ bool DireMaulArena::Ready()
     if (!m_valid || !m_owner.instance || m_owner.instance->GetId() != DMA_MAP) return false;
     CreatureData const* data = sObjectMgr.GetCreatureData(DMA_SPAWN_GUID);
     SpawnGroup* group = m_owner.instance->GetSpawnManager().GetSpawnGroup(DMA_GROUP);
-    if (!data || !group || data->mapid != DMA_MAP || data->spawnMask || data->id || !data->spawntimesecsmin ||
-        data->spawntimesecsmin > data->spawntimesecsmax || uint64(data->spawntimesecsmax) > dmaMaximumPeriod) return false;
+    if (!data || !group || data->mapid != DMA_MAP || data->spawnMask || data->id ||
+        data->spawntimesecsmin != dmaWindowSeconds || data->spawntimesecsmax != dmaWindowSeconds) return false;
     auto const& definition = group->GetGroupEntry();
     if (definition.Type != SPAWN_GROUP_CREATURE || definition.MaxCount != 1 || definition.DbGuids.size() != 1 ||
         definition.DbGuids[0].DbGuid != DMA_SPAWN_GUID || definition.RandomEntries.size() != 3 || definition.HasChancedSpawns) return false;
@@ -106,9 +132,8 @@ bool DireMaulArena::Ready()
         mask |= bit;
     }
     if (mask != 7) return false;
-    // Native automatic selection is deliberately disabled. It provides the
-    // single static slot/entry policy; this coordinator restores the saved
-    // selected entry before explicit native creation, so restart cannot reroll.
+    // Native automatic/random selection remains disabled. The VM calendar
+    // owns selection; native creation still owns the one static slot and AI.
     group->SetEnabled(false); m_ready = true; return true;
 }
 bool DireMaulArena::LocalGridLoaded() const
@@ -120,34 +145,69 @@ Creature* DireMaulArena::GetBoss() const
 {
     return m_actor ? m_owner.instance->GetCreature(m_actor) : nullptr;
 }
-bool DireMaulArena::IsCurrentBoss(Creature* boss) const
+bool DireMaulArena::IsTrackedBoss(Creature* boss) const
 {
     return m_valid && boss && boss->GetMap() == m_owner.instance && boss->GetMapId() == DMA_MAP &&
         boss->HasStaticDBSpawnData() && boss->GetDbGuid() == DMA_SPAWN_GUID && ArenaEntry(boss->GetEntry()) &&
         boss->GetEntry() == m_state.entry && m_actor == boss->GetObjectGuid() &&
-        m_owner.instance->GetCreature(m_actor) == boss && m_state.phase == ALIVE;
+        m_owner.instance->GetCreature(m_actor) == boss && m_actor != m_retiring && m_state.phase == ALIVE && !m_state.legacy;
+}
+bool DireMaulArena::IsCurrentBoss(Creature* boss) const
+{
+    return IsTrackedBoss(boss) && m_state.window == WindowStart(Now());
+}
+void DireMaulArena::RetireBoss(Creature* boss)
+{
+    if (!boss || boss->GetMap() != m_owner.instance || !boss->HasStaticDBSpawnData() ||
+        boss->GetDbGuid() != DMA_SPAWN_GUID || !ArenaEntry(boss->GetEntry()) || m_retiring == boss->GetObjectGuid()) return;
+    // As with VM GameEventUnspawn, queue native removal, including an expired
+    // corpse or an unclaimed/in-combat boss. Do not fake a kill or award loot.
+    m_retiring = boss->GetObjectGuid(); m_actor.Clear(); m_combat = false; DropNotices();
+    boss->AddObjectToRemoveList();
+}
+bool DireMaulArena::AdvanceWindow()
+{
+    uint64 const now = Now(), window = WindowStart(now);
+    if (!window || window > dmaMaximumTime - dmaWindowSeconds) return false;
+    if (!m_state.legacy && m_state.phase != EMPTY && window < m_state.window) return false; // Clock rollback: never replay a consumed window.
+    if (!m_state.legacy && m_state.phase != EMPTY && window == m_state.window) return true;
+    uint64 const native = uint64(m_owner.instance->GetPersistentState()->GetCreatureRespawnTime(DMA_SPAWN_GUID));
+    if (native > now + dmaMaximumPeriod)
+    {
+        m_valid = false; DropNotices();
+        script_error_log("Dire Maul arena: invalid native respawn time; scheduling disabled"); return false;
+    }
+    if (m_state.generation >= 1000000000) { m_valid = false; return false; }
+    // DAM1 had no calendar window. A pending old death consumes only the
+    // current window on migration; its random deadline never shifts rotation.
+    bool const consumed = (m_state.legacy || m_state.phase == EMPTY) &&
+        ((m_state.legacy && m_state.phase == COOLDOWN && m_state.next > now) || native > now);
+    Creature* old = m_owner.instance->GetCreature(uint32(DMA_SPAWN_GUID));
+    m_state.phase = consumed ? COOLDOWN : REQUESTED;
+    m_state.entry = WindowEntry(window); ++m_state.generation; m_state.spawnSaid = 0;
+    m_state.window = window; m_state.next = window + dmaWindowSeconds; m_state.legacy = false;
+    m_actor.Clear(); m_combat = false; m_retryAt = 0; m_attempts = 0; DropNotices();
+    Commit(); // Publish a durable window/consumption decision before removal/allocation.
+    m_owner.instance->GetPersistentState()->SaveCreatureRespawnTime(DMA_SPAWN_GUID, consumed ? time_t(m_state.next) : 0);
+    RetireBoss(old); // Also required when many missed windows yield the same entry again.
+    return true;
 }
 bool DireMaulArena::ObserveBoss()
 {
     // Native dbGuid lookup is bounded and includes dynamic live GUIDs. It
     // prioritizes a living actor, without scanning every creature on Kalimdor.
     Creature* boss = m_owner.instance->GetCreature(uint32(DMA_SPAWN_GUID));
-    if (!boss) { m_actor.Clear(); m_combat = false; return false; }
+    if (!boss) { m_actor.Clear(); m_retiring.Clear(); m_combat = false; return false; }
     if (!ArenaEntry(boss->GetEntry()) || !boss->HasStaticDBSpawnData()) return true;
-    if (!boss->IsAlive()) return true; // Never replace a body before native corpse/loot removal.
-    if (m_state.phase == EMPTY)
-    {
-        m_state.entry = boss->GetEntry(); ++m_state.generation; m_state.phase = ALIVE; m_state.spawnSaid = 0;
-        m_actor = boss->GetObjectGuid(); Commit(); QueueNotice(DMA_NOTICE_SPAWN); return true;
-    }
+    if (boss->GetObjectGuid() == m_retiring) return true; // Wait for asynchronous native removal.
+    if (!boss->IsAlive()) return true; // Normal corpse/loot lifetime within its window.
     if ((m_state.phase == REQUESTED || m_state.phase == ALIVE) && boss->GetEntry() == m_state.entry)
     {
         m_actor = boss->GetObjectGuid(); m_attempts = 0;
         if (m_state.phase == REQUESTED) { m_state.phase = ALIVE; Commit(); }
         if (!m_state.spawnSaid) QueueNotice(DMA_NOTICE_SPAWN);
     }
-    // A wrong/old-generation real actor is never killed to make space. The
-    // static slot remains occupied until its native death/unload completes.
+    else RetireBoss(boss); // A stale restored actor cannot occupy another window.
     return true;
 }
 void DireMaulArena::ReconcileCooldown()
@@ -158,38 +218,27 @@ void DireMaulArena::ReconcileCooldown()
         m_valid = false; DropNotices();
         script_error_log("Dire Maul arena: invalid native cooldown; refusing an early spawn"); return;
     }
-    Creature* live = GetBoss();
+    Creature* live = m_owner.instance->GetCreature(uint32(DMA_SPAWN_GUID));
     if (live && live->IsAlive() && IsCurrentBoss(live)) return;
-    if (native > Now() && (m_state.phase != COOLDOWN || m_state.next < native))
+    if (native > Now() && m_state.phase != COOLDOWN)
     {
-        m_state.phase = COOLDOWN; m_state.next = std::max(native, m_state.next);
+        m_state.phase = COOLDOWN;
         m_combat = false; DropNotices(); Commit();
     }
-    if (m_state.phase == COOLDOWN && m_state.next > Now() && native < m_state.next)
+    // The fixed boundary wins; never max-merge a legacy/random native timer.
+    if (m_state.phase == COOLDOWN && native != m_state.next)
         m_owner.instance->GetPersistentState()->SaveCreatureRespawnTime(DMA_SPAWN_GUID, time_t(m_state.next));
 }
 void DireMaulArena::TrySpawn()
 {
     if (!m_valid || m_spawning || m_retryAt > Now() || !LocalGridLoaded()) return;
-    if (m_state.phase == COOLDOWN && m_state.next > Now()) return;
+    if (m_state.phase == COOLDOWN || m_state.legacy || m_state.window != WindowStart(Now())) return;
     if (ObserveBoss()) return;
     SpawnGroup* group = m_owner.instance->GetSpawnManager().GetSpawnGroup(DMA_GROUP);
     if (!group) return;
-    if (m_state.phase == EMPTY || m_state.phase == COOLDOWN)
-    {
-        if (m_state.generation >= 1000000000) { m_valid = false; return; }
-        std::map<uint32, uint32> available, minimum;
-        for (auto const& candidate : group->GetGroupEntry().RandomEntries)
-        {
-            available[candidate.Entry] = candidate.MaxCount ? candidate.MaxCount : std::numeric_limits<uint32>::max();
-            if (candidate.MinCount) minimum[candidate.Entry] = candidate.MinCount;
-        }
-        uint32 entry = group->GetEligibleEntry(available, minimum);
-        if (!ArenaEntry(entry)) { m_retryAt = Now() + 5; return; }
-        m_state.entry = entry; ++m_state.generation; m_state.phase = REQUESTED; m_state.spawnSaid = 0; m_state.next = 0;
-        DropNotices(); Commit(); // Durable choice precedes allocation; retries/restart retain it.
-    }
     if (m_state.phase != REQUESTED && m_state.phase != ALIVE) return;
+    if (m_owner.instance->GetPersistentState()->GetCreatureRespawnTime(DMA_SPAWN_GUID))
+        m_owner.instance->GetPersistentState()->SaveCreatureRespawnTime(DMA_SPAWN_GUID, 0);
     if (m_attempts >= 5) m_attempts = 0;
     ++m_attempts; m_spawning = true;
     Creature* boss = WorldObject::SpawnCreature(DMA_SPAWN_GUID, m_owner.instance, m_state.entry);
@@ -222,12 +271,14 @@ void DireMaulArena::OnCreatureDeath(Creature* actor) { BossDied(actor); }
 void DireMaulArena::OnCreatureDespawn(Creature* actor)
 {
     if (actor && actor->GetObjectGuid() == m_actor) { m_actor.Clear(); m_combat = false; }
+    // Keep the retiring identity until native lookup no longer finds it;
+    // a despawn callback may precede its actual removal from the map store.
 }
 void DireMaulArena::OnPlayerEnter(Player*) {}
 void DireMaulArena::OnPlayerLeave(Player*) {}
 void DireMaulArena::Update(uint32)
 {
-    if (!Ready()) return;
+    if (!Ready() || !AdvanceWindow()) return;
     ObserveBoss(); ReconcileCooldown(); TrySpawn();
 }
 void DireMaulArena::BossEnterCombat(Creature* boss)
@@ -248,17 +299,25 @@ void DireMaulArena::BossEvaded(Creature* boss)
 }
 void DireMaulArena::BossDied(Creature* boss)
 {
-    if (!IsCurrentBoss(boss) || m_deathHandling) return;
-    CreatureData const* data = sObjectMgr.GetCreatureData(DMA_SPAWN_GUID);
-    if (!data || !data->spawntimesecsmin || data->spawntimesecsmin > data->spawntimesecsmax || uint64(data->spawntimesecsmax) > dmaMaximumPeriod) return;
+    if (m_valid && boss && boss->GetMap() == m_owner.instance && boss->HasStaticDBSpawnData() &&
+        boss->GetDbGuid() == DMA_SPAWN_GUID && ArenaEntry(boss->GetEntry()) && !boss->IsAlive() &&
+        (boss->GetObjectGuid() == m_retiring || (!m_state.legacy && m_state.window && Now() >= m_state.next)))
+    {
+        // Removal is queued, not instantaneous. A last hit on the departing
+        // actor must not let native death write a fresh 7h timer for its successor.
+        boss->SetRespawnDelay(0, true); return;
+    }
+    // A tracked actor killed during a clock rollback still consumes its saved
+    // window, otherwise returning to that window could grant a second kill.
+    if (!IsTrackedBoss(boss) || m_deathHandling) return;
+    uint64 const now = Now();
+    if (now >= m_state.next) return; // The wall clock may cross the boundary during the callback.
     m_deathHandling = true;
-    // Real JustDied and instance death hooks run BEFORE SetDeathState. Choose
-    // the original DB random delay once and hand it back through the native
-    // one-shot override. Both native death processing and this durable record
-    // therefore use that same draw; no GetRespawnTime/MAX inference is needed.
-    uint32 delay = data->GetRandomRespawnTime();
+    // JustDied precedes native SetDeathState. Consume this window, leaving
+    // its absolute boundary unchanged. No random draw and no death+7h drift.
+    uint32 const delay = uint32(m_state.next - now);
     boss->SetRespawnDelay(delay, true);
-    uint64 until = Now() + delay;
+    uint64 const until = m_state.next;
     m_owner.instance->GetPersistentState()->SaveCreatureRespawnTime(DMA_SPAWN_GUID, time_t(until));
     m_state.phase = COOLDOWN; m_state.next = until; m_combat = false; DropNotices(); Commit();
     m_deathHandling = false;

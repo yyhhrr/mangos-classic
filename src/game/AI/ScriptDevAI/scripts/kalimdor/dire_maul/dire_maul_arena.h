@@ -40,6 +40,7 @@ public:
     uint32 GetGeneration() const;
     uint32 GetSelectedEntry() const;
     uint64 GetNextSpawnTime() const;
+    uint64 GetWindowStart() const;
     void BossEnterCombat(Creature*);
     void BossKilledPlayer(Creature*, Player*);
     void BossEvaded(Creature*);
@@ -51,15 +52,22 @@ private:
     {
         uint32 phase = EMPTY, entry = 0, generation = 0, spawnSaid = 0;
         uint64 next = 0;
+        uint64 window = 0;
+        bool legacy = false;
     };
     struct Notice { uint32 kind, entry, generation; uint64 expires; };
     static uint64 Now();
+    static uint64 WindowStart(uint64 now);
+    static uint32 WindowEntry(uint64 window);
     static bool Decode(std::string const&, State&);
     static std::string Encode(State const&);
     static bool ArenaEntry(uint32);
     void Commit();
     bool Ready();
     bool LocalGridLoaded() const;
+    bool IsTrackedBoss(Creature*) const;
+    bool AdvanceWindow();
+    void RetireBoss(Creature*);
     bool ObserveBoss();
     void ReconcileCooldown();
     void TrySpawn();
@@ -68,7 +76,7 @@ private:
     ScriptedInstance& m_owner;
     std::function<void()> m_save;
     State m_state;
-    ObjectGuid m_actor, m_spectator;
+    ObjectGuid m_actor, m_spectator, m_retiring;
     std::deque<Notice> m_notices;
     uint64 m_retryAt = 0, m_noticeAt = 0;
     uint32 m_attempts = 0;
