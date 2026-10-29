@@ -32,6 +32,9 @@ EndContentData */
 
 #include "AI/ScriptDevAI/base/escort_ai.h"
 #include "AI/ScriptDevAI/scripts/kalimdor/world_kalimdor.h"
+#include "Maps/SpawnManager.h"
+#include "Maps/SpawnGroup.h"
+#include "Entities/TemporarySpawn.h"
 
 /*######
 ## npc_aged_dying_ancient_kodo
@@ -421,92 +424,217 @@ static const SummonLocation wranglerSpawn = { -1393.194f, 2429.465f, 88.689f };
 
 struct npc_melizza_brimbuzzleAI : public npc_escortAI, private DialogueHelper
 {
-    npc_melizza_brimbuzzleAI(Creature* m_creature) : npc_escortAI(m_creature),
-        DialogueHelper(aIntroDialogue)
+    explicit npc_melizza_brimbuzzleAI(Creature* creature) : npc_escortAI(creature), DialogueHelper(aIntroDialogue) {}
+
+    GuidSet m_summons;
+    bool m_firstAmbush = false;
+    bool m_secondAmbush = false;
+    bool m_completionStarted = false;
+    bool m_completed = false;
+    bool m_homeDialogue = false;
+    bool m_aborted = false;
+    bool m_startedText = false;
+
+    // Preserve dialogue and ambush state across ordinary combat evades.
+    void Reset() override {}
+
+    bool CanOfferQuest(uint32 questId) const override
     {
-        Reset();
+        return questId != QUEST_GET_ME_OUT_OF_HERE ||
+            (!HasEscortState(STATE_ESCORT_ESCORTING) && !m_completed && !m_aborted && !m_creature->IsInCombat());
     }
 
-    void Reset() override {}
+    bool IsOwnedAmbusher(Creature* actor) const
+    {
+        return actor && actor->IsTemporarySummon() && actor->GetSpawnerGuid() == m_creature->GetObjectGuid() &&
+            (actor->GetEntry() == NPC_MARAUDINE_MARAUDER || actor->GetEntry() == NPC_MARAUDINE_BONEPAW ||
+                actor->GetEntry() == NPC_MARAUDINE_WRANGLER);
+    }
+
+    void CleanupSummons()
+    {
+        GuidSet summons;
+        summons.swap(m_summons); // Despawn callbacks can synchronously mutate the roster.
+        for (ObjectGuid guid : summons)
+            if (Creature* actor = m_creature->GetMap()->GetCreature(guid))
+                if (IsOwnedAmbusher(actor) && actor->IsAlive())
+                    actor->ForcedDespawn(); // Keep dead actors and their loot.
+    }
+
+    void JustRespawned() override
+    {
+        npc_escortAI::JustRespawned();
+        CleanupSummons();
+        DisableDialogue();
+        End();
+        m_firstAmbush = m_secondAmbush = m_completionStarted = m_completed = false;
+        m_homeDialogue = m_aborted = m_startedText = false;
+    }
+
+    void FailQuestForPlayerAndGroup() override
+    {
+        m_aborted = true;
+        DisableDialogue();
+        CleanupSummons();
+        npc_escortAI::FailQuestForPlayerAndGroup();
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        npc_escortAI::JustDied(killer);
+        m_aborted = true;
+        DisableDialogue();
+        CleanupSummons();
+    }
+
+    void AbortEscort()
+    {
+        if (m_aborted)
+            return;
+        FailQuestForPlayerAndGroup();
+        End();
+        m_creature->ForcedDespawn();
+    }
 
     void JustStartedEscort() override
     {
-        if (GameObject* pCage = GetClosestGameObjectWithEntry(m_creature, GO_MELIZZAS_CAGE, INTERACTION_DISTANCE))
-            pCage->UseDoorOrButton();
+        CleanupSummons();
+        DisableDialogue();
+        m_firstAmbush = m_secondAmbush = m_completionStarted = m_completed = false;
+        m_homeDialogue = m_aborted = m_startedText = false;
+        if (GameObject* cage = GetClosestGameObjectWithEntry(m_creature, GO_MELIZZAS_CAGE, INTERACTION_DISTANCE))
+            cage->UseDoorOrButton();
     }
 
-    Creature* GetSpeakerByEntry(uint32 uiEntry) override
+    void JustSummoned(Creature* actor) override
     {
-        if (uiEntry == NPC_MELIZZA)
-            return m_creature;
+        if (!IsOwnedAmbusher(actor))
+            return;
+        if (!HasEscortState(STATE_ESCORT_ESCORTING) || m_aborted || m_completed)
+        {
+            if (actor->IsAlive())
+                actor->ForcedDespawn();
+            return;
+        }
+        m_summons.insert(actor->GetObjectGuid());
+    }
 
-        if (uiEntry == NPC_HORNIZZ)
+    void SummonedCreatureJustDied(Creature* actor) override { m_summons.erase(actor->GetObjectGuid()); }
+    void SummonedCreatureDespawn(Creature* actor) override { m_summons.erase(actor->GetObjectGuid()); }
+
+    bool SummonAmbusher(uint32 entry, float x, float y, float z)
+    {
+        // Combat continually refreshes this timeout. It only bounds actors left
+        // idle after an interrupted escort, even if their owner has disappeared.
+        Creature* actor = m_creature->SummonCreature(entry, x, y, z, 0.0f, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 120000);
+        if (!actor || m_aborted || !HasEscortState(STATE_ESCORT_ESCORTING) || !m_summons.count(actor->GetObjectGuid()))
+        {
+            if (IsOwnedAmbusher(actor) && actor->IsAlive())
+                actor->ForcedDespawn();
+            AbortEscort();
+            return false;
+        }
+        return true;
+    }
+
+    Creature* GetSpeakerByEntry(uint32 entry) override
+    {
+        if (entry == NPC_MELIZZA)
+            return m_creature;
+        if (entry == NPC_HORNIZZ)
             if (ScriptedInstance* instance = static_cast<ScriptedInstance*>(m_creature->GetInstanceData()))
                 return instance->GetSingleCreatureFromStorage(NPC_HORNIZZ);
-
         return nullptr;
     }
 
-    void WaypointReached(uint32 uiPointId) override
+    void WaypointReached(uint32 pointId) override
     {
-        switch (uiPointId)
+        if (!HasEscortState(STATE_ESCORT_ESCORTING) || m_aborted)
+            return;
+        switch (pointId)
         {
             case 1:
-                if (Player* pPlayer = GetPlayerForEscort())
-                    DoScriptText(SAY_MELIZZA_START, m_creature, pPlayer);
-
+                if (m_startedText)
+                    break;
+                m_startedText = true;
+                if (Player* player = GetPlayerForEscort())
+                    DoScriptText(SAY_MELIZZA_START, m_creature, player);
                 m_creature->SetFactionTemporary(FACTION_ESCORT_N_NEUTRAL_PASSIVE, TEMPFACTION_RESTORE_RESPAWN);
                 break;
             case 4:
-                for (auto i : aMarauderSpawn)
-                {
+                if (m_firstAmbush || m_completed)
+                    break;
+                m_firstAmbush = true;
+                for (auto location : aMarauderSpawn)
                     for (uint8 j = 0; j < MAX_MARAUDERS; ++j)
                     {
-                        // Summon 2 Marauders on each point
-                        float fX, fY, fZ;
-                        m_creature->GetRandomPoint(i.m_fX, i.m_fY, i.m_fZ, 7.0f, fX, fY, fZ);
-                        m_creature->SummonCreature(NPC_MARAUDINE_MARAUDER, fX, fY, fZ, 0.0f, TEMPSPAWN_DEAD_DESPAWN, 0);
+                        float x, y, z;
+                        m_creature->GetRandomPoint(location.m_fX, location.m_fY, location.m_fZ, 7.0f, x, y, z);
+                        if (!SummonAmbusher(NPC_MARAUDINE_MARAUDER, x, y, z))
+                            return;
                     }
-                }
                 break;
             case 9:
+                if (m_secondAmbush || m_completed)
+                    break;
+                m_secondAmbush = true;
                 for (uint8 i = 0; i < MAX_WRANGLERS; ++i)
                 {
-                    float fX, fY, fZ;
-                    m_creature->GetRandomPoint(wranglerSpawn.m_fX, wranglerSpawn.m_fY, wranglerSpawn.m_fZ, 10.0f, fX, fY, fZ);
-                    m_creature->SummonCreature(NPC_MARAUDINE_BONEPAW, fX, fY, fZ, 0.0f, TEMPSPAWN_DEAD_DESPAWN, 0);
-
-                    m_creature->GetRandomPoint(wranglerSpawn.m_fX, wranglerSpawn.m_fY, wranglerSpawn.m_fZ, 10.0f, fX, fY, fZ);
-                    m_creature->SummonCreature(NPC_MARAUDINE_WRANGLER, fX, fY, fZ, 0.0f, TEMPSPAWN_DEAD_DESPAWN, 0);
+                    float x, y, z;
+                    m_creature->GetRandomPoint(wranglerSpawn.m_fX, wranglerSpawn.m_fY, wranglerSpawn.m_fZ, 10.0f, x, y, z);
+                    if (!SummonAmbusher(NPC_MARAUDINE_BONEPAW, x, y, z))
+                        return;
+                    m_creature->GetRandomPoint(wranglerSpawn.m_fX, wranglerSpawn.m_fY, wranglerSpawn.m_fZ, 10.0f, x, y, z);
+                    if (!SummonAmbusher(NPC_MARAUDINE_WRANGLER, x, y, z))
+                        return;
                 }
                 break;
             case 12:
-                StartNextDialogueText(POINT_ID_QUEST_COMPLETE);
+                if (!m_completionStarted)
+                {
+                    m_completionStarted = true;
+                    StartNextDialogueText(POINT_ID_QUEST_COMPLETE);
+                }
                 break;
             case 19:
-                StartNextDialogueText(POINT_ID_EVENT_COMPLETE);
+                if (m_completed && !m_homeDialogue)
+                {
+                    m_homeDialogue = true;
+                    StartNextDialogueText(POINT_ID_EVENT_COMPLETE);
+                }
                 break;
         }
     }
 
-    void JustDidDialogueStep(int32 iEntry) override
+    void JustDidDialogueStep(int32 entry) override
     {
-        switch (iEntry)
+        if (m_aborted || !HasEscortState(STATE_ESCORT_ESCORTING))
+            return;
+        switch (entry)
         {
             case POINT_ID_QUEST_COMPLETE:
                 SetEscortPaused(true);
                 break;
             case QUEST_GET_ME_OUT_OF_HERE:
-                if (Player* pPlayer = GetPlayerForEscort())
+            {
+                if (m_completed)
+                    break;
+                Player* player = GetPlayerForEscort();
+                if (!player || (player->GetQuestStatus(QUEST_GET_ME_OUT_OF_HERE) != QUEST_STATUS_INCOMPLETE &&
+                    player->GetQuestStatus(QUEST_GET_ME_OUT_OF_HERE) != QUEST_STATUS_COMPLETE))
                 {
-                    DoScriptText(SAY_MELIZZA_FINISH, m_creature, pPlayer);
-                    pPlayer->RewardPlayerAndGroupAtEventExplored(QUEST_GET_ME_OUT_OF_HERE, m_creature);
+                    AbortEscort();
+                    break;
                 }
-
+                m_completed = true; // Set before credit can invoke other script hooks.
+                DoScriptText(SAY_MELIZZA_FINISH, m_creature, player);
+                player->RewardPlayerAndGroupAtEventExplored(QUEST_GET_ME_OUT_OF_HERE, m_creature);
+                QuestEnd(); // The escape-home scene no longer has a quest-distance lease.
                 m_creature->ClearTemporaryFaction();
                 SetRun(true);
                 SetEscortPaused(false);
                 break;
+            }
             case POINT_ID_EVENT_COMPLETE:
                 SetEscortPaused(true);
                 m_creature->SetFacingTo(4.71f);
@@ -517,14 +645,11 @@ struct npc_melizza_brimbuzzleAI : public npc_escortAI, private DialogueHelper
         }
     }
 
-    void UpdateEscortAI(const uint32 uiDiff) override
+    void UpdateEscortAI(uint32 diff) override
     {
-        DialogueUpdate(uiDiff);
-
-        if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
-            return;
-
-        DoMeleeAttackIfReady();
+        if (!m_aborted && !m_creature->IsInCombat() && GetAIOrder() != ORDER_EVADE)
+            DialogueUpdate(diff);
+        npc_escortAI::UpdateEscortAI(diff);
     }
 };
 
@@ -538,7 +663,8 @@ bool QuestAccept_npc_melizza_brimbuzzle(Player* pPlayer, Creature* pCreature, co
     if (pQuest->GetQuestId() == QUEST_GET_ME_OUT_OF_HERE)
     {
         if (npc_melizza_brimbuzzleAI* pEscortAI = dynamic_cast<npc_melizza_brimbuzzleAI*>(pCreature->AI()))
-            pEscortAI->Start(false, pPlayer, pQuest);
+            if (pEscortAI->CanOfferQuest(QUEST_GET_ME_OUT_OF_HERE))
+                pEscortAI->Start(false, pPlayer, pQuest);
     }
 
     return true;
@@ -565,133 +691,198 @@ enum
     WAYPOINT_PATH_POINT_AFTER_ESCORT_2 = 100,
 
     GIZELTON_TIMER_AFTER_FAIL = 60 * IN_MILLISECONDS, // forced despawn when one of the member die even if still in combat
+    GIZELTON_CARAVAN_GROUP = 19019,
 };
 
 struct npc_cork_gizeltonAI : public npc_escortAI
 {
-    npc_cork_gizeltonAI(Creature* pCreature) : npc_escortAI(pCreature) { Reset(); }
+    explicit npc_cork_gizeltonAI(Creature* creature) : npc_escortAI(creature) {}
 
-    int32 FailTimer = int32(GIZELTON_TIMER_AFTER_FAIL);
+    uint32 FailTimer = GIZELTON_TIMER_AFTER_FAIL;
     bool StatusFailed = false;
     bool ScriptDone = false;
     bool SouthQuest = false;
+    uint32 m_groupId = 0;
+    uint32 m_activeQuest = 0;
+    GuidSet m_participants;
 
-    void Reset() override {   }
+    // A combat evade must not forget a running escort or its failure countdown.
+    void Reset() override {}
+
+    CreatureGroup* CaravanGroup() const
+    {
+        if (CreatureGroup* group = m_creature->GetCreatureGroup())
+            return group;
+        // Death/removal can detach the NPC before a delayed cleanup callback.
+        if (SpawnGroup* group = m_creature->GetMap()->GetSpawnManager().GetSpawnGroup(m_groupId ? m_groupId : GIZELTON_CARAVAN_GROUP))
+            for (auto const& member : group->GetGroupEntry().DbGuids)
+                if (member.DbGuid == m_creature->GetDbGuid())
+                    return group->GetCreatureGroup();
+        return nullptr;
+    }
+
+    void RememberGroup()
+    {
+        if (CreatureGroup* group = m_creature->GetCreatureGroup())
+            m_groupId = group->GetGroupId();
+    }
+
+    bool CanOfferQuest(uint32 questId) const override
+    {
+        if (questId != QUEST_BODYGUARD_TO_HIRE && questId != QUEST_GIZELTON_CARAVAN)
+            return true;
+        return m_creature->IsAlive() && !m_creature->IsInCombat() &&
+            !HasEscortState(STATE_ESCORT_ESCORTING) && !StatusFailed && !ScriptDone && CaravanGroup();
+    }
+
+    void FailRegisteredPlayers()
+    {
+        // Keep the admitted group even when its original leader logs out or
+        // changes group. Never fail the other caravan quest opportunistically.
+        for (ObjectGuid guid : m_participants)
+            if (Player* player = m_creature->GetMap()->GetPlayer(guid))
+                if (m_activeQuest && player->GetQuestStatus(m_activeQuest) == QUEST_STATUS_INCOMPLETE)
+                    player->FailQuest(m_activeQuest);
+    }
 
     void MakeQuestFailAndClean()
     {
-        Player* player = GetPlayerForEscort();
-        if (!player)
-            return;
-
-        // Handle all players in group (if they took quest)
-        if (Group* pGroup = player->GetGroup())
-        {
-            for (GroupReference* pRef = pGroup->GetFirstMember(); pRef != nullptr; pRef = pRef->next())
-            {
-                if (Player* member = pRef->getSource())
-                {
-                    if (member->GetQuestStatus(QUEST_BODYGUARD_TO_HIRE) == QUEST_STATUS_INCOMPLETE)
-                        member->FailQuest(QUEST_BODYGUARD_TO_HIRE);
-                    if (member->GetQuestStatus(QUEST_GIZELTON_CARAVAN) == QUEST_STATUS_INCOMPLETE)
-                        member->FailQuest(QUEST_GIZELTON_CARAVAN);
-                }
-            }
-        }
-        else
-        {
-            if (player->GetQuestStatus(QUEST_BODYGUARD_TO_HIRE) == QUEST_STATUS_INCOMPLETE)
-                player->FailQuest(QUEST_BODYGUARD_TO_HIRE);
-            if (player->GetQuestStatus(QUEST_GIZELTON_CARAVAN) == QUEST_STATUS_INCOMPLETE)
-                player->FailQuest(QUEST_GIZELTON_CARAVAN);
-        }
-
-        m_creature->GetCreatureGroup()->Despawn();
-    }
-
-    void UpdateEscortAI(const uint32 diff) override
-    {
-        npc_escortAI::UpdateEscortAI(diff);
-
         if (ScriptDone)
             return;
+        RememberGroup();
+        ScriptDone = StatusFailed = true; // Set before despawn callbacks can reenter.
+        FailRegisteredPlayers();
+        m_participants.clear();
+        m_activeQuest = 0;
+        End();
+        if (CreatureGroup* group = CaravanGroup())
+            group->Despawn();
+        else
+            m_creature->ForcedDespawn();
+    }
 
-        if (!StatusFailed)
-            return;
-
-        FailTimer -= diff;
-        if (FailTimer > 0 && !m_creature->GetCreatureGroup()->IsOutOfCombat())
-            return;
-
+    void FailQuestForPlayerAndGroup() override
+    {
+        // The base distance/offline failure route calls this before despawn;
+        // converge on the same cleanup even though JustDied is never called.
         MakeQuestFailAndClean();
-        ScriptDone = true;
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        RememberGroup();
+        npc_escortAI::JustDied(killer);
+        MakeQuestFailAndClean(); // A dead Cork cannot run the ordinary timer.
+    }
+
+    void JustRespawned() override
+    {
+        npc_escortAI::JustRespawned();
+        End();
+        FailTimer = GIZELTON_TIMER_AFTER_FAIL;
+        StatusFailed = ScriptDone = SouthQuest = false;
+        m_activeQuest = 0;
+        m_participants.clear();
+        RememberGroup();
+    }
+
+    bool TryStartEscort(Player* player, Quest const* quest, bool south, Creature* giver)
+    {
+        uint32 questId = south ? QUEST_GIZELTON_CARAVAN : QUEST_BODYGUARD_TO_HIRE;
+        if (!player || !quest || quest->GetQuestId() != questId || !giver ||
+            giver->GetMap() != m_creature->GetMap() || !giver->IsAlive() ||
+            giver->GetEntry() != uint32(south ? NPC_RIGGER_GIZELTON : NPC_CORK_GIZELTON) ||
+            !giver->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER) ||
+            !CanOfferQuest(questId) || player->GetMap() != m_creature->GetMap() ||
+            player->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
+            return false;
+
+        RememberGroup();
+        Start(false, player, quest, false, false, south ? PATH_ID_RIGGER_GIZELTON : PATH_ID_CORK_GIZELTON);
+        if (!HasEscortState(STATE_ESCORT_ESCORTING) || m_questForEscort != quest || GetPlayerForEscort() != player)
+            return false;
+
+        SouthQuest = south; // Commit direction only after Start admitted this quest.
+        FailTimer = GIZELTON_TIMER_AFTER_FAIL;
+        m_activeQuest = questId;
+        m_participants.clear();
+        m_participants.insert(player->GetObjectGuid());
+        if (Group* group = player->GetGroup())
+            for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+                if (Player* member = ref->getSource())
+                    if (member->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE)
+                        m_participants.insert(member->GetObjectGuid());
+
+        // StartScript is zero in the quest row: rejected/duplicate acceptances
+        // must not launch faction/flag scripts. Preserve the original giver.
+        if (!m_creature->GetMap()->ScriptsStart(SCRIPT_TYPE_QUEST_START, questId, giver, player,
+            Map::SCRIPT_EXEC_PARAM_UNIQUE_BY_SOURCE))
+        {
+            MakeQuestFailAndClean();
+            return false;
+        }
+        return true;
+    }
+
+    bool StartRiggerEscort(Player* player, Quest const* quest, Creature* giver)
+    {
+        return TryStartEscort(player, quest, true, giver);
+    }
+
+    void UpdateEscortAI(uint32 diff) override
+    {
+        RememberGroup();
+        npc_escortAI::UpdateEscortAI(diff);
+        if (ScriptDone || !StatusFailed)
+            return;
+        CreatureGroup* group = CaravanGroup();
+        if (FailTimer > diff && group && !group->IsOutOfCombat())
+        {
+            FailTimer -= diff;
+            return;
+        }
+        MakeQuestFailAndClean();
     }
 
     void WaypointReached(uint32 pointId) override
     {
-        if (!HasEscortState(STATE_ESCORT_ESCORTING))
+        if (!HasEscortState(STATE_ESCORT_ESCORTING) || StatusFailed || ScriptDone)
             return;
+        if ((!SouthQuest && pointId != 19) || (SouthQuest && pointId != 21))
+            return;
+        uint32 questId = SouthQuest ? QUEST_GIZELTON_CARAVAN : QUEST_BODYGUARD_TO_HIRE;
+        if (m_activeQuest != questId)
+            return;
+        if (Player* player = GetPlayerForEscort())
+            if (player->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE)
+                player->RewardPlayerAndGroupAtEventExplored(questId, m_creature);
 
-        Player* player = GetPlayerForEscort();
-
-        switch (pointId)
-        {
-            case 19:
-                if (!SouthQuest)
-                {
-                    if (player && player->GetQuestStatus(QUEST_BODYGUARD_TO_HIRE) == QUEST_STATUS_INCOMPLETE)
-                    {
-                        // Award quest credit
-                        player->RewardPlayerAndGroupAtEventExplored(QUEST_BODYGUARD_TO_HIRE, m_creature);
-                    }
-                    m_creature->GetMotionMaster()->Clear(false, true);
-                    m_creature->GetMotionMaster()->MoveWaypoint(WAYPOINT_PATH_ID, PATH_FROM_WAYPOINT_PATH);
-                    m_creature->GetMotionMaster()->SetNextWaypoint(WAYPOINT_PATH_POINT_AFTER_ESCORT_1);
-                    m_creature->SetWalk(false);
-                    End(); // normal movement resumes - caravan doesnt despawn - it loops through zone                    
-                   
-                }
-                break;
-                // The second escort quest is also handled by NPC Cork though it is given by NPC Rigger
-            case 21:
-                if (SouthQuest)
-                {
-                    if (player && player->GetQuestStatus(QUEST_GIZELTON_CARAVAN) == QUEST_STATUS_INCOMPLETE)
-                    {
-                        // Award quest credit
-                        player->RewardPlayerAndGroupAtEventExplored(QUEST_GIZELTON_CARAVAN, m_creature);
-                    }
-                    m_creature->GetMotionMaster()->Clear(false, true);
-                    m_creature->GetMotionMaster()->MoveWaypoint(WAYPOINT_PATH_ID, PATH_FROM_WAYPOINT_PATH);
-                    m_creature->GetMotionMaster()->SetNextWaypoint(WAYPOINT_PATH_POINT_AFTER_ESCORT_2);
-                    m_creature->SetWalk(false);
-                    End(); // normal movement resumes - caravan doesnt despawn - it loops through zone
-                    SouthQuest = false;                                    
-                }
-                break;
-        }
+        m_creature->GetMotionMaster()->Clear(false, true);
+        m_creature->GetMotionMaster()->MoveWaypoint(WAYPOINT_PATH_ID, PATH_FROM_WAYPOINT_PATH);
+        m_creature->GetMotionMaster()->SetNextWaypoint(SouthQuest ? WAYPOINT_PATH_POINT_AFTER_ESCORT_2 : WAYPOINT_PATH_POINT_AFTER_ESCORT_1);
+        m_creature->SetWalk(false);
+        End();
+        m_activeQuest = 0;
+        m_participants.clear();
+        SouthQuest = false;
     }
-
-    void StartRiggerEscort(Player* player)
-    {
-        SouthQuest = true;
-        Start(false, player, m_questForEscort, false, false, PATH_ID_RIGGER_GIZELTON);
-    }
-
 
     void CreatureGroupMemberDied(Unit* /*killed*/) override
     {
-        StatusFailed = true;
+        RememberGroup();
+        if (!ScriptDone && !StatusFailed)
+        {
+            StatusFailed = true;
+            FailTimer = GIZELTON_TIMER_AFTER_FAIL;
+        }
     }
 };
 
-bool QuestAccept_npc_cork_gizelton(Player* player, Creature* creature, const Quest* quest)
+bool QuestAccept_npc_cork_gizelton(Player* player, Creature* creature, Quest const* quest)
 {
     if (quest->GetQuestId() == QUEST_BODYGUARD_TO_HIRE)
-    {
-        if (npc_cork_gizeltonAI* escortAI = dynamic_cast<npc_cork_gizeltonAI*>(creature->AI()))
-            escortAI->Start(false, player, quest, false, false, PATH_ID_CORK_GIZELTON); // Note: Escort path use other coords then normal path
-    }
+        if (auto* ai = dynamic_cast<npc_cork_gizeltonAI*>(creature->AI()))
+            ai->TryStartEscort(player, quest, false, creature);
     return true;
 }
 
@@ -701,21 +892,29 @@ bool QuestAccept_npc_cork_gizelton(Player* player, Creature* creature, const Que
 
 struct npc_rigger_gizeltonAI : public ScriptedAI
 {
-    npc_rigger_gizeltonAI(Creature* pCreature) : ScriptedAI(pCreature) { Reset(); }
+    explicit npc_rigger_gizeltonAI(Creature* creature) : ScriptedAI(creature) {}
 
     void Reset() override {}
+
+    bool CanOfferQuest(uint32 questId) const override
+    {
+        if (questId != QUEST_GIZELTON_CARAVAN)
+            return true;
+        if (!m_creature->IsAlive() || m_creature->IsInCombat())
+            return false;
+        if (Creature* cork = GetClosestCreatureWithEntry(m_creature, NPC_CORK_GIZELTON, 100.0f))
+            if (auto* ai = dynamic_cast<npc_cork_gizeltonAI*>(cork->AI()))
+                return ai->CanOfferQuest(questId);
+        return false;
+    }
 };
 
-bool QuestAccept_npc_rigger_gizelton(Player* player, Creature* creature, const Quest* quest)
+bool QuestAccept_npc_rigger_gizelton(Player* player, Creature* creature, Quest const* quest)
 {
     if (quest->GetQuestId() == QUEST_GIZELTON_CARAVAN)
-    {
-        // Now the quest is accepted, tell NPC Cork what player took it so it can handle quest credit/failure
-        // because NPC Cork will handle both escort quests
         if (Creature* cork = GetClosestCreatureWithEntry(creature, NPC_CORK_GIZELTON, 100.0f))
-            if (npc_cork_gizeltonAI* corkAI = dynamic_cast<npc_cork_gizeltonAI*>(cork->AI()))
-                corkAI->StartRiggerEscort(player);               // Note: Escort path use other coords then normal path
-    }
+            if (auto* ai = dynamic_cast<npc_cork_gizeltonAI*>(cork->AI()))
+                ai->StartRiggerEscort(player, quest, creature);
     return true;
 }
 
@@ -738,10 +937,12 @@ struct npc_magrami_spectre : public ScriptedAI
     npc_magrami_spectre(Creature* pCreature) : ScriptedAI(pCreature) { Reset(); }
 
     uint32 m_uiCurseTimer;
+    uint32 m_curseAttempts;
 
     void Reset() override
     {
         m_uiCurseTimer = 4000;
+        m_curseAttempts = 0;
     }
 
     void JustRespawned() override
@@ -786,8 +987,11 @@ struct npc_magrami_spectre : public ScriptedAI
         {
             if (m_uiCurseTimer <= uiDiff)
             {
-                m_uiCurseTimer = 0;
-                DoCastSpellIfCan(m_creature->GetVictim(), SPELL_CURSE_OF_MAGRAMI);
+                ++m_curseAttempts;
+                if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_CURSE_OF_MAGRAMI) == CAST_OK || m_curseAttempts >= 3)
+                    m_uiCurseTimer = 0;
+                else
+                    m_uiCurseTimer = 1000;
             }
             else
                 m_uiCurseTimer -= uiDiff;

@@ -33,6 +33,8 @@ struct GhostOPlasmEvent
     uint32 despawnTimer;
     uint8 phaseCounter;
     std::vector<ObjectGuid> summonedMagrami;
+    uint32 nextAttemptAt = 0;
+    uint8 failedAttempts = 0;
 };
 
 /* *********************************************************
@@ -236,47 +238,70 @@ struct world_map_kalimdor : public ScriptedMap
         m_aElementalRiftGUIDs[index].clear();
     }
 
-    bool GhostOPlasmEventStep(GhostOPlasmEvent& eventData)
+    void CleanupGhostOPlasmActors(GhostOPlasmEvent& eventData)
     {
-        if (eventData.despawnTimer > 180000)
+        for (auto guid : eventData.summonedMagrami)
         {
-            for (auto guid : eventData.summonedMagrami)
+            if (Creature* magrami = instance->GetCreature(guid))
             {
-                if (Creature * magrami = instance->GetCreature(guid))
+                if (magrami->IsAlive()) // Keep corpses available for quest loot.
                 {
-                    if (magrami->IsAlive()) // dont despawn corpses with loot
-                    {
-                        magrami->CastSpell(nullptr, SPELL_SPIRIT_SPAWN_OUT, TRIGGERED_OLD_TRIGGERED);
-                        magrami->ForcedDespawn(1000);
-                    }
+                    magrami->CastSpell(nullptr, SPELL_SPIRIT_SPAWN_OUT, TRIGGERED_OLD_TRIGGERED);
+                    magrami->ForcedDespawn(1000);
                 }
             }
+        }
+        eventData.summonedMagrami.clear();
+    }
 
-            if (GameObject* go = instance->GetGameObject(eventData.guid))
+    void FailedGhostOPlasmAttempt(GhostOPlasmEvent& eventData)
+    {
+        // Do not spin every map update or block later fifteen-second slots.
+        if (++eventData.failedAttempts >= 3)
+        {
+            ++eventData.phaseCounter;
+            eventData.failedAttempts = 0;
+            eventData.nextAttemptAt = 0;
+        }
+        else
+            eventData.nextAttemptAt = eventData.despawnTimer + 1000;
+    }
+
+    bool GhostOPlasmEventStep(GhostOPlasmEvent& eventData)
+    {
+        GameObject* go = instance->GetGameObject(eventData.guid);
+        if (!go || eventData.despawnTimer > 180000)
+        {
+            CleanupGhostOPlasmActors(eventData);
+            if (go)
                 go->AddObjectToRemoveList(); // TODO: Establish rules for despawning temporary GOs that were used in their lifetime (buttons for example)
-
             return false;
         }
 
-
-        if (GameObject* go = instance->GetGameObject(eventData.guid))
+        if (eventData.despawnTimer / 15000 >= eventData.phaseCounter && eventData.despawnTimer >= eventData.nextAttemptAt)
         {
-            if (eventData.despawnTimer / 15000 >= eventData.phaseCounter)
+            float x, y, z;
+            go->GetPosition(x, y, z);
+            uint32 random = urand(0, 35);
+            float xR = x + random, yR = y + (40 - random), zR = z;
+            if (!instance->GetHeightInRange(xR, yR, zR) || !instance->GetReachableRandomPointOnGround(x, y, z, 10.0f))
             {
-                float x, y, z;
-                go->GetPosition(x, y, z); // do some urand radius shenanigans to spawn it further and make it walk to go using doing X and Y yourself and using function in MAP to get proper Z
-                uint32 random = urand(0, 35);
-                float xR = x + random, yR = y + (40 - random), zR = z;
-                instance->GetHeightInRange(xR, yR, zR);
-                Creature* creature = go->SummonCreature(NPC_MAGRAMI_SPECTRE, xR, yR, zR, 0, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 180000); // add more timed logic here
-                instance->GetReachableRandomPointOnGround(x, y, z, 10.0f); // get position to which spectre will walk
-                eventData.phaseCounter++;
-                eventData.summonedMagrami.push_back(creature->GetObjectGuid());
-                creature->GetMotionMaster()->MovePoint(1, x, y, z);
+                FailedGhostOPlasmAttempt(eventData);
+                return true;
             }
-            return true;
+            Creature* creature = go->SummonCreature(NPC_MAGRAMI_SPECTRE, xR, yR, zR, 0, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 180000);
+            if (!creature)
+            {
+                FailedGhostOPlasmAttempt(eventData);
+                return true;
+            }
+            ++eventData.phaseCounter;
+            eventData.failedAttempts = 0;
+            eventData.nextAttemptAt = 0;
+            eventData.summonedMagrami.push_back(creature->GetObjectGuid());
+            creature->GetMotionMaster()->MovePoint(1, x, y, z);
         }
-        return false;
+        return true;
     }
 
     void Update(uint32 diff) override
