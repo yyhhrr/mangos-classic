@@ -7,6 +7,7 @@
 
 #include "dire_maul_east.h"
 #include "dire_maul_west.h"
+#include "dire_maul_north.h"
 
 enum
 {
@@ -148,6 +149,9 @@ class instance_dire_maul : public ScriptedInstance
         DireMaulWest& West() { return m_west; }
         DireMaulWest const& West() const { return m_west; }
 
+        DireMaulNorth& North() { return m_north; }
+        DireMaulNorth const& North() const { return m_north; }
+
         void SetData(uint32 uiType, uint32 uiData) override;
         uint32 GetData(uint32 uiType) const override;
         bool GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const override;
@@ -171,11 +175,12 @@ class instance_dire_maul : public ScriptedInstance
         std::string m_strInstData;
 
         void SaveState();
-        std::string BuildSave(std::array<uint32, MAX_ENCOUNTER> const* prefix = nullptr) const;
+        std::string BuildSave(std::array<uint32, MAX_ENCOUNTER> const* prefix = nullptr, std::string const* north = nullptr) const;
 
         bool m_loading = false;
         DireMaulEast m_east;
         DireMaulWest m_west;
+        DireMaulNorth m_north;
 };
 
 #endif

@@ -401,6 +401,8 @@ class Loot
         bool IsPlayerLooting(ObjectGuid const& playerGuid) const { return m_playersLooting.find(playerGuid) != m_playersLooting.end(); }
         bool IsGroupLootPendingCheck() const { return m_lootMethod != NOT_GROUP_TYPE_LOOT && !m_isChecked; }
         LootItemList const& GetLootItems() const { return m_lootItems; }
+        // Export the existing validated chest snapshot without changing loot.
+        std::string GetInstanceSnapshot() const { return SerializeInstanceSnapshot(); }
         LootItem* GetLootItemInSlot(uint32 itemSlot);
         GroupLootRoll* GetRollForSlot(uint32 itemSlot);
         InventoryResult SendItem(Player* target, uint32 itemSlot);

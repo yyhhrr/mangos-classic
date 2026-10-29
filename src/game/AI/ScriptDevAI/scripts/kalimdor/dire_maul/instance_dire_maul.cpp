@@ -16,8 +16,8 @@
 
 /* ScriptData
 SDName: instance_dire_maul
-SD%Complete: 70
-SDComment: East CreatureAI scenes use a versioned coordinator; West uses acknowledged ritual progress and fixed pylon identities
+SD%Complete: 100
+SDComment: Versioned East/West/North coordinators with acknowledged scenes and persistent reward claims
 SDCategory: Dire Maul
 EndScriptData
 
@@ -29,9 +29,27 @@ EndScriptData
 
 namespace
 {
-bool ParseDireMaulSave(char const* text, std::array<uint32, MAX_ENCOUNTER>& prefix, std::string& east, std::string& west)
+bool ReadDireMaulFrame(std::string const& text, char const* marker, uint32 maximum, std::string& payload, std::string& rest)
 {
-    if (!text || std::char_traits<char>::length(text) > 65536) return false;
+    std::istringstream in(text.substr(std::char_traits<char>::length(marker)));
+    std::string token;
+    if (!(in >> token) || token.empty() || token.size() > 6) return false;
+    uint32 length = 0;
+    for (char c : token)
+    {
+        if (c < '0' || c > '9') return false;
+        length = length * 10 + uint32(c - '0');
+        if (length > maximum) return false;
+    }
+    if (!length || in.get() != ' ') return false;
+    payload.resize(length);
+    if (!in.read(&payload[0], length) || in.get() != ' ') return false;
+    rest.assign(std::istreambuf_iterator<char>(in), {});
+    return !rest.empty();
+}
+bool ParseDireMaulSave(char const* text, std::array<uint32, MAX_ENCOUNTER>& prefix, std::string& east, std::string& west, std::string& north)
+{
+    if (!text || std::char_traits<char>::length(text) > 262144) return false;
     std::istringstream in(text);
     for (uint32& value : prefix)
     {
@@ -40,25 +58,18 @@ bool ParseDireMaulSave(char const* text, std::array<uint32, MAX_ENCOUNTER>& pref
         value = uint32(token[0] - '0');
     }
     in >> std::ws;
-    std::string tail(std::istreambuf_iterator<char>(in), {});
-    west.clear();
-    if (tail.compare(0, 5, "DMW1 ") != 0) { east = tail; return true; }
-    std::istringstream framed(tail.substr(5));
-    std::string token;
-    if (!(framed >> token) || token.empty()) return false;
-    uint32 length = 0;
-    for (char c : token)
+    std::string tail(std::istreambuf_iterator<char>(in), {}), rest;
+    north.clear(); west.clear();
+    bool hasNorth = tail.compare(0, 5, "DMN1 ") == 0;
+    if (hasNorth)
     {
-        if (c < '0' || c > '9' || length > 2400 || (length == 2400 && c != '0')) return false;
-        length = length * 10 + uint32(c - '0');
+        if (!ReadDireMaulFrame(tail, "DMN1 ", 128000, north, rest)) return false;
+        tail.swap(rest);
+        // A new North save always contains both earlier area extensions.
+        if (tail.compare(0, 5, "DMW1 ") != 0) return false;
     }
-    if (!length || framed.get() != ' ') return false;
-    west.resize(length);
-    if (!framed.read(&west[0], length) || framed.get() != ' ') return false;
-    east.assign(std::istreambuf_iterator<char>(framed), {});
-    // An explicit West frame always carries the East extension. Treat a
-    // truncated new save as damaged, rather than silently loading East legacy.
-    return !east.empty();
+    if (tail.compare(0, 5, "DMW1 ") != 0) { east = tail; return true; }
+    return ReadDireMaulFrame(tail, "DMW1 ", 24000, west, east);
 }
 std::array<uint32, 9> WestPrefix(std::array<uint32, MAX_ENCOUNTER> const& prefix)
 {
@@ -67,9 +78,15 @@ std::array<uint32, 9> WestPrefix(std::array<uint32, MAX_ENCOUNTER> const& prefix
     result[8] = prefix[TYPE_DREADSTEED];
     return result;
 }
+std::array<uint32, 7> NorthPrefix(std::array<uint32, MAX_ENCOUNTER> const& prefix)
+{
+    std::array<uint32, 7> result{};
+    for (uint32 i = 0; i < 7; ++i) result[i] = prefix[TYPE_KING_GORDOK + i];
+    return result;
+}
 }
 
-std::string instance_dire_maul::BuildSave(std::array<uint32, MAX_ENCOUNTER> const* prefix) const
+std::string instance_dire_maul::BuildSave(std::array<uint32, MAX_ENCOUNTER> const* prefix, std::string const* north) const
 {
     std::ostringstream out;
     for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
@@ -78,13 +95,15 @@ std::string instance_dire_maul::BuildSave(std::array<uint32, MAX_ENCOUNTER> cons
         out << (prefix ? (*prefix)[i] : GetData(i));
     }
     std::string west = m_west.Save();
-    out << " DMW1 " << west.size() << ' ' << west << ' ' << m_east.Save();
+    std::string northText = north ? *north : m_north.Save();
+    out << " DMN1 " << northText.size() << ' ' << northText << " DMW1 " << west.size() << ' ' << west << ' ' << m_east.Save();
     return out.str();
 }
+
 void instance_dire_maul::SaveState() { m_strInstData = BuildSave(); if (!m_loading) SaveToDB(); }
-void instance_dire_maul::OnCreatureRespawn(Creature* actor) { m_east.OnCreatureRespawn(actor); m_west.OnCreatureRespawn(actor); }
-void instance_dire_maul::OnCreatureEvade(Creature* actor) { m_east.OnCreatureEvade(actor); m_west.OnCreatureEvade(actor); }
-void instance_dire_maul::OnCreatureDespawn(Creature* actor) { m_east.OnCreatureDespawn(actor); m_west.OnCreatureDespawn(actor); }
+void instance_dire_maul::OnCreatureRespawn(Creature* actor) { m_east.OnCreatureRespawn(actor); m_west.OnCreatureRespawn(actor); m_north.OnCreatureRespawn(actor); }
+void instance_dire_maul::OnCreatureEvade(Creature* actor) { m_east.OnCreatureEvade(actor); m_west.OnCreatureEvade(actor); m_north.OnCreatureEvade(actor); }
+void instance_dire_maul::OnCreatureDespawn(Creature* actor) { m_east.OnCreatureDespawn(actor); m_west.OnCreatureDespawn(actor); m_north.OnCreatureDespawn(actor); }
 void instance_dire_maul::SetData64(uint32 type, uint64 value)
 {
     if (type == 1002)
@@ -92,16 +111,18 @@ void instance_dire_maul::SetData64(uint32 type, uint64 value)
 }
 bool instance_dire_maul::GetGameObjectLootSnapshot(ObjectGuid const& guid, uint32 entry, std::string& snapshot) const
 {
-    return m_east.GetFelvineLootSnapshot(guid, entry, snapshot);
+    return m_north.GetLootSnapshot(guid, entry, snapshot) || m_east.GetFelvineLootSnapshot(guid, entry, snapshot);
 }
 void instance_dire_maul::OnGameObjectLootSnapshot(ObjectGuid const& guid, uint32 entry, std::string const& snapshot, bool exhausted)
 {
     m_east.OnFelvineLootSnapshot(guid, entry, snapshot, exhausted);
+    m_north.OnLootSnapshot(guid, entry, snapshot, exhausted);
 }
 
 instance_dire_maul::instance_dire_maul(Map* pMap) : ScriptedInstance(pMap),
     m_east(*this, [this]() { SaveState(); }),
-    m_west(*this, [this]() { SaveState(); })
+    m_west(*this, [this]() { SaveState(); }),
+    m_north(*this, [this]() { SaveState(); })
 {
     Initialize();
 }
@@ -116,17 +137,20 @@ void instance_dire_maul::Update(uint32 diff)
 {
     m_east.Update(diff);
     m_west.Update(diff);
+    m_north.Update(diff);
 }
 
 void instance_dire_maul::OnPlayerEnter(Player* player)
 {
     m_east.OnPlayerEnter(player);
     m_west.OnPlayerEnter(player);
+    m_north.OnPlayerEnter(player);
 }
 
 void instance_dire_maul::OnPlayerLeave(Player* pPlayer) {
     m_east.OnPlayerLeave(pPlayer);
     m_west.OnPlayerLeave(pPlayer);
+    m_north.OnPlayerLeave(pPlayer);
     // Remove King of the Gordok aura
     if (pPlayer->HasAura(SPELL_KING_OF_GORDOK))
         pPlayer->RemoveAurasDueToSpell(SPELL_KING_OF_GORDOK);
@@ -136,6 +160,7 @@ void instance_dire_maul::OnCreatureCreate(Creature* pCreature)
 {
     m_east.OnCreatureCreate(pCreature);
     m_west.OnCreatureCreate(pCreature);
+    m_north.OnCreatureCreate(pCreature);
     switch (pCreature->GetEntry())
     {
         // East
@@ -152,9 +177,6 @@ void instance_dire_maul::OnCreatureCreate(Creature* pCreature)
 
         // North
         case NPC_CHO_RUSH_THE_OBSERVER:
-            if (m_auiEncounter[TYPE_KING_GORDOK] == DONE)
-                pCreature->SetStandState(UNIT_STAND_STATE_SIT);
-            break;
         case NPC_KING_GORDOK:
         case NPC_CAPTAIN_KROMCRUSH:
         case NPC_GUARD_SLIPKIK:
@@ -170,6 +192,7 @@ void instance_dire_maul::OnObjectCreate(GameObject* pGo)
 {
     m_east.OnObjectCreate(pGo);
     m_west.OnObjectCreate(pGo);
+    m_north.OnObjectCreate(pGo);
     switch (pGo->GetEntry())
     {
         // East object state is synchronized by the versioned coordinator.
@@ -198,68 +221,14 @@ void instance_dire_maul::OnObjectCreate(GameObject* pGo)
     m_goEntryGuidStore[pGo->GetEntry()] = pGo->GetObjectGuid();
 }
 
-void instance_dire_maul::SetData(uint32 uiType, uint32 uiData)
+void instance_dire_maul::SetData(uint32 type, uint32 data)
 {
-    if (uiType < 3) { m_east.SetData(uiType, uiData); return; }
-    if (uiType >= MAX_ENCOUNTER || uiData > SPECIAL) return;
-    if ((uiType >= TYPE_WARPWOOD && uiType <= TYPE_PYLON_5) || uiType == TYPE_DREADSTEED) { m_west.SetData(uiType, uiData); return; }
-    switch (uiType)
-    {
-        // North
-        case TYPE_KING_GORDOK:
-            m_auiEncounter[uiType] = uiData;
-            if (uiData == DONE)
-            {
-                // change faction to certian ogres
-                if (Creature* pOgre = GetSingleCreatureFromStorage(NPC_CAPTAIN_KROMCRUSH))
-                {
-                    if (pOgre->IsAlive())
-                    {
-                        pOgre->SetFactionTemporary(FACTION_FRIENDLY, TEMPFACTION_RESTORE_RESPAWN);
-
-                        // only evade if required
-                        if (pOgre->GetVictim())
-                            pOgre->AI()->EnterEvadeMode();
-                    }
-                }
-
-                if (Creature* pOgre = GetSingleCreatureFromStorage(NPC_CHO_RUSH_THE_OBSERVER))
-                {
-                    // Chorush evades and yells on king death (if alive)
-                    if (pOgre->IsAlive())
-                    {
-                        DoScriptText(SAY_CHORUSH_KING_DEAD, pOgre);
-                        pOgre->SetFactionTemporary(FACTION_FRIENDLY, TEMPFACTION_RESTORE_RESPAWN);
-                        pOgre->AI()->EnterEvadeMode();
-                    }
-
-                    // start WP movement for Mizzle; event handled by movement and gossip dbscripts
-                    if (Creature* pMizzle = pOgre->SummonCreature(NPC_MIZZLE_THE_CRAFTY, afMizzleSpawnLoc[0], afMizzleSpawnLoc[1], afMizzleSpawnLoc[2], afMizzleSpawnLoc[3], TEMPSPAWN_DEAD_DESPAWN, 0, true))
-                    {
-                        pMizzle->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
-                        pMizzle->SetWalk(false);
-                        pMizzle->GetMotionMaster()->MoveWaypoint();
-                    }
-                }
-            }
-            break;
-        case TYPE_MOLDAR:
-        case TYPE_FENGUS:
-        case TYPE_SLIPKIK:
-        case TYPE_KROMCRUSH:
-        case TYPE_CHORUSH:
-        case TYPE_STOMPER_KREEG:
-            m_auiEncounter[uiType] = uiData;
-            break;
-    }
-
-    if (uiData == DONE)
-    {
-        OUT_SAVE_INST_DATA;
-        SaveState();
-        OUT_SAVE_INST_DATA_COMPLETE;
-    }
+    if (type >= MAX_ENCOUNTER || data > SPECIAL) return;
+    if (type < 3) m_east.SetData(type, data);
+    else if ((type >= TYPE_WARPWOOD && type <= TYPE_PYLON_5) || type == TYPE_DREADSTEED) m_west.SetData(type, data);
+    else m_north.SetData(type, data);
 }
+
 
 std::vector<InstanceEventReset> instance_dire_maul::GetResettableEvents() const
 {
@@ -272,43 +241,32 @@ bool instance_dire_maul::GetEventResetData(uint32 eventId, std::string& data) co
     std::array<uint32, MAX_ENCOUNTER> prefix{};
     for (uint32 i = 0; i < MAX_ENCOUNTER; ++i) prefix[i] = GetData(i);
     prefix[TYPE_KING_GORDOK] = NOT_STARTED;
-    data = BuildSave(&prefix);
+    std::string north = m_north.SaveForKingReset();
+    data = BuildSave(&prefix, &north);
     return true;
 }
+
 
 void instance_dire_maul::ApplyEventReset(uint32 eventId, std::string const& data)
 {
     if (eventId != TYPE_KING_GORDOK) return;
     std::array<uint32, MAX_ENCOUNTER> prefix{};
-    std::string east, west;
-    if (!ParseDireMaulSave(data.c_str(), prefix, east, west) || east != m_east.Save() || west != m_west.Save() || prefix[TYPE_KING_GORDOK] != NOT_STARTED) return;
+    std::string east, west, north;
+    if (!ParseDireMaulSave(data.c_str(), prefix, east, west, north) || east != m_east.Save() || west != m_west.Save() ||
+        north != m_north.SaveForKingReset() || prefix[TYPE_KING_GORDOK] != NOT_STARTED) return;
     for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
         if (i != TYPE_KING_GORDOK && prefix[i] != GetData(i)) return;
-    // Reset only North. Loading East here would detach its live actor GUIDs.
-    m_auiEncounter[TYPE_KING_GORDOK] = NOT_STARTED;
-    m_strInstData = BuildSave();
+    // The core has already saved this validated reset. Keep all live area
+    // identities attached; loading any coordinator would detach its actors.
+    m_loading = true;
+    m_north.ResetKing();
+    m_loading = false;
     ResetEventRewardGameObject(GO_GORDOK_TRIBUTE);
-    GuidVector mizzles;
-    auto& objects = instance->GetObjectsStore();
-    for (auto itr = objects.begin<Creature>(); itr != objects.end<Creature>(); ++itr)
-        if (itr->second->GetEntry() == NPC_MIZZLE_THE_CRAFTY && !itr->second->HasStaticDBSpawnData())
-            mizzles.push_back(itr->first);
-    for (ObjectGuid guid : mizzles)
-        if (Creature* mizzle = instance->GetCreature(guid))
-        {
-            mizzle->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
-            mizzle->ForcedDespawn();
-        }
-    for (uint32 entry : {NPC_CAPTAIN_KROMCRUSH, NPC_CHO_RUSH_THE_OBSERVER})
-        if (Creature* guard = GetSingleCreatureFromStorage(entry, true))
-        {
-            guard->ClearTemporaryFaction();
-            if (guard->IsAlive()) guard->SetStandState(UNIT_STAND_STATE_STAND);
-        }
     for (auto const& reference : instance->GetPlayers())
         reference.getSource()->RemoveAurasDueToSpell(SPELL_KING_OF_GORDOK);
-    // Surviving tribute guards retain their own kill records and reward quality.
+    m_strInstData = BuildSave();
 }
+
 
 bool instance_dire_maul::GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const
 {
@@ -320,71 +278,46 @@ bool instance_dire_maul::GetBossLootReward(uint32 bossEntry, BossLootReward& rew
     return true;
 }
 
-uint32 instance_dire_maul::GetData(uint32 uiType) const
+uint32 instance_dire_maul::GetData(uint32 type) const
 {
-    if (uiType < 3) return m_east.GetData(uiType);
-    if ((uiType >= TYPE_WARPWOOD && uiType <= TYPE_PYLON_5) || uiType == TYPE_DREADSTEED) return m_west.GetData(uiType);
-    if (uiType < MAX_ENCOUNTER)
-        return m_auiEncounter[uiType];
-
+    if (type < 3) return m_east.GetData(type);
+    if ((type >= TYPE_WARPWOOD && type <= TYPE_PYLON_5) || type == TYPE_DREADSTEED) return m_west.GetData(type);
+    if (type >= TYPE_KING_GORDOK && type <= TYPE_STOMPER_KREEG) return m_north.GetData(type);
     return 0;
 }
 
-void instance_dire_maul::OnCreatureEnterCombat(Creature* actor) { m_west.OnCreatureEnterCombat(actor); }
 
-void instance_dire_maul::OnCreatureDeath(Creature* pCreature)
+void instance_dire_maul::OnCreatureEnterCombat(Creature* actor) { m_west.OnCreatureEnterCombat(actor); m_north.OnCreatureEnterCombat(actor); }
+
+void instance_dire_maul::OnCreatureDeath(Creature* actor)
 {
-    m_east.OnCreatureDeath(pCreature);
-    m_west.OnCreatureDeath(pCreature);
-    switch (pCreature->GetEntry())
-    {
-        // North
-        // - Handling of Ogre Boss (Assume boss can be handled in Acid)
-        case NPC_KING_GORDOK:
-            SetData(TYPE_KING_GORDOK, DONE);
-            break;
-        // Handle Ogre guards for Tribute Run chest
-        case NPC_GUARD_MOLDAR:
-            SetData(TYPE_MOLDAR, DONE);
-            break;
-        case NPC_GUARD_FENGUS:
-            SetData(TYPE_FENGUS, DONE);
-            break;
-        case NPC_GUARD_SLIPKIK:
-            SetData(TYPE_SLIPKIK, DONE);
-            break;
-        case NPC_CAPTAIN_KROMCRUSH:
-            SetData(TYPE_KROMCRUSH, DONE);
-            break;
-        case NPC_CHO_RUSH_THE_OBSERVER:
-            SetData(TYPE_CHORUSH, DONE);
-            break;
-        case NPC_STOMPER_KREEG:
-            SetData(TYPE_STOMPER_KREEG, DONE);
-            break;
-    }
+    m_east.OnCreatureDeath(actor);
+    m_west.OnCreatureDeath(actor);
+    m_north.OnCreatureDeath(actor);
 }
+
 
 void instance_dire_maul::Load(char const* text)
 {
     std::array<uint32, MAX_ENCOUNTER> prefix{};
-    std::string east, west;
-    if (!ParseDireMaulSave(text, prefix, east, west) ||
+    std::string east, west, north;
+    if (!ParseDireMaulSave(text, prefix, east, west, north) ||
         !DireMaulEast::ValidateSave({{prefix[0], prefix[1], prefix[2]}}, east) ||
-        !DireMaulWest::ValidateSave(WestPrefix(prefix), west))
+        !DireMaulWest::ValidateSave(WestPrefix(prefix), west) ||
+        !DireMaulNorth::ValidateSave(NorthPrefix(prefix), north))
     {
         OUT_LOAD_INST_DATA_FAIL;
         return;
     }
     m_loading = true;
-    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
-        m_auiEncounter[i] = i >= 3 && prefix[i] == IN_PROGRESS ? uint32(NOT_STARTED) : prefix[i];
     m_east.Load({{prefix[0], prefix[1], prefix[2]}}, east);
     m_west.Load(WestPrefix(prefix), west);
+    m_north.Load(NorthPrefix(prefix), north);
     m_loading = false;
     m_strInstData = BuildSave();
     OUT_LOAD_INST_DATA_COMPLETE;
 }
+
 
 bool instance_dire_maul::CheckConditionCriteriaMeet(Player const* pPlayer, uint32 uiInstanceConditionId, WorldObject const* pConditionSource, uint32 conditionSourceType) const
 {
@@ -425,7 +358,10 @@ struct go_ai_fixed_trap : public GameObjectAI
 
     void UpdateAI(const uint32 /*uiDiff*/) override
     {
-        if (m_go->IsSpawned())
+        auto* instance = static_cast<instance_dire_maul*>(m_go->GetInstanceData());
+        if (!instance) return;
+        instance->North().TrapRepaired(m_go);
+        if (m_go->IsSpawned() && instance->North().IsTrapActive())
         {
             // Sniffs show that trap should only react to Guard Slip'kik
             // He then enters evade mode and becomes an invalid target to hostile actions from players
@@ -433,7 +369,10 @@ struct go_ai_fixed_trap : public GameObjectAI
             // Additionnaly, Guard Slip'kik should get UnitFlags 16 but purpose is unknown so we skip it for now
             if (Creature* slipkik = GetClosestCreatureWithEntry(m_go, NPC_GUARD_SLIPKIK, 0.5f))
             {
-                m_go->Use(slipkik);
+                if (!slipkik->HasAura(SPELL_ICE_LOCK)) m_go->Use(slipkik);
+                // The real 5249 -> 22856 spell chain must succeed first. A
+                // failed cast retains the paid trap for a later attempt.
+                if (!instance->North().FreezeSlipkik(slipkik)) return;
                 DoScriptText(SAY_SLIPKIK_TRAP, slipkik);
                 slipkik->AI()->EnterEvadeMode();
                 slipkik->SetImmuneToPlayer(true);
@@ -461,7 +400,12 @@ struct GuardSlipkikTrigger : public SpellScript
         if (instance_dire_maul* instance = static_cast<instance_dire_maul*>(spell->GetCaster()->GetInstanceData()))
         {
             if (Creature* slipkik = instance->GetSingleCreatureFromStorage(NPC_GUARD_SLIPKIK))
+            {
+                instance->North().ThawSlipkik(slipkik);
+                // Original 31770 changes faction only; it does not remove
+                // the indefinite ice lock or its player immunity.
                 slipkik->setFaction(FACTION_OGRE);
+            }
         }
     }
 };

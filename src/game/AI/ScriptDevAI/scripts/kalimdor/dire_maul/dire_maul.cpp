@@ -31,6 +31,8 @@ EndContentData */
 #include "dire_maul.h"
 #include "dire_maul_east_creatures.h"
 
+void AddSC_dire_maul_north_creatures();
+void AddSC_dire_maul_north_objects();
 void AddSC_boss_alzzin();
 void AddSC_boss_kalendris();
 void AddSC_dire_maul_ritual_creatures();
@@ -84,6 +86,8 @@ struct SummonNetherWalker : public SpellScript
 
 void AddSC_dire_maul()
 {
+    AddSC_dire_maul_north_creatures();
+    AddSC_dire_maul_north_objects();
     AddSC_boss_alzzin();
     AddSC_boss_kalendris();
     AddSC_dire_maul_ritual_creatures();
