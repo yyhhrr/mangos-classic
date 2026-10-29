@@ -36,6 +36,7 @@ EndContentData */
 #include "AI/ScriptDevAI/base/escort_ai.h"
 #include "AI/ScriptDevAI/base/follower_ai.h"
 #include "AI/ScriptDevAI/scripts/kalimdor/world_kalimdor.h"
+#include "dire_maul/dire_maul_arena.h"
 #include "Spells/Scripts/SpellScript.h"
 
 /*######
@@ -625,6 +626,7 @@ struct CaptureMountainGiant : public SpecificTargetScript // 11889
 
 void AddSC_feralas()
 {
+    AddSC_dire_maul_arena_creatures();
     Script* pNewScript = new Script;
     pNewScript->Name = "npc_oox22fe";
     pNewScript->GetAI = &GetAI_npc_oox22fe;

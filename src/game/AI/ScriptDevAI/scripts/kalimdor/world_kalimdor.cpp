@@ -16,6 +16,7 @@
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "world_kalimdor.h"
+#include "dire_maul/dire_maul_arena.h"
 #include "AI/ScriptDevAI/scripts/world/world_map_scripts.h"
 #include "World/WorldState.h"
 #include "World/WorldStateDefines.h"
@@ -39,7 +40,30 @@ struct GhostOPlasmEvent
  */
 struct world_map_kalimdor : public ScriptedMap
 {
-    world_map_kalimdor(Map* pMap) : ScriptedMap(pMap) { Initialize(); }
+    world_map_kalimdor(Map* pMap) : ScriptedMap(pMap),
+        m_arena(*this, [this]() { SaveArena(); }) { Initialize(); m_arenaSave = m_arena.Save(); }
+
+    DireMaulArena m_arena;
+    std::string m_arenaSave;
+
+    void SaveArena() { m_arenaSave = m_arena.Save(); SaveToDB(); }
+    char const* Save() const override { return m_arenaSave.c_str(); }
+    void Load(char const* data) override
+    {
+        if (m_arena.Load(data ? data : "")) m_arenaSave = m_arena.Save();
+        else
+        {
+            // Preserve a damaged saved value and keep this area's scheduler
+            // closed; other Kalimdor event state remains attached and usable.
+            m_arenaSave = data ? data : "";
+            OUT_LOAD_INST_DATA_FAIL;
+        }
+    }
+    void OnCreatureRespawn(Creature* actor) override { m_arena.OnCreatureRespawn(actor); }
+    void OnCreatureDespawn(Creature* actor) override { m_arena.OnCreatureDespawn(actor); }
+    void OnPlayerEnter(Player* player) override { m_arena.OnPlayerEnter(player); }
+    void OnPlayerLeave(Player* player) override { m_arena.OnPlayerLeave(player); }
+
 
     uint8 m_uiMurkdeepAdds_KilledAddCount;
     std::vector<GhostOPlasmEvent> m_vGOEvents;
@@ -69,6 +93,7 @@ struct world_map_kalimdor : public ScriptedMap
 
     void OnCreatureCreate(Creature* pCreature) override
     {
+        m_arena.OnCreatureCreate(pCreature);
         switch (pCreature->GetEntry())
         {
             case NPC_HORNIZZ:
@@ -88,6 +113,7 @@ struct world_map_kalimdor : public ScriptedMap
 
     void OnCreatureDeath(Creature* pCreature) override
     {
+        m_arena.OnCreatureDeath(pCreature);
         switch (pCreature->GetEntry())
         {
             case NPC_GREYMIST_COASTRUNNNER:
@@ -255,6 +281,7 @@ struct world_map_kalimdor : public ScriptedMap
 
     void Update(uint32 diff) override
     {
+        m_arena.Update(diff);
         if (!m_vGOEvents.empty())
         {
             for (auto iter = m_vGOEvents.begin(); iter != m_vGOEvents.end();)
@@ -388,6 +415,13 @@ struct world_map_kalimdor : public ScriptedMap
 
     uint32 GetData(uint32 uiType) const override { return m_encounter[uiType]; }
 };
+
+DireMaulArena* GetDireMaulArena(Map* map)
+{
+    if (!map || map->GetId() != DMA_MAP || map->Instanceable()) return nullptr;
+    auto* owner = dynamic_cast<world_map_kalimdor*>(map->GetInstanceData());
+    return owner ? &owner->m_arena : nullptr;
+}
 
 InstanceData* GetInstanceData_world_map_kalimdor(Map* pMap)
 {
