@@ -34,6 +34,7 @@ EndContentData */
 #include "Grids/CellImpl.h"
 #include "Grids/GridNotifiers.h"
 #include "Grids/GridNotifiersImpl.h"
+#include "Maps/Map.h"
 
 /* When you make a spell effect:
 - always check spell id and effect index
@@ -234,6 +235,31 @@ enum
 // 8894 - Stromgarde Death
 // 9144 - Crushridge Death
 // 15782 - Frostsaber Cub Death
+static void QueueStromgardeRevenge(Creature* recipient, Creature* fallen)
+{
+    if (!recipient || !fallen || recipient == fallen || !recipient->IsAlive() || recipient->IsInCombat() ||
+        recipient->GetMap() != fallen->GetMap())
+        return;
+
+    ObjectGuid recipientGuid = recipient->GetObjectGuid();
+    ObjectGuid fallenGuid = fallen->GetObjectGuid();
+    time_t recipientRespawn = recipient->GetRespawnTime();
+    // Unit::JustKilledCreature writes the fallen creature's killer GUID after
+    // death spells finish. The map message runs on its next update, and keeps
+    // GUIDs rather than pointers to actors that can disappear in the meantime.
+    recipient->GetMap()->GetMessager().AddMessage([recipientGuid, fallenGuid, recipientRespawn](Map* map)
+    {
+        Creature* avenger = map->GetCreature(recipientGuid);
+        Creature* dead = map->GetCreature(fallenGuid);
+        if (!avenger || !dead || !avenger->IsAlive() || dead->IsAlive() || avenger->IsInCombat() ||
+            avenger->GetVictim() || avenger->GetRespawnTime() != recipientRespawn || !avenger->AI())
+            return;
+        Unit* killer = map->GetUnit(dead->GetKillerGuid());
+        if (killer && killer != avenger && killer->GetMap() == map && killer->IsAlive() && avenger->CanAttack(killer))
+            avenger->AI()->AttackStart(killer);
+    });
+}
+
 struct TribalDeath : public SpellScript
 {
     bool OnCheckTarget(const Spell* spell, Unit* target, SpellEffectIndex /*eff*/) const override
@@ -266,7 +292,12 @@ struct TribalDeath : public SpellScript
         Unit* target = spell->GetUnitTarget();
         Unit* caster = spell->GetCaster();
         target->CastSpell(nullptr, spellId, TRIGGERED_OLD_TRIGGERED);
-        if (!target->IsInCombat())
+        if (spell->m_spellInfo->Id == SPELL_STROMGARDE_DEATH)
+        {
+            if (target->GetTypeId() == TYPEID_UNIT && caster->GetTypeId() == TYPEID_UNIT)
+                QueueStromgardeRevenge(static_cast<Creature*>(target), static_cast<Creature*>(caster));
+        }
+        else if (!target->IsInCombat())
             if (Unit* killer = target->GetMap()->GetUnit(static_cast<Creature*>(target)->GetKillerGuid()))
                 target->AI()->AttackStart(killer);
 
