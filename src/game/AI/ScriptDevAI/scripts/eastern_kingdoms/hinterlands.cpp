@@ -63,6 +63,7 @@ struct npc_00x09hlAI : public npc_escortAI
     {
         if (!HasEscortState(STATE_ESCORT_ESCORTING))
         {
+            DespawnSummons();
             m_uiSummonCount = 0;
             m_creature->SetStandState(UNIT_STAND_STATE_DEAD);
         }
@@ -133,15 +134,29 @@ struct npc_00x09hlAI : public npc_escortAI
         m_lSummonsList.push_back(pSummoned->GetObjectGuid());
     }
 
-    void JustDied(Unit* pKiller) override
+    void DespawnSummons()
     {
-        for (GuidList::const_iterator itr = m_lSummonsList.begin(); itr != m_lSummonsList.end(); ++itr)
+        GuidList summons;
+        summons.swap(m_lSummonsList);
+
+        for (GuidList::const_iterator itr = summons.begin(); itr != summons.end(); ++itr)
         {
             if (Creature* pSummoned = m_creature->GetMap()->GetCreature(*itr))
-                pSummoned->ForcedDespawn();
+                if (pSummoned->GetSpawnerGuid() == m_creature->GetObjectGuid())
+                    pSummoned->ForcedDespawn();
         }
+    }
 
+    void JustDied(Unit* pKiller) override
+    {
+        DespawnSummons();
         npc_escortAI::JustDied(pKiller);
+    }
+
+    void CorpseRemoved(uint32& respawnDelay) override
+    {
+        DespawnSummons();
+        npc_escortAI::CorpseRemoved(respawnDelay);
     }
 };
 
@@ -262,7 +277,7 @@ struct npc_rinjiAI : public npc_escortAI
 
     void JustSummoned(Creature* pSummoned) override
     {
-        m_creature->SetWalk(false);
+        pSummoned->SetWalk(false);
         pSummoned->GetMotionMaster()->MovePoint(0, m_afAmbushMoveTo[m_iSpawnId].x, m_afAmbushMoveTo[m_iSpawnId].y, m_afAmbushMoveTo[m_iSpawnId].z);
     }
 
@@ -355,6 +370,270 @@ UnitAI* GetAI_npc_rinji(Creature* pCreature)
     return new npc_rinjiAI(pCreature);
 }
 
+/*######
+## npc_sharpbeak / event_sharpbeak_freed
+## Reconstruction: local staging times are not claimed as original sniff data.
+######*/
+
+enum
+{
+    QUEST_SAVING_SHARPBEAK       = 2994,
+    EVENT_SHARPBEAK_FREED        = 2807,
+    NPC_SHARPBEAK                = 8023,
+    NPC_SHARPBEAK_FATHER         = 8024,
+    NPC_SHARPBEAK_MOTHER         = 8025,
+    GO_SHARPBEAK_CAGE            = 144070,
+    SHARPBEAK_REUNION_DELAY      = 6000,
+    SHARPBEAK_SCENE_DURATION     = 24000,
+    SHARPBEAK_PARENT_LIFETIME    = 30000,
+    SHARPBEAK_RESPAWN_DELAY      = 10
+};
+
+struct npc_sharpbeakAI : public ScriptedAI
+{
+    npc_sharpbeakAI(Creature* creature) : ScriptedAI(creature),
+        m_active(false), m_stopping(false), m_stateSaved(false), m_departing(false),
+        m_timer(0), m_remaining(0), m_sceneX(0.f), m_sceneY(0.f), m_sceneZ(0.f),
+        m_savedStandState(0), m_savedImmunityFlags(0), m_savedLevitate(false),
+        m_savedWalk(true), m_savedActive(false)
+    {
+        SetReactState(REACT_PASSIVE);
+    }
+
+    bool m_active;
+    bool m_stopping;
+    bool m_stateSaved;
+    bool m_departing;
+    uint32 m_timer;
+    uint32 m_remaining;
+    float m_sceneX, m_sceneY, m_sceneZ;
+    uint8 m_savedStandState;
+    uint32 m_savedImmunityFlags;
+    bool m_savedLevitate;
+    bool m_savedWalk;
+    bool m_savedActive;
+    GuidList m_parents;
+
+    void DespawnParents()
+    {
+        GuidList parents;
+        parents.swap(m_parents);
+        for (GuidList::const_iterator itr = parents.begin(); itr != parents.end(); ++itr)
+        {
+            if (Creature* parent = m_creature->GetMap()->GetCreature(*itr))
+                if (parent->GetSpawnerGuid() == m_creature->GetObjectGuid() &&
+                    (parent->GetEntry() == NPC_SHARPBEAK_FATHER || parent->GetEntry() == NPC_SHARPBEAK_MOTHER))
+                    parent->ForcedDespawn();
+        }
+    }
+
+    void RestoreState()
+    {
+        if (!m_stateSaved)
+            return;
+
+        m_stateSaved = false;
+        m_creature->GetMotionMaster()->MoveIdle();
+        m_creature->SetStandState(m_savedStandState);
+        m_creature->SetLevitate(m_savedLevitate);
+        m_creature->SetWalk(m_savedWalk);
+        m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PLAYER | UNIT_FLAG_IMMUNE_TO_NPC);
+        m_creature->SetFlag(UNIT_FIELD_FLAGS, m_savedImmunityFlags);
+        m_creature->SetActiveObjectState(m_savedActive);
+    }
+
+    void AbortStart()
+    {
+        m_stopping = true;
+        m_active = false;
+        m_timer = m_remaining = 0;
+        m_departing = false;
+        DespawnParents();
+        RestoreState();
+        m_stopping = false;
+    }
+
+    void FinishScene()
+    {
+        if (!m_active || m_stopping)
+            return;
+
+        m_stopping = true;
+        DespawnParents();
+        // Keep m_active until CorpseRemoved sets the short scene respawn delay.
+        if (m_active)
+            m_creature->ForcedDespawn();
+        m_stopping = false;
+    }
+
+    bool HaveParents() const
+    {
+        if (m_parents.size() != 2)
+            return false;
+        for (GuidList::const_iterator itr = m_parents.begin(); itr != m_parents.end(); ++itr)
+        {
+            Creature* parent = m_creature->GetMap()->GetCreature(*itr);
+            if (!parent || !parent->IsAlive() || parent->GetSpawnerGuid() != m_creature->GetObjectGuid())
+                return false;
+        }
+        return true;
+    }
+
+    bool StartScene(Player* player, GameObject* cage)
+    {
+        if (!player || !cage || m_stopping || !m_creature->IsAlive() ||
+            !player->IsInWorld() || !player->IsAlive() || !cage->IsInWorld() || !cage->IsSpawned() ||
+            cage->GetEntry() != GO_SHARPBEAK_CAGE || cage->GetGoType() != GAMEOBJECT_TYPE_GOOBER ||
+            m_creature->GetMapId() != 0 || player->GetMap() != m_creature->GetMap() || cage->GetMap() != m_creature->GetMap() ||
+            !player->IsWithinDistInMap(cage, INTERACTION_DISTANCE) || !m_creature->IsWithinDistInMap(cage, 10.f) ||
+            player->GetQuestRewardStatus(QUEST_SAVING_SHARPBEAK))
+            return false;
+
+        QuestStatus status = player->GetQuestStatus(QUEST_SAVING_SHARPBEAK);
+        if (status != QUEST_STATUS_INCOMPLETE && status != QUEST_STATUS_COMPLETE)
+            return false;
+        if (m_active)
+            return true;
+
+        m_active = true;
+        m_departing = false;
+        m_timer = SHARPBEAK_REUNION_DELAY;
+        m_remaining = SHARPBEAK_SCENE_DURATION;
+        m_sceneX = m_creature->GetPositionX();
+        m_sceneY = m_creature->GetPositionY();
+        m_sceneZ = m_creature->GetPositionZ();
+        m_savedStandState = m_creature->GetByteValue(UNIT_FIELD_BYTES_1, 0);
+        m_savedImmunityFlags = m_creature->GetUInt32Value(UNIT_FIELD_FLAGS) & (UNIT_FLAG_IMMUNE_TO_PLAYER | UNIT_FLAG_IMMUNE_TO_NPC);
+        m_savedLevitate = m_creature->IsLevitating();
+        m_savedWalk = m_creature->IsWalking();
+        m_savedActive = m_creature->HasActiveObjectState();
+        m_stateSaved = true;
+        m_creature->SetActiveObjectState(true);
+        m_creature->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PLAYER | UNIT_FLAG_IMMUNE_TO_NPC);
+        m_creature->SetStandState(UNIT_STAND_STATE_STAND);
+
+        for (uint8 i = 0; i < 2; ++i)
+        {
+            float side = i == 0 ? -1.f : 1.f;
+            Creature* parent = m_creature->SummonCreature(i == 0 ? NPC_SHARPBEAK_FATHER : NPC_SHARPBEAK_MOTHER,
+                m_sceneX - 30.f, m_sceneY + side * 20.f, m_sceneZ + 20.f, 0.f,
+                TEMPSPAWN_TIMED_DESPAWN, SHARPBEAK_PARENT_LIFETIME, true);
+            if (!parent)
+            {
+                AbortStart();
+                return false;
+            }
+
+            m_parents.push_back(parent->GetObjectGuid());
+            parent->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PLAYER | UNIT_FLAG_IMMUNE_TO_NPC);
+            if (parent->AI())
+                parent->AI()->SetReactState(REACT_PASSIVE);
+            parent->SetLevitate(true);
+            parent->SetWalk(false);
+            parent->GetMotionMaster()->MovePoint(1, m_sceneX - 3.f, m_sceneY + side * 3.f, m_sceneZ + 4.f,
+                FORCED_MOVEMENT_FLIGHT, false);
+        }
+        return true;
+    }
+
+    void Reset() override
+    {
+        if (m_active)
+            FinishScene();
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        if (m_active)
+            DespawnParents();
+        ScriptedAI::JustDied(killer);
+    }
+
+    void CorpseRemoved(uint32& respawnDelay) override
+    {
+        if (m_active)
+        {
+            respawnDelay = SHARPBEAK_RESPAWN_DELAY;
+            bool wasStopping = m_stopping;
+            m_stopping = true;
+            m_active = false;
+            m_timer = m_remaining = 0;
+            m_departing = false;
+            DespawnParents();
+            RestoreState();
+            m_stopping = wasStopping;
+        }
+        ScriptedAI::CorpseRemoved(respawnDelay);
+    }
+
+    void UpdateAI(const uint32 diff) override
+    {
+        if (!m_active || m_stopping)
+            return;
+        if (!HaveParents() || diff >= m_remaining)
+        {
+            FinishScene();
+            return;
+        }
+        m_remaining -= diff;
+        if (m_departing)
+            return;
+        if (diff < m_timer)
+        {
+            m_timer -= diff;
+            return;
+        }
+
+        m_departing = true;
+        m_creature->SetLevitate(true);
+        m_creature->SetWalk(false);
+        m_creature->GetMotionMaster()->MovePoint(2, m_sceneX + 70.f, m_sceneY - 50.f, m_sceneZ + 55.f,
+            FORCED_MOVEMENT_FLIGHT, false);
+        uint8 i = 0;
+        for (GuidList::const_iterator itr = m_parents.begin(); itr != m_parents.end(); ++itr, ++i)
+        {
+            if (Creature* parent = m_creature->GetMap()->GetCreature(*itr))
+                parent->GetMotionMaster()->MovePoint(2, m_sceneX + 70.f, m_sceneY - 50.f + (i == 0 ? -4.f : 4.f), m_sceneZ + 57.f,
+                    FORCED_MOVEMENT_FLIGHT, false);
+        }
+    }
+};
+
+UnitAI* GetAI_npc_sharpbeak(Creature* creature)
+{
+    return new npc_sharpbeakAI(creature);
+}
+
+bool ProcessEventId_SharpbeakFreed(uint32 eventId, Object* source, Object* target, bool isStart)
+{
+    if (eventId != EVENT_SHARPBEAK_FREED || !isStart || !source || !source->IsPlayer())
+        return false;
+
+    Player* player = static_cast<Player*>(source);
+    if (!player->IsInWorld() || player->GetMapId() != 0)
+        return false;
+
+    GameObject* cage = nullptr;
+    if (target)
+    {
+        if (!target->IsGameObject())
+            return false;
+        cage = static_cast<GameObject*>(target);
+    }
+    else
+        cage = GetClosestGameObjectWithEntry(player, GO_SHARPBEAK_CAGE, INTERACTION_DISTANCE);
+
+    if (!cage || cage->GetEntry() != GO_SHARPBEAK_CAGE || cage->GetMap() != player->GetMap() ||
+        !player->IsWithinDistInMap(cage, INTERACTION_DISTANCE))
+        return false;
+
+    if (Creature* sharpbeak = GetClosestCreatureWithEntry(cage, NPC_SHARPBEAK, 10.f))
+        if (npc_sharpbeakAI* ai = dynamic_cast<npc_sharpbeakAI*>(sharpbeak->AI()))
+            return ai->StartScene(player, cage);
+    return false;
+}
+
+
 enum
 {
     YELL_FALSTAD_INVADERS = -27,
@@ -407,6 +686,16 @@ void AddSC_hinterlands()
     pNewScript = new Script;
     pNewScript->Name = "event_wildhammer_message";
     pNewScript->pProcessEventId = &ProcessEventId_WildhammerMessage;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_sharpbeak";
+    pNewScript->GetAI = &GetAI_npc_sharpbeak;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "event_sharpbeak_freed";
+    pNewScript->pProcessEventId = &ProcessEventId_SharpbeakFreed;
     pNewScript->RegisterSelf();
 
     RegisterSpellScript<GammeritaTurtleCamera>("spell_gammerita_turtle_camera");
