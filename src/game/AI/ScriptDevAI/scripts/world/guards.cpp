@@ -57,9 +57,36 @@ UnitAI* GetAI_guard_darnassus(Creature* pCreature)
     return new guardAI(pCreature);
 }
 
+// The two Wetlands mountaineers share entry727 with guards in other zones.
+// Keep the guard AI and limit their combat list to the approved DB spawns.
+struct guard_dunmoroghAI : public guardAI
+{
+    guard_dunmoroghAI(Creature* creature) : guardAI(creature) {}
+
+    void BindWetlandsCombatSpells()
+    {
+        if (m_creature->GetEntry() == 727 && m_creature->GetMapId() == 0 &&
+            (m_creature->GetDbGuid() == 590036 || m_creature->GetDbGuid() == 590037) &&
+            GetSpellList().Id != 727101)
+            m_creature->SetSpellList(727101);
+    }
+
+    void Reset() override
+    {
+        guardAI::Reset();
+        BindWetlandsCombatSpells();
+    }
+
+    void JustRespawned() override
+    {
+        BindWetlandsCombatSpells();
+        guardAI::JustRespawned();
+    }
+};
+
 UnitAI* GetAI_guard_dunmorogh(Creature* pCreature)
 {
-    return new guardAI(pCreature);
+    return new guard_dunmoroghAI(pCreature);
 }
 
 UnitAI* GetAI_guard_durotar(Creature* pCreature)

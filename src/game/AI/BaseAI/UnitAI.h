@@ -76,6 +76,7 @@ enum CastFlags
     CAST_DISTANCE_YOURSELF      = 0x400,                    // If spell with this cast flag hits main aggro target, caster distances himself - EAI only - DEPRECATED - use creature_spell_list instead
     CAST_TARGET_CASTING         = 0x800,                    // Selects only targets that are casting - EAI only
     CAST_ONLY_XYZ               = 0x1000,                   // Targets only coords of target and not unit
+    CAST_IGNORE_COSTS           = 0x2000,                   // Opt-in costs waiver for NPC AI; retains normal combat checks
 };
 
 enum ReactStates

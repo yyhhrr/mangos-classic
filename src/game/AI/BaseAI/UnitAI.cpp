@@ -216,6 +216,13 @@ CanCastResult UnitAI::DoCastSpellIfCan(Unit* target, uint32 spellId, uint32 cast
             if (flags == TRIGGERED_NONE)
                 flags |= TRIGGERED_NORMAL_COMBAT_CAST;
 
+            // Some NPC actions use player spells but have no energy or rage pool.
+            // Keep their normal cast, cooldown and control checks. Player-owned
+            // or charmed creatures retain the spell's original cost rules.
+            if ((castFlags & CAST_IGNORE_COSTS) && !(castFlags & CAST_TRIGGERED) &&
+                caster->GetTypeId() == TYPEID_UNIT && !caster->GetBeneficiaryPlayer())
+                flags |= TRIGGERED_IGNORE_COSTS | TRIGGERED_NORMAL_COMBAT_CAST;
+
             SpellCastResult result;
             if (castFlags & CAST_ONLY_XYZ)
                 result = caster->CastSpell(target->GetPositionX(), target->GetPositionY(), target->GetPositionZ(), spellInfo, flags);
