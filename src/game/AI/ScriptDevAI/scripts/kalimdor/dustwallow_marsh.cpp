@@ -36,6 +36,10 @@ EndContentData */
 #include "AI/ScriptDevAI/scripts/kalimdor/world_kalimdor.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
 #include <unordered_map>
+#include "AI/EventAI/CreatureEventAI.h"
+#include <algorithm>
+#include <iterator>
+#include <map>
 
 /*######
 ## npc_morokk
@@ -54,92 +58,178 @@ enum
     FACTION_MOR_SPAWN       = 29
 };
 
+// Paused escorts do not run the native distance failure check. Keep the same
+// group radius while also retiring abandoned task rounds.
+static bool DustwallowQuestGroupInRange(Creature* actor, Player* player, uint32 quest, float radius)
+{
+    return player && player->CheckForGroup([&](Player const* member)
+    {
+        return member->GetQuestStatus(quest) == QUEST_STATUS_INCOMPLETE &&
+            actor->IsWithinDistInMap(member, radius);
+    });
+}
+
 struct npc_morokkAI : public npc_escortAI
 {
-    npc_morokkAI(Creature* pCreature) : npc_escortAI(pCreature)
+    enum Phase { IDLE, APPROACH, FIGHT, ESCAPING, ABORTED };
+
+    explicit npc_morokkAI(Creature* creature) : npc_escortAI(creature),
+        m_originalDeathPrevention(creature->IsPreventingDeath()) { Reset(); }
+
+    Phase m_phase = IDLE;
+    bool m_originalDeathPrevention;
+    uint32 m_playerTimer = 1000;
+
+    void Reset() override { SetDeathPrevention(m_phase == FIGHT || m_originalDeathPrevention); }
+
+    bool CanStart() const
     {
-        m_bIsSuccess = false;
+        return m_phase == IDLE && m_creature->IsAlive() && !m_creature->IsInCombat() &&
+            !HasEscortState(STATE_ESCORT_ESCORTING) &&
+            m_creature->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER);
+    }
+
+    bool CanOfferQuest(uint32 quest) const override { return quest != QUEST_CHALLENGE_MOROKK || CanStart(); }
+
+    bool TryStart(Player* player, Quest const* quest)
+    {
+        if (!player || !quest || quest->GetQuestId() != QUEST_CHALLENGE_MOROKK || !player->IsAlive() ||
+            player->GetMap() != m_creature->GetMap() || player->GetQuestStatus(QUEST_CHALLENGE_MOROKK) != QUEST_STATUS_INCOMPLETE)
+            return false;
+        if (HasEscortState(STATE_ESCORT_ESCORTING) && GetPlayerForEscort() == player && m_questForEscort == quest)
+            return true;
+        if (!CanStart())
+            return false;
+        Start(true, player, quest);
+        return HasEscortState(STATE_ESCORT_ESCORTING) && GetPlayerForEscort() == player && m_questForEscort == quest;
+    }
+
+    void JustStartedEscort() override
+    {
+        m_phase = APPROACH;
+        m_playerTimer = 1000;
         Reset();
     }
 
-    bool m_bIsSuccess;
-
-    void Reset() override {}
-
     void JustRespawned() override
     {
-        npc_escortAI::JustRespawned();
+        SetEscortPaused(false);
+        End();
+        m_phase = IDLE;
+        m_playerTimer = 1000;
         m_creature->setFaction(FACTION_MOR_SPAWN);
+        npc_escortAI::JustRespawned();
+    }
+
+    void FailQuestForPlayerAndGroup() override
+    {
+        if (m_phase != ESCAPING && m_phase != ABORTED)
+            npc_escortAI::FailQuestForPlayerAndGroup();
+        m_phase = ABORTED;
+        SetDeathPrevention(m_originalDeathPrevention);
+        SetEscortPaused(false);
+        End();
     }
 
     void JustReachedHome() override
     {
-        if (HasEscortState(STATE_ESCORT_ESCORTING))
+        if (HasEscortState(STATE_ESCORT_ESCORTING) && m_phase != ESCAPING)
         {
-            if (!m_bIsSuccess)
+            FailQuestForPlayerAndGroup();
+            m_creature->ForcedDespawn();
+        }
+    }
+
+    void WaypointReached(uint32 point) override
+    {
+        if (point == 1 && m_phase == APPROACH && HasEscortState(STATE_ESCORT_ESCORTING))
+            SetEscortPaused(true);
+    }
+
+    void Surrender()
+    {
+        if (m_phase != FIGHT || !HasEscortState(STATE_ESCORT_ESCORTING))
+            return;
+        Player* player = GetPlayerForEscort();
+        if (!player)
+        {
+            FailQuestForPlayerAndGroup();
+            m_creature->ForcedDespawn();
+            return;
+        }
+        m_phase = ESCAPING;
+        player->RewardPlayerAndGroupAtEventExplored(QUEST_CHALLENGE_MOROKK, m_creature);
+        QuestEnd();
+        SetDeathPrevention(m_originalDeathPrevention);
+        m_creature->setFaction(FACTION_MOR_RUNNING);
+        m_creature->RemoveAllAurasOnEvade();
+        m_creature->CombatStop(true);
+        m_creature->SetImmuneToPlayer(true);
+        SetEscortPaused(false);
+        SetReactState(REACT_PASSIVE);
+        DoScriptText(SAY_MOR_SCARED, m_creature);
+        m_creature->GetMotionMaster()->Clear(false);
+    }
+
+    void DamageTaken(Unit*, uint32& damage, DamageEffectType, SpellEntry const*) override
+    {
+        if (m_phase == ESCAPING)
+        {
+            damage = 0;
+            return;
+        }
+        if (m_phase != FIGHT || !damage || !m_creature->IsAlive())
+            return;
+        uint32 health = m_creature->GetHealth();
+        if (damage >= health || uint64(health - damage) * 100 <= uint64(m_creature->GetMaxHealth()) * 30)
+        {
+            damage = std::min(damage, health - 1);
+            Surrender();
+        }
+    }
+
+    void UpdateEscortAI(uint32 diff) override
+    {
+        if (m_phase == FIGHT && m_creature->IsAlive() &&
+            uint64(m_creature->GetHealth()) * 100 <= uint64(m_creature->GetMaxHealth()) * 30)
+            Surrender(); // Native protection also covers aggregated weapon lines.
+        if (m_phase == FIGHT && HasEscortState(STATE_ESCORT_PAUSED))
+        {
+            if (m_playerTimer <= diff)
             {
-                FailQuestForPlayerAndGroup();
-                m_creature->ForcedDespawn();
+                if (!DustwallowQuestGroupInRange(m_creature, GetPlayerForEscort(), QUEST_CHALLENGE_MOROKK, 70.0f))
+                {
+                    FailQuestForPlayerAndGroup();
+                    m_creature->ForcedDespawn();
+                    return;
+                }
+                m_playerTimer = 1000;
             }
+            else
+                m_playerTimer -= diff;
         }
-    }
-
-    void WaypointReached(uint32 uiPointId) override
-    {
-        switch (uiPointId)
-        {
-            case 1:
-                SetEscortPaused(true);
-                break;
-        }
-    }
-
-    void UpdateEscortAI(const uint32 /*uiDiff*/) override
-    {
         if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
         {
-            if (HasEscortState(STATE_ESCORT_PAUSED))
+            if (m_phase == APPROACH && HasEscortState(STATE_ESCORT_PAUSED))
             {
-                if (Player* pPlayer = GetPlayerForEscort())
+                Player* player = GetPlayerForEscort();
+                if (player && player->IsAlive() && player->IsInRange(m_creature, 0, 70))
                 {
-                    if (pPlayer->IsAlive() && pPlayer->IsInRange(m_creature, 0, 70))
-                    {
-                        m_bIsSuccess = false;
-                        DoScriptText(SAY_MOR_CHALLENGE, m_creature, pPlayer);
-                        m_creature->SetImmuneToPlayer(false);
-                        SetReactState(REACT_AGGRESSIVE);
-                        m_creature->setFaction(FACTION_MOR_HOSTILE);
-                        AttackStart(pPlayer);
-                    }
-                    else
-                        SetEscortPaused(false);
+                    m_phase = FIGHT;
+                    SetDeathPrevention(true);
+                    DoScriptText(SAY_MOR_CHALLENGE, m_creature, player);
+                    m_creature->SetImmuneToPlayer(false);
+                    SetReactState(REACT_AGGRESSIVE);
+                    m_creature->setFaction(FACTION_MOR_HOSTILE);
+                    AttackStart(player);
                 }
                 else
                     SetEscortPaused(false);
             }
             return;
         }
-        if (m_creature->GetHealthPercent() <= 30.0f)
-        {
-            if (HasEscortState(STATE_ESCORT_PAUSED))
-            {
-                if (Player* pPlayer = GetPlayerForEscort())
-                {
-                    pPlayer->RewardPlayerAndGroupAtEventExplored(QUEST_CHALLENGE_MOROKK, m_creature);
-                    m_creature->setFaction(FACTION_MOR_RUNNING);
-                    m_bIsSuccess = true;
-                    m_creature->RemoveAllAurasOnEvade();
-                    m_creature->CombatStop(true);
-                    m_creature->SetImmuneToPlayer(true);
-                    SetEscortPaused(false);
-                    SetReactState(REACT_PASSIVE);
-                    DoScriptText(SAY_MOR_SCARED, m_creature);
-                    m_creature->GetMotionMaster()->Clear(false); // TODO: make whole EscortAI work like this
-                }
-            }
-        }
-
-        DoMeleeAttackIfReady();
+        if (m_phase == FIGHT)
+            DoMeleeAttackIfReady();
     }
 };
 
@@ -148,17 +238,18 @@ UnitAI* GetAI_npc_morokk(Creature* pCreature)
     return new npc_morokkAI(pCreature);
 }
 
-bool QuestAccept_npc_morokk(Player* pPlayer, Creature* pCreature, const Quest* pQuest)
+bool QuestAccept_npc_morokk(Player* player, Creature* creature, Quest const* quest)
 {
-    if (pQuest->GetQuestId() == QUEST_CHALLENGE_MOROKK)
+    if (!player || !creature || !quest || quest->GetQuestId() != QUEST_CHALLENGE_MOROKK)
+        return false;
+    auto ai = dynamic_cast<npc_morokkAI*>(creature->AI());
+    if (!ai || !ai->TryStart(player, quest))
     {
-        if (npc_morokkAI* pEscortAI = dynamic_cast<npc_morokkAI*>(pCreature->AI()))
-            pEscortAI->Start(true, pPlayer, pQuest);
-
-        return true;
+        if (player->GetQuestStatus(QUEST_CHALLENGE_MOROKK) == QUEST_STATUS_INCOMPLETE)
+            player->FailQuest(QUEST_CHALLENGE_MOROKK);
+        return false;
     }
-
-    return false;
+    return true;
 }
 
 /*######
@@ -211,67 +302,134 @@ static float m_afMoveTo[] = { -3371.414795f, -3212.179932f, 34.210f};
 
 struct npc_ogronAI : public npc_escortAI
 {
-    npc_ogronAI(Creature* pCreature) : npc_escortAI(pCreature)
+    explicit npc_ogronAI(Creature* creature) : npc_escortAI(creature) { Reset(); }
+
+    ObjectGuid m_reetheGuid;
+    ObjectGuid m_guests[4];
+    bool m_defeated[4] = {};
+    int32 m_spawnSlot = -1;
+    uint32 m_uiPhase = PHASE_INTRO;
+    uint32 m_uiPhaseCounter = 0;
+    uint32 m_uiGlobalTimer = 5000;
+    uint32 m_retryTimer = 0;
+    uint32 m_spawnFailures = 0;
+    uint32 m_playerTimer = 1000;
+    bool m_cleaning = false;
+    bool m_rewarded = false;
+
+    void Reset() override { } // Evade is neither victory nor a lost wave.
+
+    uint32 GuestEntry(uint32 slot) const
     {
-        lCreatureList.clear();
-        m_uiPhase = 0;
+        return slot == 0 ? NPC_CALDWELL : slot == 1 ? NPC_HALLAN : NPC_SKIRMISHER;
+    }
+
+    bool OwnedGuest(Creature const* actor, uint32 slot) const
+    {
+        return actor && actor->GetEntry() == GuestEntry(slot) &&
+            actor->GetSpawnerGuid() == m_creature->GetObjectGuid();
+    }
+
+    void CleanupGuests()
+    {
+        m_cleaning = true;
+        for (uint32 i = 0; i < 4; ++i)
+        {
+            ObjectGuid guid = m_guests[i];
+            m_guests[i].Clear();
+            if (Creature* actor = m_creature->GetMap()->GetCreature(guid))
+                if (OwnedGuest(actor, i) && actor->IsAlive())
+                    actor->ForcedDespawn();
+            m_defeated[i] = false;
+        }
+        m_cleaning = false;
+        m_spawnSlot = -1;
+        m_retryTimer = m_spawnFailures = 0;
+    }
+
+    void JustStartedEscort() override
+    {
+        CleanupGuests();
+        m_reetheGuid.Clear();
+        m_uiPhase = PHASE_INTRO;
         m_uiPhaseCounter = 0;
-        Reset();
-    }
-
-    CreatureList lCreatureList;
-
-    uint32 m_uiPhase;
-    uint32 m_uiPhaseCounter;
-    uint32 m_uiGlobalTimer;
-
-    void Reset() override
-    {
         m_uiGlobalTimer = 5000;
-
-        if (HasEscortState(STATE_ESCORT_PAUSED) && m_uiPhase == PHASE_FIGHT)
-            m_uiPhase = PHASE_COMPLETE;
-
-        if (!HasEscortState(STATE_ESCORT_ESCORTING))
-        {
-            lCreatureList.clear();
-            m_uiPhase = 0;
-            m_uiPhaseCounter = 0;
-        }
+        m_playerTimer = 1000;
+        m_rewarded = false;
     }
 
-    void MoveInLineOfSight(Unit* pWho) override
+    void JustRespawned() override
     {
-        if (HasEscortState(STATE_ESCORT_ESCORTING) && pWho->GetEntry() == NPC_REETHE && lCreatureList.empty())
-            lCreatureList.push_back((Creature*)pWho);
-
-        npc_escortAI::MoveInLineOfSight(pWho);
+        CleanupGuests();
+        SetEscortPaused(false);
+        End();
+        m_reetheGuid.Clear();
+        m_uiPhase = PHASE_INTRO;
+        m_uiPhaseCounter = 0;
+        m_uiGlobalTimer = 5000;
+        m_playerTimer = 1000;
+        m_rewarded = false;
+        npc_escortAI::JustRespawned();
     }
 
-    Creature* GetCreature(uint32 uiCreatureEntry)
+    void FailQuestForPlayerAndGroup() override
     {
-        if (!lCreatureList.empty())
+        if (!m_rewarded)
+            npc_escortAI::FailQuestForPlayerAndGroup();
+        CleanupGuests();
+        SetEscortPaused(false);
+        End();
+        m_reetheGuid.Clear();
+        m_creature->ClearTemporaryFaction();
+    }
+
+    void AbortAndRespawn()
+    {
+        FailQuestForPlayerAndGroup();
+        m_creature->SetDeathState(JUST_DIED);
+        m_creature->Respawn();
+    }
+
+    void MoveInLineOfSight(Unit* who) override
+    {
+        if (HasEscortState(STATE_ESCORT_ESCORTING) && who && who->GetEntry() == NPC_REETHE &&
+            who->GetTypeId() == TYPEID_UNIT && who->IsAlive() && !m_reetheGuid)
+            m_reetheGuid = who->GetObjectGuid();
+        npc_escortAI::MoveInLineOfSight(who);
+    }
+
+    Creature* GetCreature(uint32 entry)
+    {
+        if (entry == NPC_REETHE)
         {
-            for (auto& itr : lCreatureList)
+            Creature* actor = m_creature->GetMap()->GetCreature(m_reetheGuid);
+            if (!actor || actor->GetEntry() != NPC_REETHE || !actor->IsAlive())
             {
-                if (itr->GetEntry() == uiCreatureEntry && itr->IsAlive())
-                    return itr;
+                actor = GetClosestCreatureWithEntry(m_creature, NPC_REETHE, 100.0f);
+                m_reetheGuid = actor ? actor->GetObjectGuid() : ObjectGuid();
             }
+            return actor;
         }
-
+        for (uint32 i = 0; i < 4; ++i)
+            if (GuestEntry(i) == entry)
+                if (Creature* actor = m_creature->GetMap()->GetCreature(m_guests[i]))
+                    if (OwnedGuest(actor, i) && actor->IsAlive())
+                        return actor;
         return nullptr;
     }
 
-    void WaypointReached(uint32 uiPointId) override
+    void WaypointReached(uint32 point) override
     {
-        switch (uiPointId)
+        if (!HasEscortState(STATE_ESCORT_ESCORTING))
+            return;
+        switch (point)
         {
             case 10:
                 DoScriptText(SAY_OGR_SPOT, m_creature);
                 break;
             case 11:
-                if (Creature* pReethe = GetCreature(NPC_REETHE))
-                    DoScriptText(SAY_OGR_RET_WHAT, pReethe);
+                if (Creature* reethe = GetCreature(NPC_REETHE))
+                    DoScriptText(SAY_OGR_RET_WHAT, reethe);
                 break;
             case 12:
                 SetEscortPaused(true);
@@ -279,53 +437,154 @@ struct npc_ogronAI : public npc_escortAI
         }
     }
 
-    void JustSummoned(Creature* pSummoned) override
+    void JustSummoned(Creature* actor) override
     {
-        lCreatureList.push_back(pSummoned);
+        if (m_spawnSlot < 0 || m_spawnSlot >= 4 || !HasEscortState(STATE_ESCORT_ESCORTING) ||
+            !OwnedGuest(actor, m_spawnSlot) || !actor->IsAlive() || m_guests[m_spawnSlot])
+            return;
+        m_guests[m_spawnSlot] = actor->GetObjectGuid();
+        actor->setFaction(m_uiPhase == PHASE_FIGHT ? FACTION_THER_HOSTILE : FACTION_GENERIC_FRIENDLY);
+        if (m_uiPhase == PHASE_FIGHT)
+            actor->AI()->AttackStart(m_creature);
+        else if (m_spawnSlot == 0)
+            actor->GetMotionMaster()->MovePoint(0, m_afMoveTo[0], m_afMoveTo[1], m_afMoveTo[2]);
+        else if (Creature* caldwell = GetCreature(NPC_CALDWELL))
+            actor->GetMotionMaster()->MoveFollow(caldwell, 0.5f, (M_PI / 2) * int(m_spawnSlot + 2));
+    }
 
-        pSummoned->setFaction(FACTION_GENERIC_FRIENDLY);
-
-        if (pSummoned->GetEntry() == NPC_CALDWELL)
-            pSummoned->GetMotionMaster()->MovePoint(0, m_afMoveTo[0], m_afMoveTo[1], m_afMoveTo[2]);
-        else
+    bool EnsureGuests()
+    {
+        bool failed = false;
+        for (uint32 i = 0; i < 4; ++i)
         {
-            if (Creature* pCaldwell = GetCreature(NPC_CALDWELL))
+            if (m_defeated[i])
+                continue;
+            Creature* actor = m_creature->GetMap()->GetCreature(m_guests[i]);
+            if (OwnedGuest(actor, i) && actor->IsAlive())
+                continue;
+            m_guests[i].Clear();
+            m_spawnSlot = i;
+            actor = m_creature->SummonCreature(GuestEntry(i), m_afSpawn[0], m_afSpawn[1], m_afSpawn[2],
+                0.0f, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 300000);
+            m_spawnSlot = -1;
+            if (!OwnedGuest(actor, i) || !actor->IsAlive() || m_guests[i] != actor->GetObjectGuid())
             {
-                // will this conversion work without compile warning/error?
-                size_t iSize = lCreatureList.size();
-                pSummoned->GetMotionMaster()->MoveFollow(pCaldwell, 0.5f, (M_PI / 2) * (int)iSize);
+                if (OwnedGuest(actor, i) && actor->IsAlive())
+                    actor->ForcedDespawn();
+                m_guests[i].Clear();
+                failed = true;
             }
         }
+        if (failed)
+        {
+            if (++m_spawnFailures >= 3)
+                AbortAndRespawn();
+            else
+                m_retryTimer = 1000;
+            return false;
+        }
+        m_spawnFailures = m_retryTimer = 0;
+        return true;
+    }
+
+    void CheckWaveComplete()
+    {
+        if (m_uiPhase == PHASE_FIGHT && m_defeated[0] && m_defeated[1] && m_defeated[2] && m_defeated[3])
+        {
+            m_uiPhase = PHASE_COMPLETE;
+            m_uiPhaseCounter = 12;
+            m_uiGlobalTimer = 5000;
+        }
+    }
+
+    void SummonedCreatureJustDied(Creature* actor) override
+    {
+        if (m_cleaning || m_uiPhase != PHASE_FIGHT || !actor || actor->IsAlive())
+            return;
+        for (uint32 i = 0; i < 4; ++i)
+            if (OwnedGuest(actor, i) && m_guests[i] == actor->GetObjectGuid())
+                m_defeated[i] = true;
+        CheckWaveComplete();
+    }
+
+    void SummonedCreatureDespawn(Creature* actor) override
+    {
+        if (m_cleaning || !actor || !HasEscortState(STATE_ESCORT_ESCORTING))
+            return;
+        for (uint32 i = 0; i < 4; ++i)
+            if (!m_defeated[i] && OwnedGuest(actor, i) && m_guests[i] == actor->GetObjectGuid())
+            {
+                m_guests[i].Clear();
+                m_retryTimer = 1000;
+            }
     }
 
     void DoStartAttackMe()
     {
-        if (!lCreatureList.empty())
-        {
-            for (auto& itr : lCreatureList)
-            {
-                if (itr->GetEntry() == NPC_REETHE)
-                    continue;
-
-                if (itr->IsAlive())
-                {
-                    itr->setFaction(FACTION_THER_HOSTILE);
-                    itr->AI()->AttackStart(m_creature);
-                }
-            }
-        }
+        for (uint32 i = 0; i < 4; ++i)
+            if (!m_defeated[i])
+                if (Creature* actor = m_creature->GetMap()->GetCreature(m_guests[i]))
+                    if (OwnedGuest(actor, i) && actor->IsAlive() && !actor->GetBeneficiaryPlayer())
+                    {
+                        actor->setFaction(FACTION_THER_HOSTILE);
+                        if (!actor->IsInCombat())
+                            actor->AI()->AttackStart(m_creature);
+                    }
     }
 
-    void UpdateEscortAI(const uint32 uiDiff) override
+    void UpdateEscortAI(uint32 diff) override
     {
+        if (HasEscortState(STATE_ESCORT_PAUSED) && !m_rewarded)
+        {
+            if (m_playerTimer <= diff)
+            {
+                if (!DustwallowQuestGroupInRange(m_creature, GetPlayerForEscort(), QUEST_QUESTIONING, 66.0f))
+                {
+                    AbortAndRespawn();
+                    return;
+                }
+                m_playerTimer = 1000;
+            }
+            else
+                m_playerTimer -= diff;
+        }
+        if (m_retryTimer && HasEscortState(STATE_ESCORT_ESCORTING))
+        {
+            if (m_retryTimer <= diff)
+                EnsureGuests();
+            else
+                m_retryTimer -= diff;
+            if (!HasEscortState(STATE_ESCORT_ESCORTING))
+                return;
+        }
+        if (m_uiPhase == PHASE_FIGHT)
+        {
+            for (uint32 i = 0; i < 4; ++i)
+                if (!m_defeated[i])
+                {
+                    Creature* actor = m_creature->GetMap()->GetCreature(m_guests[i]);
+                    if (OwnedGuest(actor, i) && !actor->IsAlive())
+                        m_defeated[i] = true;
+                    else if (!OwnedGuest(actor, i))
+                    {
+                        m_guests[i].Clear();
+                        if (!m_retryTimer)
+                            m_retryTimer = 1000;
+                    }
+                }
+            CheckWaveComplete();
+            if (m_uiPhase == PHASE_FIGHT && m_playerTimer == 1000)
+                DoStartAttackMe();
+        }
         if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
         {
             if (HasEscortState(STATE_ESCORT_PAUSED))
             {
-                if (m_uiGlobalTimer < uiDiff)
+                if (m_uiGlobalTimer <= diff)
                 {
                     m_uiGlobalTimer = 5000;
-
+                    if (m_uiPhase == PHASE_GUESTS && !EnsureGuests())
+                        return;
                     switch (m_uiPhase)
                     {
                         case PHASE_INTRO:
@@ -356,10 +615,11 @@ struct npc_ogronAI : public npc_escortAI
                                     if (Creature* pReethe = GetCreature(NPC_REETHE))
                                         DoScriptText(SAY_OGR_RET_HEAR, pReethe);
 
-                                    m_creature->SummonCreature(NPC_CALDWELL, m_afSpawn[0], m_afSpawn[1], m_afSpawn[2], 0.0f, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 300000);
-                                    m_creature->SummonCreature(NPC_HALLAN, m_afSpawn[0], m_afSpawn[1], m_afSpawn[2], 0.0f, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 300000);
-                                    m_creature->SummonCreature(NPC_SKIRMISHER, m_afSpawn[0], m_afSpawn[1], m_afSpawn[2], 0.0f, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 300000);
-                                    m_creature->SummonCreature(NPC_SKIRMISHER, m_afSpawn[0], m_afSpawn[1], m_afSpawn[2], 0.0f, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 300000);
+                                    if (!EnsureGuests())
+                                    {
+                                        m_uiGlobalTimer = 1000;
+                                        return;
+                                    }
 
                                     m_uiPhase = PHASE_GUESTS;
                                     break;
@@ -401,8 +661,8 @@ struct npc_ogronAI : public npc_escortAI
                                     DoScriptText(SAY_OGR_NODIE, m_creature);
                                     break;
                                 case 11:
-                                    DoStartAttackMe();
                                     m_uiPhase = PHASE_FIGHT;
+                                    DoStartAttackMe();
                                     break;
                             }
                             break;
@@ -412,8 +672,13 @@ struct npc_ogronAI : public npc_escortAI
                             switch (m_uiPhaseCounter)
                             {
                                 case 12:
-                                    if (Player* pPlayer = GetPlayerForEscort())
-                                        pPlayer->RewardPlayerAndGroupAtEventExplored(QUEST_QUESTIONING, m_creature);
+                                    if (!m_rewarded)
+                                    {
+                                        m_rewarded = true;
+                                        if (Player* pPlayer = GetPlayerForEscort())
+                                            pPlayer->RewardPlayerAndGroupAtEventExplored(QUEST_QUESTIONING, m_creature);
+                                        QuestEnd();
+                                    }
 
                                     DoScriptText(SAY_OGR_SURVIVE, m_creature);
                                     break;
@@ -435,12 +700,10 @@ struct npc_ogronAI : public npc_escortAI
                         ++m_uiPhaseCounter;
                 }
                 else
-                    m_uiGlobalTimer -= uiDiff;
+                    m_uiGlobalTimer -= diff;
             }
-
             return;
         }
-
         DoMeleeAttackIfReady();
     }
 };
@@ -515,111 +778,363 @@ const float fSentryFleePoint[] {-2917.56f, -3329.90f, 30.37f};
 
 struct npc_private_hendelAI : public ScriptedAI
 {
-    npc_private_hendelAI(Creature* pCreature) : ScriptedAI(pCreature) { Reset(); }
+    enum Phase { IDLE, FIGHT, OUTRO, COMPLETE, ABORTED };
 
-    void Reset() override {}
+    explicit npc_private_hendelAI(Creature* creature) : ScriptedAI(creature),
+        m_originalDeathPrevention(creature->IsPreventingDeath()) { Reset(); }
 
-    ObjectGuid guidPlayer;
+    Phase m_phase = IDLE;
+    bool m_originalDeathPrevention;
+    ObjectGuid m_playerGuid;
+    ObjectGuid m_tervoshGuid;
+    GuidSet m_sentries;
+    GuidSet m_outroActors;
+    uint32 m_expectedOutroEntry = 0;
+    uint32 m_spawnFailures = 0;
+    uint32 m_retryTimer = 0;
+    uint32 m_playerTimer = 1000;
+    uint32 m_rendTimer = 20000;
+    uint32 m_outroTimer = 0;
+    bool m_cleaningActors = false;
+    bool m_outroFailed = false;
 
-    void AttackedBy(Unit* pAttacker) override
+    bool OwnedOutro(Creature const* actor) const
     {
-        if (m_creature->GetVictim())
-            return;
-
-        if (!m_creature->CanAttackNow(pAttacker))
-            return;
-
-        AttackStart(pAttacker);
+        return actor && actor->GetSpawnerGuid() == m_creature->GetObjectGuid() &&
+            (actor->GetEntry() == NPC_TERVOSH || actor->GetEntry() == NPC_JAINA || actor->GetEntry() == NPC_PAINED);
     }
 
-    void SpellHit(Unit* /*pCaster*/, const SpellEntry* pSpell) override
+    void CleanupOutro(bool despawnAlive)
     {
-        // If Private Hendel is hit by spell Teleport (from DBScript)
-        // this means it is time to grant quest credit to the player previously stored to this intend
-        if (pSpell->Id == SPELL_TELEPORT)
-        {
-            if (Player* pPlayer = m_creature->GetMap()->GetPlayer(guidPlayer))
-                pPlayer->RewardPlayerAndGroupAtEventExplored(QUEST_MISSING_DIPLO_PT16, m_creature);
-        }
+        m_cleaningActors = true;
+        GuidSet actors;
+        actors.swap(m_outroActors);
+        m_tervoshGuid.Clear();
+        m_expectedOutroEntry = 0;
+        for (ObjectGuid guid : actors)
+            if (Creature* actor = m_creature->GetMap()->GetCreature(guid))
+                if (despawnAlive && OwnedOutro(actor) && actor->IsAlive())
+                    actor->ForcedDespawn();
+        m_cleaningActors = false;
     }
 
-    void DamageTaken(Unit* pDoneBy, uint32& damage, DamageEffectType /*damagetype*/, SpellEntry const* /*spellInfo*/) override
+    void RestoreSentries()
     {
-        if (damage > m_creature->GetHealth() || m_creature->GetHealthPercent() < 20.0f)
-        {
-            if (Player* pPlayer = pDoneBy->GetBeneficiaryPlayer())
+        for (ObjectGuid guid : m_sentries)
+            if (Creature* sentry = m_creature->GetMap()->GetCreature(guid))
+                if (sentry->GetEntry() == NPC_SENTRY && sentry->IsAlive())
+                    sentry->AI()->EnterEvadeMode();
+        m_sentries.clear();
+    }
+
+    void Reset() override
+    {
+        SetDeathPrevention(m_phase == FIGHT || m_originalDeathPrevention);
+        // EnterEvadeMode is part of a successful surrender. Preserve its round
+        // and actors; ordinary fight evades instead retire the admitted round.
+        if (m_phase == FIGHT)
+            m_outroFailed = true;
+    }
+
+    bool CanStart() const
+    {
+        return m_phase == IDLE && m_creature->IsAlive() && !m_creature->IsInCombat() &&
+            m_creature->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER);
+    }
+
+    bool CanOfferQuest(uint32 quest) const override { return quest != QUEST_MISSING_DIPLO_PT16 || CanStart(); }
+
+    bool IsParticipant(Player* player) const
+    {
+        Player* owner = m_creature->GetMap()->GetPlayer(m_playerGuid);
+        return owner && (owner == player || (owner->GetGroup() && owner->GetGroup() == player->GetGroup()));
+    }
+
+    bool TryStart(Player* player)
+    {
+        if (!player || !player->IsAlive() || player->GetMap() != m_creature->GetMap() ||
+            player->GetQuestStatus(QUEST_MISSING_DIPLO_PT16) != QUEST_STATUS_INCOMPLETE)
+            return false;
+        if ((m_phase == FIGHT || m_phase == OUTRO) && IsParticipant(player))
+            return true;
+        if (!CanStart())
+            return false;
+        CleanupOutro(true);
+        m_playerGuid = player->GetObjectGuid();
+        m_phase = FIGHT;
+        m_outroFailed = false;
+        m_spawnFailures = m_retryTimer = m_outroTimer = 0;
+        m_playerTimer = 1000;
+        m_rendTimer = 20000;
+        SetDeathPrevention(true);
+        SetReactState(REACT_AGGRESSIVE);
+        m_creature->SetFactionTemporary(FACTION_HOSTILE, TEMPFACTION_RESTORE_COMBAT_STOP | TEMPFACTION_RESTORE_RESPAWN);
+        AttackStart(player);
+        CreatureList sentries;
+        GetCreatureListWithEntryInGrid(sentries, m_creature, NPC_SENTRY, 40.0f);
+        for (Creature* sentry : sentries)
+            if (sentry->IsAlive())
             {
-                if (pPlayer->GetQuestStatus(QUEST_MISSING_DIPLO_PT16) == QUEST_STATUS_INCOMPLETE)
-                    guidPlayer = pPlayer->GetObjectGuid();  // Store the player to give quest credit later
+                m_sentries.insert(sentry->GetObjectGuid());
+                sentry->SetFactionTemporary(FACTION_HOSTILE, TEMPFACTION_RESTORE_COMBAT_STOP | TEMPFACTION_RESTORE_RESPAWN);
+                sentry->AI()->AttackStart(player);
             }
+        return true;
+    }
 
+    void AbortRound()
+    {
+        if (m_phase == COMPLETE || m_phase == ABORTED)
+            return;
+        m_phase = ABORTED;
+        if (Player* player = m_creature->GetMap()->GetPlayer(m_playerGuid))
+            player->FailQuestForGroup(QUEST_MISSING_DIPLO_PT16);
+        SetDeathPrevention(m_originalDeathPrevention);
+        CleanupOutro(true);
+        RestoreSentries();
+        m_playerGuid.Clear();
+        m_retryTimer = m_outroTimer = 0;
+        m_creature->ClearTemporaryFaction();
+        m_creature->ForcedDespawn();
+    }
+
+    void JustRespawned() override
+    {
+        CleanupOutro(m_phase != COMPLETE);
+        RestoreSentries();
+        m_playerGuid.Clear();
+        m_phase = IDLE;
+        m_outroFailed = false;
+        m_spawnFailures = m_retryTimer = m_outroTimer = 0;
+        m_playerTimer = 1000;
+        SetDeathPrevention(m_originalDeathPrevention);
+        ScriptedAI::JustRespawned();
+    }
+
+    void JustDied(Unit*) override
+    {
+        if (m_phase == COMPLETE)
+        {
+            // DB496701 intentionally removes Hendel at15s while the summoned
+            // actors keep speaking until124s. Do not cut that scene short.
+            CleanupOutro(false);
+            m_sentries.clear();
+            m_playerGuid.Clear();
+            SetDeathPrevention(m_originalDeathPrevention);
+        }
+        else if (m_phase != IDLE && m_phase != ABORTED)
+            AbortRound();
+    }
+
+    void AttackedBy(Unit* attacker) override
+    {
+        if (m_phase != OUTRO && m_phase != COMPLETE && m_phase != ABORTED &&
+            !m_creature->GetVictim() && attacker && m_creature->CanAttackNow(attacker))
+            AttackStart(attacker);
+    }
+
+    void JustSummoned(Creature* actor) override
+    {
+        if (m_phase != OUTRO || !m_expectedOutroEntry || !OwnedOutro(actor) ||
+            actor->GetEntry() != m_expectedOutroEntry || !actor->IsAlive())
+            return;
+        m_outroActors.insert(actor->GetObjectGuid());
+        if (actor->GetEntry() == NPC_TERVOSH)
+            m_tervoshGuid = actor->GetObjectGuid();
+    }
+
+    void SummonedCreatureDespawn(Creature* actor) override
+    {
+        if (m_cleaningActors || !OwnedOutro(actor))
+            return;
+        m_outroActors.erase(actor->GetObjectGuid());
+        if (m_phase == OUTRO && actor->GetObjectGuid() == m_tervoshGuid)
+            m_outroFailed = true;
+    }
+
+    void SummonedCreatureJustDied(Creature* actor) override
+    {
+        if (m_phase == OUTRO && OwnedOutro(actor) && actor->GetObjectGuid() == m_tervoshGuid)
+            m_outroFailed = true;
+    }
+
+    void SpawnOutro()
+    {
+        CleanupOutro(true);
+        bool complete = true;
+        for (OutroSpawnLocation const& spawn : lOutroSpawns)
+        {
+            m_expectedOutroEntry = spawn.uiEntry;
+            Creature* actor = m_creature->SummonCreature(spawn.uiEntry, spawn.fX, spawn.fY, spawn.fZ, spawn.fO,
+                TEMPSPAWN_TIMED_DESPAWN, 3 * MINUTE * IN_MILLISECONDS, false, true);
+            m_expectedOutroEntry = 0;
+            if (!OwnedOutro(actor) || !actor->IsAlive() || !m_outroActors.count(actor->GetObjectGuid()))
+            {
+                if (OwnedOutro(actor) && actor->IsAlive())
+                    actor->ForcedDespawn();
+                complete = false;
+                continue;
+            }
+            actor->CastSpell(actor, SPELL_TELEPORT_VISUAL, TRIGGERED_NONE);
+            actor->GetMotionMaster()->MovePoint(0, spawn.fDestX, spawn.fDestY, spawn.fDestZ);
+        }
+        Creature* tervosh = m_creature->GetMap()->GetCreature(m_tervoshGuid);
+        if (!complete || m_outroActors.size() != 3 || !OwnedOutro(tervosh) || !tervosh->IsAlive())
+        {
+            CleanupOutro(true);
+            if (++m_spawnFailures >= 3)
+                m_outroFailed = true;
+            else
+                m_retryTimer = 1000;
+            return;
+        }
+        m_spawnFailures = m_retryTimer = 0;
+        m_outroTimer = 190000;
+        tervosh->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER | UNIT_NPC_FLAG_GOSSIP);
+        tervosh->GetMotionMaster()->MoveWaypoint(0); // Keep the existing DB496701 speech and7079 credit.
+    }
+
+    void Surrender()
+    {
+        if (m_phase != FIGHT || m_outroFailed)
+            return;
+        m_phase = OUTRO;
+        SetDeathPrevention(m_originalDeathPrevention);
+        DoScriptText(EMOTE_SURRENDER, m_creature);
+        EnterEvadeMode();
+        SetReactState(REACT_PASSIVE);
+        for (ObjectGuid guid : m_sentries)
+            if (Creature* sentry = m_creature->GetMap()->GetCreature(guid))
+                if (sentry->GetEntry() == NPC_SENTRY && sentry->IsAlive())
+                {
+                    sentry->RemoveAllAurasOnEvade();
+                    sentry->CombatStop(true);
+                    sentry->SetWalk(false);
+                    sentry->GetMotionMaster()->MovePoint(0, fSentryFleePoint[0], fSentryFleePoint[1], fSentryFleePoint[2]);
+                    sentry->ForcedDespawn(4000);
+                }
+        SpawnOutro();
+    }
+
+    void SpellHit(Unit* caster, SpellEntry const* spell) override
+    {
+        if (m_phase != OUTRO || m_outroFailed || !m_outroTimer || !spell || spell->Id != SPELL_TELEPORT || !caster ||
+            caster->GetTypeId() != TYPEID_UNIT || caster->GetObjectGuid() != m_tervoshGuid ||
+            !OwnedOutro(static_cast<Creature*>(caster)) || !caster->IsAlive() || !caster->IsInWorld() ||
+            caster->GetMap() != m_creature->GetMap() || m_creature->GetMap()->GetCreature(m_tervoshGuid) != caster)
+            return;
+        Player* player = m_creature->GetMap()->GetPlayer(m_playerGuid);
+        if (!player)
+        {
+            m_outroFailed = true;
+            return;
+        }
+        m_phase = COMPLETE; // Set before group-credit callbacks; accept this7079 only once.
+        player->RewardPlayerAndGroupAtEventExplored(QUEST_MISSING_DIPLO_PT16, m_creature);
+        CleanupOutro(false); // Existing DB actor timers own the successful remainder.
+        m_sentries.clear();
+        m_retryTimer = m_outroTimer = 0;
+    }
+
+    void DamageTaken(Unit*, uint32& damage, DamageEffectType, SpellEntry const*) override
+    {
+        if (m_phase == OUTRO || m_phase == COMPLETE)
+        {
             damage = 0;
-
-            DoScriptText(EMOTE_SURRENDER, m_creature);
-            EnterEvadeMode();
-
-            // Make the two sentries flee and despawn
-            CreatureList lSentryList;
-            GetCreatureListWithEntryInGrid(lSentryList, m_creature, NPC_SENTRY, 40.0f);
-
-            for (CreatureList::const_iterator itr = lSentryList.begin(); itr != lSentryList.end(); ++itr)
-            {
-                if ((*itr)->IsAlive())
-                {
-                    (*itr)->RemoveAllAurasOnEvade();
-                    (*itr)->CombatStop(true);
-                    (*itr)->SetWalk(false);
-                    (*itr)->GetMotionMaster()->MovePoint(0, fSentryFleePoint[0], fSentryFleePoint[1], fSentryFleePoint[2]);
-                    (*itr)->ForcedDespawn(4000);
-                }
-            }
-
-            // Summon Jaina Proudmoore, Archmage Tervosh and Pained
-            for (const auto& lOutroSpawn : lOutroSpawns)
-            {
-                Creature* pCreature = m_creature->SummonCreature(lOutroSpawn.uiEntry, lOutroSpawn.fX, lOutroSpawn.fY, lOutroSpawn.fZ, lOutroSpawn.fO, TEMPSPAWN_TIMED_DESPAWN, 3 * MINUTE * IN_MILLISECONDS, false, true);
-                if (pCreature)
-                {
-                    pCreature->CastSpell(pCreature, SPELL_TELEPORT_VISUAL, TRIGGERED_NONE);
-                    pCreature->GetMotionMaster()->MovePoint(0, lOutroSpawn.fDestX, lOutroSpawn.fDestY, lOutroSpawn.fDestZ);
-
-                    // Exception case for Archmage Tervosh: the outro event is a simple speech with visual spell cast
-                    // so it will be handled by a DBScript held by NPC Archmage Tervosh
-                    if (pCreature->GetEntry() == NPC_TERVOSH)
-                    {
-                        // Remove Gossip and Quest Giver flag from now, they will be re-added later to Archmage Tervosh in DBScript
-                        pCreature->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER | UNIT_NPC_FLAG_GOSSIP);
-                        // The DBScript will be done here
-                        pCreature->GetMotionMaster()->MoveWaypoint(0);
-                    }
-                }
-            }
+            return;
         }
+        if (m_phase != FIGHT || !damage || !m_creature->IsAlive())
+            return;
+        uint32 health = m_creature->GetHealth();
+        if (damage >= health || uint64(health - damage) * 100 <= uint64(m_creature->GetMaxHealth()) * 20)
+        {
+            damage = std::min(damage, health - 1);
+            Surrender();
+        }
+    }
+
+    void UpdateAI(uint32 diff) override
+    {
+        if ((m_phase == FIGHT || m_phase == OUTRO) && m_outroFailed)
+        {
+            AbortRound();
+            return;
+        }
+        if (m_phase == FIGHT && m_creature->IsAlive() &&
+            uint64(m_creature->GetHealth()) * 100 <= uint64(m_creature->GetMaxHealth()) * 20)
+            Surrender();
+        if (m_phase == FIGHT || m_phase == OUTRO)
+        {
+            if (m_playerTimer <= diff)
+            {
+                if (!DustwallowQuestGroupInRange(m_creature, m_creature->GetMap()->GetPlayer(m_playerGuid), QUEST_MISSING_DIPLO_PT16, 70.0f))
+                {
+                    AbortRound();
+                    return;
+                }
+                m_playerTimer = 1000;
+            }
+            else
+                m_playerTimer -= diff;
+        }
+        if (m_phase == OUTRO)
+        {
+            if (m_retryTimer)
+            {
+                if (m_retryTimer <= diff)
+                    SpawnOutro();
+                else
+                    m_retryTimer -= diff;
+            }
+            if (m_outroTimer)
+            {
+                if (m_outroTimer <= diff)
+                    AbortRound();
+                else
+                    m_outroTimer -= diff;
+            }
+            return;
+        }
+        if (m_phase == IDLE)
+        {
+            ScriptedAI::UpdateAI(diff);
+            return;
+        }
+        if (m_phase != FIGHT || !m_creature->SelectHostileTarget() || !m_creature->GetVictim())
+            return;
+        if (m_creature->GetMapId() == 1 && m_creature->GetDbGuid() == 31274 &&
+            !m_creature->GetBeneficiaryPlayer() && CanExecuteCombatAction())
+        {
+            if (m_rendTimer <= diff)
+            {
+                Unit* victim = m_creature->GetVictim();
+                if (victim->IsAlive() && m_creature->CanReachWithMeleeAttack(victim) &&
+                    DoCastSpellIfCan(victim, 11977) == CAST_OK)
+                    m_rendTimer = 20000;
+                else
+                    m_rendTimer = 1000;
+            }
+            else
+                m_rendTimer -= diff;
+        }
+        DoMeleeAttackIfReady();
     }
 };
 
-bool QuestAccept_npc_private_hendel(Player* pPlayer, Creature* pCreature, const Quest* pQuest)
+bool QuestAccept_npc_private_hendel(Player* player, Creature* creature, Quest const* quest)
 {
-    if (pQuest->GetQuestId() == QUEST_MISSING_DIPLO_PT16)
+    if (!player || !creature || !quest)
+        return false;
+    if (quest->GetQuestId() == QUEST_MISSING_DIPLO_PT16)
     {
-        pCreature->SetFactionTemporary(FACTION_HOSTILE, TEMPFACTION_RESTORE_COMBAT_STOP | TEMPFACTION_RESTORE_RESPAWN);
-        pCreature->AI()->AttackStart(pPlayer);
-
-        // Find the nearby sentries in order to make them attack
-        // The two sentries are linked to Private Hendel in DB to ensure they respawn together
-        CreatureList lSentryList;
-        GetCreatureListWithEntryInGrid(lSentryList, pCreature, NPC_SENTRY, 40.0f);
-
-        for (CreatureList::const_iterator itr = lSentryList.begin(); itr != lSentryList.end(); ++itr)
+        auto ai = dynamic_cast<npc_private_hendelAI*>(creature->AI());
+        if (!ai || !ai->TryStart(player))
         {
-            if ((*itr)->IsAlive())
-            {
-                (*itr)->SetFactionTemporary(FACTION_HOSTILE, TEMPFACTION_RESTORE_COMBAT_STOP | TEMPFACTION_RESTORE_RESPAWN);
-                (*itr)->AI()->AttackStart(pPlayer);
-            }
+            if (player->GetQuestStatus(QUEST_MISSING_DIPLO_PT16) == QUEST_STATUS_INCOMPLETE)
+                player->FailQuest(QUEST_MISSING_DIPLO_PT16);
+            return false;
         }
     }
-
     return true;
 }
 
@@ -898,74 +1413,217 @@ struct npc_theramore_spar_controller : public CombatAI
     std::unordered_map<uint32, ObjectGuid> medics;
     std::unordered_map<uint32, ObjectGuid> active;
 
-    uint32 m_uiWinningTeam;
+    uint32 m_uiWinningTeam = 0;
+    bool m_roundActive = false;
+    bool m_recovering = false;
+    uint32 m_readyWait = 0;
+    struct SavedState { uint32 faction; ReactStates reaction; };
+    std::map<ObjectGuid, SavedState> m_savedStates;
+
+    bool IsApprovedController() const
+    {
+        return m_creature->GetMapId() == 1 && m_creature->GetEntry() == NPC_MASTER_SZIGETI &&
+            m_creature->GetDbGuid() == 30659;
+    }
+
+    Creature* GetSceneActor(uint32 entry) const
+    {
+        if (!IsApprovedController())
+            return nullptr;
+        uint32 guid = 0;
+        switch (entry)
+        {
+            case NPC_GUARD_EDWARD: guid = 30668; break;
+            case NPC_GUARD_JARAD: guid = 30669; break;
+            case NPC_GUARD_KAHIL: guid = 30663; break;
+            case NPC_GUARD_LANA: guid = 30670; break;
+            case NPC_GUARD_NARRISHA: guid = 30658; break;
+            case NPC_GUARD_TARK: guid = 30664; break;
+            case NPC_MEDIC_TAMBERLYN: guid = 30665; break;
+            case NPC_MEDIC_HELAINA: guid = 30662; break;
+            case NPC_MASTER_CRITON: guid = 30660; break;
+            case NPC_RED_CAPTAIN: guid = 30661; break;
+            case NPC_BLUE_CAPTAIN: guid = 30667; break;
+            case NPC_MASTER_SZIGETI: return m_creature;
+            default: return nullptr;
+        }
+        Creature* actor = GetClosestCreatureWithEntry(m_creature, entry, 40.0f);
+        if (!actor || actor->GetEntry() != entry || actor->GetMapId() != 1 || actor->GetDbGuid() != guid)
+            return nullptr;
+        return actor;
+    }
+
+    bool Available(Creature const* actor) const
+    {
+        return actor && actor->IsAlive() && !actor->GetBeneficiaryPlayer();
+    }
+
+    ObjectGuid ActiveGuid(uint32 team) const
+    {
+        auto it = active.find(team);
+        return it == active.end() ? ObjectGuid() : it->second;
+    }
+
+    Creature* ActiveActor(uint32 team) const
+    {
+        ObjectGuid guid = ActiveGuid(team);
+        return guid ? m_creature->GetMap()->GetCreature(guid) : nullptr;
+    }
+
+    bool TeamEmpty(uint32 team) const
+    {
+        auto it = teams.find(team);
+        return it != teams.end() && it->second.empty();
+    }
+
+    void RestoreParticipants()
+    {
+        GuidSet participants;
+        for (auto const& state : m_savedStates)
+            participants.insert(state.first);
+        for (auto it = m_savedStates.begin(); it != m_savedStates.end(); )
+        {
+            Creature* actor = m_creature->GetMap()->GetCreature(it->first);
+            if (!actor || actor->GetBeneficiaryPlayer())
+            {
+                ++it; // Restore after the actor returns or player control ends.
+                continue;
+            }
+            Unit* victim = actor->GetVictim();
+            if (victim && participants.find(victim->GetObjectGuid()) != participants.end())
+                actor->CombatStop(true);
+            actor->ClearTemporaryFaction();
+            actor->setFaction(it->second.faction);
+            actor->AI()->SetReactState(it->second.reaction);
+            if (actor->IsAlive() && !actor->IsInCombat())
+            {
+                Position home = actor->GetRespawnPosition();
+                actor->GetMotionMaster()->Clear(true, true);
+                actor->GetMotionMaster()->MovePoint(0, home, FORCED_MOVEMENT_RUN);
+            }
+            it = m_savedStates.erase(it);
+        }
+    }
+
+    void RecoverRound()
+    {
+        for (uint32 action = 0; action < COMBATANT_ACTION_MAX; ++action)
+            DisableTimer(action);
+        RestoreParticipants();
+        active.clear(); teams.clear(); medics.clear();
+        m_uiWinningTeam = 0;
+        m_roundActive = false;
+        m_recovering = true;
+        if (IsApprovedController())
+            ResetTimer(COMBATANT_GET_ALL, 2000u);
+    }
+
+    bool RosterAvailable() const
+    {
+        for (uint32 entry : {NPC_GUARD_EDWARD, NPC_GUARD_JARAD, NPC_GUARD_KAHIL, NPC_GUARD_LANA,
+            NPC_GUARD_NARRISHA, NPC_GUARD_TARK, NPC_MEDIC_TAMBERLYN, NPC_MEDIC_HELAINA,
+            NPC_MASTER_CRITON, NPC_RED_CAPTAIN, NPC_BLUE_CAPTAIN})
+            if (!Available(GetSceneActor(entry)))
+                return false;
+        return true;
+    }
+
+    bool ReadyAtStart(uint32 team) const
+    {
+        Creature* actor = ActiveActor(team);
+        auto const& pos = startingPositions.at(team);
+        return Available(actor) && actor->IsStopped() && actor->GetDistance(pos.x, pos.y, pos.z) < 2.0f;
+    }
+
+    bool ValidateActive()
+    {
+        if (!m_roundActive || !RosterAvailable() || !Available(ActiveActor(RED_TEAM)) ||
+            !Available(ActiveActor(BLUE_TEAM)))
+        {
+            RecoverRound();
+            return false;
+        }
+        return true;
+    }
+
 
     void GetCombatants()
     {
-        teams.clear();
-        active.clear();
-        for (uint32 red : theramore_red_team)
+        RestoreParticipants();
+        teams.clear(); active.clear(); medics.clear();
+        if (!RosterAvailable())
         {
-            Creature* redMember = GetClosestCreatureWithEntry(m_creature, red, 20.f);
-            if (redMember && redMember->IsAlive())
+            RecoverRound();
+            return;
+        }
+        for (uint32 entry : {NPC_GUARD_EDWARD, NPC_GUARD_JARAD, NPC_GUARD_KAHIL, NPC_GUARD_LANA,
+            NPC_GUARD_NARRISHA, NPC_GUARD_TARK, NPC_MEDIC_TAMBERLYN, NPC_MEDIC_HELAINA,
+            NPC_MASTER_CRITON, NPC_RED_CAPTAIN, NPC_BLUE_CAPTAIN})
+            if (GetSceneActor(entry)->IsInCombat())
             {
-                redMember->setFaction(FACTION_THERAMORE_FRIENDLY);
-                teams[RED_TEAM].push_back(redMember->GetObjectGuid());
+                RecoverRound();
+                return;
+            }
+        teams.emplace(RED_TEAM, GuidList());
+        teams.emplace(BLUE_TEAM, GuidList());
+        for (uint32 team : {RED_TEAM, BLUE_TEAM})
+        {
+            auto& queue = teams.find(team)->second;
+            auto members = team == RED_TEAM ? theramore_red_team : theramore_blue_team;
+            for (uint32 i = 0; i < 3; ++i)
+            {
+                Creature* actor = GetSceneActor(members[i]);
+                m_savedStates.emplace(actor->GetObjectGuid(), SavedState{actor->GetFaction(), actor->AI()->GetReactState()});
+                actor->setFaction(FACTION_THERAMORE_FRIENDLY);
+                actor->AI()->SetReactState(REACT_PASSIVE);
+                queue.push_back(actor->GetObjectGuid());
             }
         }
-
-        for (uint32 blue : theramore_blue_team)
-        {
-            Creature* blueMember = GetClosestCreatureWithEntry(m_creature, blue, 20.f);
-            if (blueMember && blueMember->IsAlive())
-            {
-                blueMember->setFaction(FACTION_THERAMORE_FRIENDLY);
-                teams[BLUE_TEAM].push_back(blueMember->GetObjectGuid());
-            }
-        }
-
-        if (Creature* redMedic = GetClosestCreatureWithEntry(m_creature, NPC_MEDIC_HELAINA, 20.f))
-            medics[RED_TEAM] = redMedic->GetObjectGuid();
-        if (Creature* blueMedic = GetClosestCreatureWithEntry(m_creature, NPC_MEDIC_TAMBERLYN, 20.f))
-            medics[BLUE_TEAM] = blueMedic->GetObjectGuid();
+        medics.emplace(RED_TEAM, GetSceneActor(NPC_MEDIC_HELAINA)->GetObjectGuid());
+        medics.emplace(BLUE_TEAM, GetSceneActor(NPC_MEDIC_TAMBERLYN)->GetObjectGuid());
+        m_roundActive = true;
+        m_readyWait = 0;
+        if (m_recovering)
+            ResetTimer(COMBATANT_START_POSITION, 20000u);
+        m_recovering = false;
     }
 
     void CheckCombatantHP()
     {
-        Unit* redCombatant = m_creature->GetMap()->GetUnit(active[RED_TEAM]);
-        Unit* blueCombatant = m_creature->GetMap()->GetUnit(active[BLUE_TEAM]);
-
-        if (redCombatant && blueCombatant)
+        if (!ValidateActive())
+            return;
+        Creature* red = ActiveActor(RED_TEAM);
+        Creature* blue = ActiveActor(BLUE_TEAM);
+        if (!red->IsInCombat() || !blue->IsInCombat() || red->GetVictim() != blue || blue->GetVictim() != red)
         {
-            float redHealth = redCombatant->GetHealthPercent();
-            float blueHealth = blueCombatant->GetHealthPercent();
-            if (redHealth <= 30 || blueHealth <= 30)
+            RecoverRound();
+            return;
+        }
+        float redHealth = red->GetHealthPercent(), blueHealth = blue->GetHealthPercent();
+        if (redHealth <= 30 || blueHealth <= 30)
+        {
+            ResetTimer(redHealth < blueHealth ? COMBATANT_BLUE_WIN : COMBATANT_RED_WIN, 100u);
+            red->RestoreOriginalFaction(); blue->RestoreOriginalFaction();
+            red->CombatStop(true); blue->CombatStop(true);
+            for (uint32 team : {RED_TEAM, BLUE_TEAM})
             {
-                ResetTimer(redHealth < blueHealth ? COMBATANT_BLUE_WIN : COMBATANT_RED_WIN, 100);
-
-                redCombatant->RestoreOriginalFaction();
-                blueCombatant->RestoreOriginalFaction();
-                redCombatant->CombatStop(true);
-                blueCombatant->CombatStop(true);
-                
-                Unit* redMedic = m_creature->GetMap()->GetUnit(medics[RED_TEAM]);
-                Unit* blueMedic = m_creature->GetMap()->GetUnit(medics[BLUE_TEAM]);
-
-                if (redMedic && redMedic->IsAlive() && redCombatant->IsAlive())
-                    redMedic->AI()->DoCastSpellIfCan(redCombatant, SPELL_FIRST_AID);
-                if (blueMedic && blueMedic->IsAlive() && blueCombatant->IsAlive())
-                    blueMedic->AI()->DoCastSpellIfCan(blueCombatant, SPELL_FIRST_AID);
-                DisableTimer(COMBATANT_CHECK_HP);
-                return;
+                auto it = medics.find(team);
+                Creature* medic = it == medics.end() ? nullptr : m_creature->GetMap()->GetCreature(it->second);
+                if (Available(medic))
+                    medic->AI()->DoCastSpellIfCan(ActiveActor(team), SPELL_FIRST_AID);
             }
+            DisableTimer(COMBATANT_CHECK_HP);
+            return;
         }
         ResetTimer(COMBATANT_CHECK_HP, 1000u);
     }
 
     void HandleBlueWin()
     {
-        Unit* szigeti = GetClosestCreatureWithEntry(m_creature, NPC_MASTER_SZIGETI, 15.f);
-        Creature* redCaptain = GetClosestCreatureWithEntry(m_creature, NPC_RED_CAPTAIN, 20.f);
+        if (!ValidateActive())
+            return;
+        Unit* szigeti = GetSceneActor(NPC_MASTER_SZIGETI);
+        Creature* redCaptain = GetSceneActor(NPC_RED_CAPTAIN);
         if (szigeti && szigeti->IsAlive())
         {
             szigeti->HandleEmote(EMOTE_ONESHOT_POINT);
@@ -974,14 +1632,14 @@ struct npc_theramore_spar_controller : public CombatAI
         for (uint32 member : theramore_blue_team)
         {
             Unit* combatant = GetClosestCreatureWithEntry(m_creature, member, 20.f);
-            if (combatant && combatant->GetEntry() != active[BLUE].GetEntry() && combatant->IsAlive())
+            if (combatant && combatant->GetEntry() != ActiveGuid(BLUE_TEAM).GetEntry() && combatant->IsAlive())
             {
                 combatant->HandleEmote(EMOTE_ONESHOT_CHEER);
             }
         }
         if (redCaptain && redCaptain->IsAlive())
         {
-            switch (active[RED_TEAM].GetEntry())
+            switch (ActiveGuid(RED_TEAM).GetEntry())
             {
                 case NPC_GUARD_JARAD:
                     DoBroadcastText(SAY_JARAD_LOSS, redCaptain);
@@ -1002,8 +1660,10 @@ struct npc_theramore_spar_controller : public CombatAI
 
     void HandleRedWin()
     {
-        Unit* szigeti = GetClosestCreatureWithEntry(m_creature, NPC_MASTER_SZIGETI, 15.f);
-        Creature* blueCaptain = GetClosestCreatureWithEntry(m_creature, NPC_BLUE_CAPTAIN, 20.f);
+        if (!ValidateActive())
+            return;
+        Unit* szigeti = GetSceneActor(NPC_MASTER_SZIGETI);
+        Creature* blueCaptain = GetSceneActor(NPC_BLUE_CAPTAIN);
         if (szigeti && szigeti->IsAlive())
         {
             szigeti->HandleEmote(EMOTE_ONESHOT_POINT);
@@ -1012,14 +1672,14 @@ struct npc_theramore_spar_controller : public CombatAI
         for (uint32 member : theramore_red_team)
         {
             Unit* combatant = GetClosestCreatureWithEntry(m_creature, member, 20.f);
-            if (combatant && combatant->GetEntry() != active[RED_TEAM].GetEntry() && combatant->IsAlive())
+            if (combatant && combatant->GetEntry() != ActiveGuid(RED_TEAM).GetEntry() && combatant->IsAlive())
             {
                 combatant->HandleEmote(EMOTE_ONESHOT_CHEER);
             }
         }
         if (blueCaptain && blueCaptain->IsAlive())
         {
-            switch (active[BLUE_TEAM].GetEntry())
+            switch (ActiveGuid(BLUE_TEAM).GetEntry())
             {
                 case NPC_GUARD_EDWARD:
                     DoBroadcastText(SAY_EDWARD_LOSS, blueCaptain);
@@ -1040,9 +1700,14 @@ struct npc_theramore_spar_controller : public CombatAI
 
     void HandleMotivation()
     {
+        if (!m_roundActive || !RosterAvailable() || (m_uiWinningTeam != BLUE_TEAM && m_uiWinningTeam != RED_TEAM))
+        {
+            RecoverRound();
+            return;
+        }
         uint32 winningTeam = m_uiWinningTeam;
-        Creature* redCaptain = GetClosestCreatureWithEntry(m_creature, NPC_RED_CAPTAIN, 20.f);
-        Creature* blueCaptain = GetClosestCreatureWithEntry(m_creature, NPC_BLUE_CAPTAIN, 20.f);
+        Creature* redCaptain = GetSceneActor(NPC_RED_CAPTAIN);
+        Creature* blueCaptain = GetSceneActor(NPC_BLUE_CAPTAIN);
 
         if (!redCaptain || !blueCaptain || !redCaptain->IsAlive() || !blueCaptain->IsAlive())
             return;
@@ -1065,13 +1730,15 @@ struct npc_theramore_spar_controller : public CombatAI
 
     void HandleWin(uint32 winningTeam)
     {
-        Unit* criton = GetClosestCreatureWithEntry(m_creature, NPC_MASTER_CRITON, 15.f);
+        if (!ValidateActive())
+            return;
+        Unit* criton = GetSceneActor(NPC_MASTER_CRITON);
         uint32 losingTeam = (winningTeam == BLUE_TEAM ? RED_TEAM : BLUE_TEAM);
 
         if (criton && criton->IsAlive())
         {
             DoBroadcastText(SAY_BACK_TO_CORNERS, criton);
-            if (teams[losingTeam].empty())
+            if (TeamEmpty(losingTeam))
             {
                 DoBroadcastText(winningTeam == BLUE_TEAM ? SAY_BLUE_WINNER_OVERALL : SAY_RED_WINNER_OVERALL, criton);
                 ResetTimer(COMBATANT_MOTIVATION, 8000u);
@@ -1082,8 +1749,19 @@ struct npc_theramore_spar_controller : public CombatAI
 
     void CombatantSalute()
     {
-        Creature* redMember = dynamic_cast<Creature*>(m_creature->GetMap()->GetUnit(active[RED_TEAM]));
-        Creature* blueMember = dynamic_cast<Creature*>(m_creature->GetMap()->GetUnit(active[BLUE_TEAM]));
+        if (!ValidateActive())
+            return;
+        if (!ReadyAtStart(RED_TEAM) || !ReadyAtStart(BLUE_TEAM))
+        {
+            if (++m_readyWait >= 15)
+                RecoverRound();
+            else
+                ResetTimer(COMBATANT_SALUTE, 1000u);
+            return;
+        }
+        m_readyWait = 0;
+        Creature* redMember = dynamic_cast<Creature*>(m_creature->GetMap()->GetUnit(ActiveGuid(RED_TEAM)));
+        Creature* blueMember = dynamic_cast<Creature*>(m_creature->GetMap()->GetUnit(ActiveGuid(BLUE_TEAM)));
         if (redMember && blueMember && redMember->IsAlive() && blueMember->IsAlive())
         {
             redMember->HandleEmote(EMOTE_ONESHOT_SALUTE);
@@ -1096,7 +1774,9 @@ struct npc_theramore_spar_controller : public CombatAI
 
     void CombatantIntro()
     {
-        Unit* criton = GetClosestCreatureWithEntry(m_creature, NPC_MASTER_CRITON, 15.f);
+        if (!ValidateActive())
+            return;
+        Unit* criton = GetSceneActor(NPC_MASTER_CRITON);
         if (criton && criton->IsAlive())
         {
             DoBroadcastText(SAY_FIGHT_INTRO, criton);
@@ -1106,53 +1786,56 @@ struct npc_theramore_spar_controller : public CombatAI
 
     void SwitchMembers()
     {
+        if (!ValidateActive() || (m_uiWinningTeam != BLUE_TEAM && m_uiWinningTeam != RED_TEAM))
+            return;
         uint32 winningTeam = m_uiWinningTeam;
-        uint32 losingTeam = (winningTeam == BLUE_TEAM ? RED_TEAM : BLUE_TEAM);
-        Creature* loser = dynamic_cast<Creature*>(m_creature->GetMap()->GetUnit(active[losingTeam]));
-        Creature* winner = dynamic_cast<Creature*>(m_creature->GetMap()->GetUnit(active[winningTeam]));
-
-        if (loser && loser->IsAlive())
+        uint32 losingTeam = winningTeam == BLUE_TEAM ? RED_TEAM : BLUE_TEAM;
+        Creature* loser = ActiveActor(losingTeam);
+        Creature* winner = ActiveActor(winningTeam);
+        if (loser->IsInCombat() || winner->IsInCombat())
         {
-            Position respawnCoords = loser->GetRespawnPosition();
-            loser->AI()->SetReactState(REACT_PASSIVE);
-            loser->GetMotionMaster()->Clear(true, true);
-            loser->GetMotionMaster()->MovePoint(0, respawnCoords, FORCED_MOVEMENT_RUN);
+            RecoverRound();
+            return;
         }
-        if (winner && winner->IsAlive())
+        Position home = loser->GetRespawnPosition();
+        loser->AI()->SetReactState(REACT_PASSIVE);
+        loser->GetMotionMaster()->Clear(true, true);
+        loser->GetMotionMaster()->MovePoint(0, home, FORCED_MOVEMENT_RUN);
+        winner->GetMotionMaster()->MovePoint(1, startingPositions.at(winningTeam), FORCED_MOVEMENT_WALK);
+        auto next = teams.find(losingTeam);
+        if (next == teams.end())
         {
-            winner->GetMotionMaster()->MovePoint(1, startingPositions[winningTeam], FORCED_MOVEMENT_WALK);
+            RecoverRound();
+            return;
         }
-        if (!teams[losingTeam].empty()){
-            active[losingTeam] = teams[losingTeam].front();
-            teams[losingTeam].pop_front();
+        if (!next->second.empty())
+        {
+            active.insert_or_assign(losingTeam, next->second.front());
+            next->second.pop_front();
             ResetTimer(COMBATANT_START_POSITION, 5000u);
         }
         else
         {
-            if (winner && winner->IsAlive())
-            {
-                Position respawnCoords = winner->GetRespawnPosition();
-                winner->AI()->SetReactState(REACT_PASSIVE);
-                winner->GetMotionMaster()->Clear(true, true);
-                winner->GetMotionMaster()->MovePoint(0, respawnCoords, FORCED_MOVEMENT_RUN);
-            }
             GetCombatants();
-            ResetTimer(COMBATANT_START_POSITION, 20000u);
+            if (m_roundActive)
+                ResetTimer(COMBATANT_START_POSITION, 20000u);
         }
     }
 
     void CombatantSeparate()
     {
-        Creature* redMember = dynamic_cast<Creature*>(m_creature->GetMap()->GetUnit(active[RED_TEAM]));
-        Creature* blueMember = dynamic_cast<Creature*>(m_creature->GetMap()->GetUnit(active[BLUE_TEAM]));
+        if (!ValidateActive())
+            return;
+        Creature* redMember = dynamic_cast<Creature*>(m_creature->GetMap()->GetUnit(ActiveGuid(RED_TEAM)));
+        Creature* blueMember = dynamic_cast<Creature*>(m_creature->GetMap()->GetUnit(ActiveGuid(BLUE_TEAM)));
 
         if (redMember && blueMember)
         {
             redMember->GetMotionMaster()->Clear(true, true);
-            redMember->GetMotionMaster()->MovePoint(1, startingPositions[RED_TEAM], FORCED_MOVEMENT_RUN);
+            redMember->GetMotionMaster()->MovePoint(1, startingPositions.at(RED_TEAM), FORCED_MOVEMENT_RUN);
             redMember->AI()->SetReactState(REACT_PASSIVE);
             blueMember->GetMotionMaster()->Clear(true, true);
-            blueMember->GetMotionMaster()->MovePoint(1, startingPositions[BLUE_TEAM], FORCED_MOVEMENT_RUN);
+            blueMember->GetMotionMaster()->MovePoint(1, startingPositions.at(BLUE_TEAM), FORCED_MOVEMENT_RUN);
             blueMember->AI()->SetReactState(REACT_PASSIVE);
         }
         ResetTimer(COMBATANT_SWITCH, 5000u);
@@ -1160,65 +1843,237 @@ struct npc_theramore_spar_controller : public CombatAI
 
     void StartSparring()
     {
-        Creature* redMember = dynamic_cast<Creature*>(m_creature->GetMap()->GetUnit(active[RED_TEAM]));
-        Creature* blueMember = dynamic_cast<Creature*>(m_creature->GetMap()->GetUnit(active[BLUE_TEAM]));
-
-        Unit* criton = GetClosestCreatureWithEntry(m_creature, NPC_MASTER_CRITON, 15.f);
-        if (criton && criton->IsAlive())
+        if (!ValidateActive())
+            return;
+        Creature* red = ActiveActor(RED_TEAM);
+        Creature* blue = ActiveActor(BLUE_TEAM);
+        if (red->IsInCombat() || blue->IsInCombat())
         {
-            DoBroadcastText(SAY_FIGHT_START, criton);
+            RecoverRound();
+            return;
         }
-
-        if (redMember && blueMember)
+        if (!ReadyAtStart(RED_TEAM) || !ReadyAtStart(BLUE_TEAM) || red->GetHealthPercent() < 100.0f || blue->GetHealthPercent() < 100.0f)
         {
-            redMember->SetFactionTemporary(RED_TEAM, TEMPFACTION_RESTORE_COMBAT_STOP);
-            redMember->AI()->SetReactState(REACT_DEFENSIVE);
-            blueMember->SetFactionTemporary(BLUE_TEAM, TEMPFACTION_RESTORE_COMBAT_STOP);
-            blueMember->AI()->SetReactState(REACT_DEFENSIVE);
-            redMember->AI()->AttackStart(blueMember);
-            blueMember->AI()->AttackStart(redMember);
-
-            ResetTimer(COMBATANT_CHECK_HP, 1000u);
+            for (uint32 team : {RED_TEAM, BLUE_TEAM})
+            {
+                Creature* actor = ActiveActor(team);
+                auto it = medics.find(team);
+                Creature* medic = it == medics.end() ? nullptr : m_creature->GetMap()->GetCreature(it->second);
+                if (actor->GetHealthPercent() < 100.0f && Available(medic) && !medic->IsInCombat())
+                    medic->AI()->DoCastSpellIfCan(actor, SPELL_FIRST_AID);
+            }
+            if (++m_readyWait >= 15)
+                RecoverRound();
+            else
+                ResetTimer(COMBATANT_START_SPAR, 1000u);
+            return;
         }
+        DoBroadcastText(SAY_FIGHT_START, GetSceneActor(NPC_MASTER_CRITON));
+        red->SetFactionTemporary(RED_TEAM, TEMPFACTION_RESTORE_COMBAT_STOP);
+        blue->SetFactionTemporary(BLUE_TEAM, TEMPFACTION_RESTORE_COMBAT_STOP);
+        red->AI()->SetReactState(REACT_DEFENSIVE); blue->AI()->SetReactState(REACT_DEFENSIVE);
+        red->AI()->AttackStart(blue); blue->AI()->AttackStart(red);
+        if (!red->IsInCombat() || !blue->IsInCombat() || red->GetVictim() != blue || blue->GetVictim() != red)
+        {
+            RecoverRound();
+            return;
+        }
+        ResetTimer(COMBATANT_CHECK_HP, 1000u);
     }
 
     void MoveIntoPosition()
     {
-        if (active.empty() && !teams.empty())
+        if (!m_roundActive || !RosterAvailable())
         {
-            Creature* redCaptain = GetClosestCreatureWithEntry(m_creature, NPC_RED_CAPTAIN, 20.f);
-            Creature* blueCaptain = GetClosestCreatureWithEntry(m_creature, NPC_BLUE_CAPTAIN, 20.f);
-            active[RED_TEAM] = teams[RED_TEAM].front();
-            teams[RED_TEAM].pop_front();
-            active[BLUE_TEAM] = teams[BLUE_TEAM].front();
-            teams[BLUE_TEAM].pop_front();
-            Unit* criton = GetClosestCreatureWithEntry(m_creature, NPC_MASTER_CRITON, 15.f);
-            if (criton && criton->IsAlive())
-            {
-                DoBroadcastText(SAY_FIRST_COMBATANTS, criton);
-            }
-            if (redCaptain && redCaptain->IsAlive())
-            {
-                DoBroadcastText(SAY_RED_FIRST, redCaptain);
-            }
-            if (blueCaptain && blueCaptain->IsAlive())
-            {
-                DoBroadcastText(SAY_BLUE_FIRST, blueCaptain);
-            }
+            RecoverRound();
+            return;
         }
-        Creature* redMember = dynamic_cast<Creature*>(m_creature->GetMap()->GetUnit(active[RED_TEAM]));
-        Creature* blueMember = dynamic_cast<Creature*>(m_creature->GetMap()->GetUnit(active[BLUE_TEAM]));
-
-        if (redMember && blueMember)
+        if (active.empty())
         {
-            redMember->GetMotionMaster()->Clear(true, true);
-            redMember->GetMotionMaster()->MovePoint(1, startingPositions[RED_TEAM], FORCED_MOVEMENT_WALK);
-            blueMember->GetMotionMaster()->Clear(true, true);
-            blueMember->GetMotionMaster()->MovePoint(1, startingPositions[BLUE_TEAM], FORCED_MOVEMENT_WALK);
+            auto red = teams.find(RED_TEAM), blue = teams.find(BLUE_TEAM);
+            if (red == teams.end() || blue == teams.end() || red->second.empty() || blue->second.empty())
+            {
+                RecoverRound();
+                return;
+            }
+            active.emplace(RED_TEAM, red->second.front()); red->second.pop_front();
+            active.emplace(BLUE_TEAM, blue->second.front()); blue->second.pop_front();
+            DoBroadcastText(SAY_FIRST_COMBATANTS, GetSceneActor(NPC_MASTER_CRITON));
+            DoBroadcastText(SAY_RED_FIRST, GetSceneActor(NPC_RED_CAPTAIN));
+            DoBroadcastText(SAY_BLUE_FIRST, GetSceneActor(NPC_BLUE_CAPTAIN));
         }
+        if (!ValidateActive())
+            return;
+        for (uint32 team : {RED_TEAM, BLUE_TEAM})
+        {
+            Creature* actor = ActiveActor(team);
+            if (actor->IsInCombat())
+            {
+                RecoverRound();
+                return;
+            }
+            actor->AI()->SetReactState(REACT_PASSIVE);
+            actor->GetMotionMaster()->Clear(true, true);
+            actor->GetMotionMaster()->MovePoint(1, startingPositions.at(team), FORCED_MOVEMENT_WALK);
+        }
+        m_readyWait = 0;
         ResetTimer(COMBATANT_SALUTE, 5000u);
     }
 };
+
+UnitAI* GetAI_npc_theramore_spar_controller(Creature* creature)
+{
+    if (creature->GetEntry() == NPC_MASTER_SZIGETI && creature->GetMapId() == 1 && creature->GetDbGuid() == 30659)
+        return new npc_theramore_spar_controller(creature);
+    return nullptr;
+}
+
+// Scoped ordinary combat additions. Never bind an entry-only negative-GUID event.
+struct DustwallowCombatSettings
+{
+    uint32 spell, initialMin, initialMax, repeatMin, repeatMax;
+    bool meleeOnly, oncePerCombat;
+    uint32 hpMin, hpMax, chance;
+    bool manaTargetOnly;
+};
+
+static bool GetDustwallowCombatSettings(Creature const* creature, DustwallowCombatSettings& settings)
+{
+    if (creature->GetMapId() != 1)
+        return false;
+    uint32 guid = creature->GetDbGuid();
+    switch (creature->GetEntry())
+    {
+        case 4323:
+        {
+            static const uint32 guids[] = {30876, 30905, 31155, 31346, 31358, 31382, 31395, 31401, 31409, 31413, 31417, 31419, 31421, 31424, 31428, 31431, 31436, 31443, 31491, 31494, 31495, 31496, 31503, 31504, 31505, 31519, 31529, 33692, 33757, 33774, 33775, 33878, 33990, 34010, 34014};
+            if (std::binary_search(std::begin(guids), std::end(guids), guid))
+            {
+                settings = {11985, 2400, 2700, 9400, 9700, false, false, 0, 100, 100, false};
+                return true;
+            }
+            break;
+        }
+        case 4339:
+        {
+            static const uint32 guids[] = {31613};
+            if (std::binary_search(std::begin(guids), std::end(guids), guid))
+            {
+                settings = {27641, 0, 0, 0, 0, false, true, 30, 60, 100, false};
+                return true;
+            }
+            break;
+        }
+        case 4371:
+        {
+            static const uint32 guids[] = {25815, 25895, 28823, 30849, 30861, 30868};
+            if (std::binary_search(std::begin(guids), std::end(guids), guid))
+            {
+                settings = {15785, 3000, 6000, 30000, 30000, false, false, 0, 100, 50, true};
+                return true;
+            }
+            break;
+        }
+        case 5057:
+        {
+            static const uint32 guids[] = {8454, 8455, 23508, 30442, 30443, 30444, 30610, 30611, 30703, 30715, 30741, 30742, 30756, 30757, 30769, 30770, 30771, 30772, 30773, 30774, 30776, 30935, 31036, 31038, 31307, 31592, 31593, 31594, 31595, 31596, 31601, 33792, 33793, 33798, 33829, 33842, 33850};
+            if (std::binary_search(std::begin(guids), std::end(guids), guid))
+            {
+                settings = {14873, 2100, 3200, 15100, 15900, true, false, 0, 100, 100, false};
+                return true;
+            }
+            break;
+        }
+    }
+    return false;
+}
+
+struct npc_dustwallow_combatAI : public CreatureEventAI
+{
+    npc_dustwallow_combatAI(Creature* creature, DustwallowCombatSettings const& settings) :
+        CreatureEventAI(creature), m_settings(settings) { ResetExtraCombat(); }
+
+    DustwallowCombatSettings m_settings;
+    uint32 m_extraTimer = 0;
+    bool m_extraDone = false;
+    bool m_rollSucceeded = false;
+
+    void ResetExtraCombat()
+    {
+        m_extraTimer = urand(m_settings.initialMin, m_settings.initialMax);
+        m_extraDone = m_rollSucceeded = false;
+    }
+
+    void Reset() override
+    {
+        CreatureEventAI::Reset();
+        ResetExtraCombat();
+    }
+
+    void EnterCombat(Unit* enemy) override
+    {
+        CreatureEventAI::EnterCombat(enemy);
+        ResetExtraCombat();
+    }
+
+    void UpdateExtraCombat(uint32 diff)
+    {
+        DustwallowCombatSettings current;
+        if (!GetDustwallowCombatSettings(m_creature, current) || current.spell != m_settings.spell ||
+            !m_creature->IsAlive() || m_creature->GetBeneficiaryPlayer() || !m_creature->IsInCombat() ||
+            !CanExecuteCombatAction() || (m_settings.oncePerCombat && m_extraDone))
+            return;
+        Unit* victim = m_creature->GetVictim();
+        if (!victim || !victim->IsAlive() || !m_creature->CanAttack(victim))
+            return;
+        if (m_extraTimer > diff)
+        {
+            m_extraTimer -= diff;
+            return;
+        }
+        float hp = m_creature->GetHealthPercent();
+        if (hp < m_settings.hpMin || hp > m_settings.hpMax ||
+            (m_settings.meleeOnly && !m_creature->CanReachWithMeleeAttack(victim)) ||
+            (m_settings.manaTargetOnly && (victim->GetPowerType() != POWER_MANA || !victim->GetPower(POWER_MANA))))
+        {
+            m_extraTimer = 1000;
+            return;
+        }
+        if (m_settings.chance != 100 && !m_rollSucceeded)
+        {
+            if (urand(1, 100) > m_settings.chance)
+            {
+                // A failed probability roll consumes this scheduled opportunity;
+                // an ordinary cast failure below retries the admitted roll.
+                m_extraTimer = urand(m_settings.repeatMin, m_settings.repeatMax);
+                return;
+            }
+            m_rollSucceeded = true;
+        }
+        if (DoCastSpellIfCan(victim, m_settings.spell) == CAST_OK)
+        {
+            m_extraDone = true;
+            m_rollSucceeded = false;
+            m_extraTimer = urand(m_settings.repeatMin, m_settings.repeatMax);
+        }
+        else
+            m_extraTimer = 1000;
+    }
+
+    void UpdateAI(uint32 diff) override
+    {
+        UpdateExtraCombat(diff);
+        CreatureEventAI::UpdateAI(diff);
+    }
+};
+
+UnitAI* GetAI_npc_dustwallow_combat(Creature* creature)
+{
+    DustwallowCombatSettings settings;
+    if (GetDustwallowCombatSettings(creature, settings) && !creature->GetBeneficiaryPlayer())
+        return new npc_dustwallow_combatAI(creature, settings);
+    return nullptr; // Continue the native AIName/permit selection off scope.
+}
 
 void AddSC_dustwallow_marsh()
 {
@@ -1255,6 +2110,11 @@ void AddSC_dustwallow_marsh()
 
     pNewScript = new Script;
     pNewScript->Name = "npc_theramore_spar_controller";
-    pNewScript->GetAI = &GetNewAIInstance<npc_theramore_spar_controller>;
+    pNewScript->GetAI = &GetAI_npc_theramore_spar_controller;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_dustwallow_combat";
+    pNewScript->GetAI = &GetAI_npc_dustwallow_combat;
     pNewScript->RegisterSelf();
 }
