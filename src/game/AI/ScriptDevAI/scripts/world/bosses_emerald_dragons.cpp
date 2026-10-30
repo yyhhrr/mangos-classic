@@ -374,8 +374,10 @@ struct boss_taerarAI : public boss_emerald_dragonAI
 
     uint32 m_uiArcaneBlastTimer;
     uint32 m_uiBellowingRoarTimer;
-    uint32 m_uiShadesTimeoutTimer;
-    uint8 m_uiShadesDead;
+    uint32 m_uiShadesTimeoutTimer = 0;
+    GuidSet m_shadeGuids;
+    bool m_bSummoningShades = false;
+    uint8 m_uiShadesSummoned = 0;
 
     void Reset() override
     {
@@ -383,15 +385,19 @@ struct boss_taerarAI : public boss_emerald_dragonAI
 
         m_uiArcaneBlastTimer = 12000;
         m_uiBellowingRoarTimer = 30000;
-        m_uiShadesTimeoutTimer = 0;                         // The time that Taerar is banished
-        m_uiShadesDead = 0;
+        DoUnbanishBoss();
+    }
 
-        // Remove Unselectable if needed
-        if (m_creature->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE))
-            m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE);
+    void EnterEvadeMode() override
+    {
+        DoUnbanishBoss();
+        boss_emerald_dragonAI::EnterEvadeMode();
+    }
 
-        // Despawn all remaining summoned NPCs in case of raid wipe
-        DoCastSpellIfCan(m_creature, SPELL_DESPAWN_SHADES, CAST_TRIGGERED);
+    void JustDied(Unit* killer) override
+    {
+        DoUnbanishBoss();
+        boss_emerald_dragonAI::JustDied(killer);
     }
 
     void Aggro(Unit* /*pWho*/) override
@@ -399,47 +405,90 @@ struct boss_taerarAI : public boss_emerald_dragonAI
         DoScriptText(SAY_TAERAR_AGGRO, m_creature);
     }
 
+    void JustSummoned(Creature* summoned) override
+    {
+        if (summoned->GetEntry() == NPC_SHADE_OF_TAERAR)
+        {
+            // Only shades belonging to the current banish may release it.
+            if (!m_uiShadesTimeoutTimer)
+            {
+                summoned->ForcedDespawn();
+                return;
+            }
+
+            if (m_shadeGuids.insert(summoned->GetObjectGuid()).second)
+                ++m_uiShadesSummoned;
+        }
+
+        boss_emerald_dragonAI::JustSummoned(summoned);
+    }
+
     // Summon 3 Shades at 75%, 50% and 25% and Banish Self
     bool DoSpecialDragonAbility() override
     {
+        if (m_uiShadesTimeoutTimer)
+            return false;
+
         if (DoCastSpellIfCan(m_creature, SPELL_SELF_STUN) == CAST_OK)
         {
-            // Summon the shades at boss position
+            // Summon callbacks are synchronous. Establish the wave first, but
+            // wait until all casts finish before accepting its final death.
+            m_uiShadesTimeoutTimer = 60000;
+            m_uiShadesSummoned = 0;
+            m_bSummoningShades = true;
+            m_creature->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE);
+
             DoCastSpellIfCan(m_creature, SPELL_SUMMON_SHADE_1, CAST_TRIGGERED);
             DoCastSpellIfCan(m_creature, SPELL_SUMMON_SHADE_2, CAST_TRIGGERED);
             DoCastSpellIfCan(m_creature, SPELL_SUMMON_SHADE_3, CAST_TRIGGERED);
+            m_bSummoningShades = false;
 
-            // Make boss not selectable when banished
-            m_creature->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE);
+            if (m_shadeGuids.empty())
+            {
+                bool summonedAny = m_uiShadesSummoned != 0;
+                DoUnbanishBoss();
+                // A failed summon should not consume this health threshold.
+                return summonedAny;
+            }
 
             DoScriptText(SAY_SUMMONSHADE, m_creature);
-            m_uiShadesTimeoutTimer = 60000;
-
             return true;
         }
 
         return false;
     }
 
-    void SummonedCreatureJustDied(Creature* pSummoned) override
+    void SummonedCreatureJustDied(Creature* summoned) override
     {
-        if (pSummoned->GetEntry() == NPC_SHADE_OF_TAERAR)
-        {
-            ++m_uiShadesDead;
+        ForgetShade(summoned);
+    }
 
-            // If all shades are dead then unbanish the boss
-            if (m_uiShadesDead == 3)
-                DoUnbanishBoss();
-        }
+    void SummonedCreatureDespawn(Creature* summoned) override
+    {
+        ForgetShade(summoned);
+    }
+
+    void ForgetShade(Creature* summoned)
+    {
+        if (m_shadeGuids.erase(summoned->GetObjectGuid()) && m_shadeGuids.empty() && !m_bSummoningShades)
+            DoUnbanishBoss();
     }
 
     void DoUnbanishBoss()
     {
+        m_uiShadesTimeoutTimer = 0;
+        m_bSummoningShades = false;
+        m_uiShadesSummoned = 0;
         m_creature->RemoveAurasDueToSpell(SPELL_SELF_STUN);
         m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE);
 
-        m_uiShadesTimeoutTimer = 0;
-        m_uiShadesDead = 0;
+        // Detach before despawning: cleanup may synchronously call back here.
+        GuidSet shades;
+        shades.swap(m_shadeGuids);
+        for (ObjectGuid guid : shades)
+            // The shade spells summon guardians stored as Pets, not Creatures.
+            if (Creature* shade = m_creature->GetMap()->GetAnyTypeCreature(guid))
+                shade->ForcedDespawn();
     }
 
     bool UpdateDragonAI(const uint32 uiDiff) override
