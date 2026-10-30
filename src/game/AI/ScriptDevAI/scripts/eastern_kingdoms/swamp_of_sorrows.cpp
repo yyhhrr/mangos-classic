@@ -122,7 +122,7 @@ struct npc_galen_goodwardAI : public npc_escortAI
 
         if (m_periodicSay < diff)
         {
-            if (HasEscortState(STATE_ESCORT_NONE))
+            if (!HasEscortState(STATE_ESCORT_ESCORTING))
                 DoScriptText(SAY_PERIODIC, m_creature);
             m_periodicSay = 6000;
         }
