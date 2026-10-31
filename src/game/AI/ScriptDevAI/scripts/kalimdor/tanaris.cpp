@@ -60,9 +60,12 @@ struct mob_aquementasAI : public ScriptedAI
     uint32 m_uiSwitchFactionTimer;
     uint32 m_uiFrostShockTimer;
     uint32 m_uiAquaJetTimer;
+    uint32 m_uiItemRetryTimer;
+    bool m_bSendingItem = false;
 
     void Reset() override
     {
+        m_uiItemRetryTimer      = 5000;
         m_uiSwitchFactionTimer  = 10000;
         m_uiAquaJetTimer        = 5000;
         m_uiFrostShockTimer     = 1000;
@@ -72,13 +75,19 @@ struct mob_aquementasAI : public ScriptedAI
 
     void SendItem(Player* pReceiver)
     {
+        if (m_bSendingItem)
+            return;
+
         if (pReceiver->HasItemCount(ITEM_BOOK_AQUOR, 1) &&
                 pReceiver->HasItemCount(ITEM_SILVERY_CLAWS, 11) &&
                 pReceiver->HasItemCount(ITEM_IRONTREE_HEART, 1) &&
                 !pReceiver->HasItemCount(ITEM_SILVER_TOTEM, 1))
         {
+            // Keep a reentrant inventory callback from trying a second store.
+            m_bSendingItem = true;
             if (Item* pItem = pReceiver->StoreNewItemInInventorySlot(ITEM_SILVER_TOTEM, 1))
                 pReceiver->SendNewItem(pItem, 1, true, false);
+            m_bSendingItem = false;
         }
     }
 
@@ -86,6 +95,7 @@ struct mob_aquementasAI : public ScriptedAI
     {
         DoScriptText(AGGRO_YELL_AQUE, m_creature, pWho);
 
+        m_uiItemRetryTimer = 5000;
         Player* pInvokedPlayer = pWho->GetBeneficiaryPlayer();
         if (pInvokedPlayer)
             SendItem(pInvokedPlayer);
@@ -106,6 +116,20 @@ struct mob_aquementasAI : public ScriptedAI
 
         if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
             return;
+
+        // Retry only for the current victim's player, including a pet's owner.
+        // Re-arm before calling inventory code to keep errors bounded on reentry.
+        if (!m_uiSwitchFactionTimer)
+        {
+            if (m_uiItemRetryTimer <= uiDiff)
+            {
+                m_uiItemRetryTimer = 5000;
+                if (Player* receiver = m_creature->GetVictim()->GetBeneficiaryPlayer())
+                    SendItem(receiver);
+            }
+            else
+                m_uiItemRetryTimer -= uiDiff;
+        }
 
         if (m_uiFrostShockTimer < uiDiff)
         {
@@ -158,6 +182,19 @@ struct npc_oox17tnAI : public npc_escortAI
 
     GuidList m_lSummonsList;
 
+    void CleanupSummons()
+    {
+        // Empty the member first; despawn callbacks may re-enter cleanup.
+        GuidList summons;
+        summons.swap(m_lSummonsList);
+        for (ObjectGuid guid : summons)
+        {
+            if (Creature* summoned = m_creature->GetMap()->GetCreature(guid))
+                if (summoned->GetSpawnerGuid() == m_creature->GetObjectGuid())
+                    summoned->ForcedDespawn();
+        }
+    }
+
     void WaypointReached(uint32 i) override
     {
         Player* pPlayer = GetPlayerForEscort();
@@ -196,7 +233,10 @@ struct npc_oox17tnAI : public npc_escortAI
     void Reset() override
     {
         if (!HasEscortState(STATE_ESCORT_ESCORTING))
+        {
+            CleanupSummons();
             m_creature->SetStandState(UNIT_STAND_STATE_DEAD);
+        }
     }
 
     void Aggro(Unit* /*who*/) override
@@ -211,19 +251,20 @@ struct npc_oox17tnAI : public npc_escortAI
 
     void JustSummoned(Creature* summoned) override
     {
-        summoned->AI()->AttackStart(m_creature);
         m_lSummonsList.push_back(summoned->GetObjectGuid());
+        summoned->AI()->AttackStart(m_creature);
     }
 
     void JustDied(Unit* pKiller) override
     {
-        for (GuidList::const_iterator itr = m_lSummonsList.begin(); itr != m_lSummonsList.end(); ++itr)
-        {
-            if (Creature* pSummoned = m_creature->GetMap()->GetCreature(*itr))
-                pSummoned->ForcedDespawn();
-        }
-
+        CleanupSummons();
         npc_escortAI::JustDied(pKiller);
+    }
+
+    void CorpseRemoved(uint32& respawnDelay) override
+    {
+        CleanupSummons();
+        npc_escortAI::CorpseRemoved(respawnDelay);
     }
 };
 
@@ -278,15 +319,28 @@ struct npc_toogaAI : public FollowerAI
     uint32 m_uiPostEventTimer;
     uint32 m_uiPhasePostEvent;
 
-    Unit* pTorta;
+    ObjectGuid m_tortaGuid;
 
     void Reset() override
     {
         m_uiCheckSpeechTimer = 2500;
+        // FollowerAI also calls Reset on combat evade. Resume the existing
+        // conversation then; a real respawn clears follow state below.
+        if (HasFollowState(STATE_FOLLOW_POSTEVENT))
+            return;
         m_uiPostEventTimer = 1000;
         m_uiPhasePostEvent = 0;
 
-        pTorta = nullptr;
+        m_tortaGuid.Clear();
+    }
+
+    void JustRespawned() override
+    {
+        // This is idempotent when the normal corpse callback already ran.
+        // It also handles a direct respawn while the post-event was active.
+        uint32 respawnDelay = 0;
+        FollowerAI::CorpseRemoved(respawnDelay);
+        FollowerAI::JustRespawned();
     }
 
     void MoveInLineOfSight(Unit* pWho) override
@@ -297,14 +351,14 @@ struct npc_toogaAI : public FollowerAI
         {
             if (m_creature->IsWithinDistInMap(pWho, INTERACTION_DISTANCE))
             {
+                // Commit local state before the external group reward callback.
+                m_tortaGuid = pWho->GetObjectGuid();
+                SetFollowComplete(true);
                 if (Player* pPlayer = GetLeaderForFollower())
                 {
                     if (pPlayer->GetQuestStatus(QUEST_TOOGA) == QUEST_STATUS_INCOMPLETE)
                         pPlayer->RewardPlayerAndGroupAtEventExplored(QUEST_TOOGA, m_creature);
                 }
-
-                pTorta = pWho;
-                SetFollowComplete(true);
             }
         }
     }
@@ -331,7 +385,8 @@ struct npc_toogaAI : public FollowerAI
                 {
                     m_uiPostEventTimer = 5000;
 
-                    if (!pTorta || !pTorta->IsAlive())
+                    Creature* pTorta = m_creature->GetMap()->GetCreature(m_tortaGuid);
+                    if (!pTorta || !pTorta->IsAlive() || pTorta->GetEntry() != NPC_TORTA)
                     {
                         // something happened, so just complete
                         SetFollowComplete();

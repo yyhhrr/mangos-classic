@@ -1199,8 +1199,8 @@ void UnitAI::UpdateSpellLists()
     CreatureSpellList const& spells = GetSpellList();
 
     // when probability is 0 for all spells, they will use priority based on positions
-    std::vector<std::tuple<uint32, uint32, uint32, Unit*>> eligibleSpells;
-    std::vector<std::tuple<uint32, uint32, uint32, Unit*>> nonBlockingSpells;
+    std::vector<std::tuple<uint32, uint32, uint32, Unit*, uint32>> eligibleSpells;
+    std::vector<std::tuple<uint32, uint32, uint32, Unit*, uint32>> nonBlockingSpells;
     uint32 sum = 0;
 
     // one roll due to multiple spells
@@ -1240,10 +1240,10 @@ void UnitAI::UpdateSpellLists()
             continue;
 
         if (spell.Flags & SPELL_LIST_FLAG_NON_BLOCKING)
-            nonBlockingSpells.emplace_back(spell.SpellId, spell.Probability, spell.ScriptId, target);
+            nonBlockingSpells.emplace_back(spell.SpellId, spell.Probability, spell.ScriptId, target, spell.Flags);
         else
         {
-            eligibleSpells.emplace_back(spell.SpellId, spell.Probability, spell.ScriptId, target);
+            eligibleSpells.emplace_back(spell.SpellId, spell.Probability, spell.ScriptId, target, spell.Flags);
             sum += spell.Probability;
         }
     }
@@ -1251,9 +1251,14 @@ void UnitAI::UpdateSpellLists()
     if (eligibleSpells.size() > 1 && sum != 0) // sum == 0 is meant to be priority based (lower position, higher priority)
         std::shuffle(eligibleSpells.begin(), eligibleSpells.end(), *GetRandomGenerator());
 
-    auto executeSpell = [&](uint32 spellId, uint32 scriptId, Unit* target) -> bool
+    auto executeSpell = [&](uint32 spellId, uint32 scriptId, Unit* target, uint32 spellListFlags) -> bool
     {
-        CanCastResult castResult = DoCastSpellIfCan(target, spellId);
+        uint32 castFlags = 0;
+        if ((spellListFlags & SPELL_LIST_FLAG_IGNORE_NPC_COSTS) &&
+            m_unit->GetTypeId() == TYPEID_UNIT && !m_unit->GetBeneficiaryPlayer())
+            castFlags |= CAST_IGNORE_COSTS;
+
+        CanCastResult castResult = DoCastSpellIfCan(target, spellId, castFlags);
         if (castResult == CAST_OK)
         {
             OnSpellCast(sSpellTemplate.LookupEntry<SpellEntry>(spellId), target);
@@ -1266,9 +1271,9 @@ void UnitAI::UpdateSpellLists()
 
     for (auto& data : nonBlockingSpells)
     {
-        uint32 spellId; uint32 probability; uint32 scriptId; Unit* target;
-        std::tie(spellId, probability, scriptId, target) = data;
-        executeSpell(spellId, scriptId, target);
+        uint32 spellId; uint32 probability; uint32 scriptId; Unit* target; uint32 spellListFlags;
+        std::tie(spellId, probability, scriptId, target, spellListFlags) = data;
+        executeSpell(spellId, scriptId, target, spellListFlags);
     }
 
     // will hit first eligible spell when sum is 0 because roll -1 < probability 0
@@ -1279,11 +1284,11 @@ void UnitAI::UpdateSpellLists()
     {
         for (auto itr = eligibleSpells.begin(); itr != eligibleSpells.end();)
         {
-            uint32 spellId; uint32 probability; uint32 scriptId; Unit* target;
-            std::tie(spellId, probability, scriptId, target) = *itr;
+            uint32 spellId; uint32 probability; uint32 scriptId; Unit* target; uint32 spellListFlags;
+            std::tie(spellId, probability, scriptId, target, spellListFlags) = *itr;
             if (spellRoll < int32(probability))
             {
-                success = executeSpell(spellId, scriptId, target);
+                success = executeSpell(spellId, scriptId, target, spellListFlags);
                 itr = eligibleSpells.erase(itr);
             }
             else
