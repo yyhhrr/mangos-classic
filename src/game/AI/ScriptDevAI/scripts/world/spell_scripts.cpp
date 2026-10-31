@@ -292,7 +292,7 @@ struct TribalDeath : public SpellScript
         Unit* target = spell->GetUnitTarget();
         Unit* caster = spell->GetCaster();
         target->CastSpell(nullptr, spellId, TRIGGERED_OLD_TRIGGERED);
-        if (spell->m_spellInfo->Id == SPELL_STROMGARDE_DEATH)
+        if (spell->m_spellInfo->Id == SPELL_STROMGARDE_DEATH || spell->m_spellInfo->Id == SPELL_FROSTSABER_CUB_DEATH)
         {
             if (target->GetTypeId() == TYPEID_UNIT && caster->GetTypeId() == TYPEID_UNIT)
                 QueueStromgardeRevenge(static_cast<Creature*>(target), static_cast<Creature*>(caster));

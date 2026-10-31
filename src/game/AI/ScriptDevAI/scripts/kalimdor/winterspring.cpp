@@ -145,14 +145,30 @@ static Position aWingThicketLocations[] =
 
 struct npc_ranshallaAI : public npc_escortAI, private DialogueHelper
 {
+    enum EventPhase
+    {
+        PHASE_IDLE, PHASE_ESCORTING, PHASE_WAIT_FIRE, PHASE_ALTAR_INTRO,
+        PHASE_WAIT_ALTAR, PHASE_CONTINUING, PHASE_WAIT_PRIESTESS,
+        PHASE_CINEMATIC, PHASE_COMPLETE
+    };
+
     npc_ranshallaAI(Creature* pCreature) : npc_escortAI(pCreature),
-        DialogueHelper(aIntroDialogue)
+        DialogueHelper(aIntroDialogue), m_uiDelayTimer(0), m_uiCurrentWaypoint(0),
+        m_uiFinishTimer(0), m_round(0), m_phase(PHASE_IDLE), m_cleaning(false),
+        m_creditPending(false), m_dialogueUpdating(false)
     {
         Reset();
     }
 
     uint32 m_uiDelayTimer;
     uint32 m_uiCurrentWaypoint;
+    uint32 m_uiFinishTimer;
+    uint32 m_round;
+    EventPhase m_phase;
+    bool m_cleaning;
+    bool m_creditPending;
+    bool m_dialogueUpdating;
+    ObjectGuid m_waitingGoGuid;
 
     ObjectGuid m_firstPriestessGuid;
     ObjectGuid m_secondPriestessGuid;
@@ -160,16 +176,129 @@ struct npc_ranshallaAI : public npc_escortAI, private DialogueHelper
     ObjectGuid m_voiceEluneGuid;
     ObjectGuid m_altarGuid;
 
-    void Reset() override
+
+    Creature* GetOwnedActor(ObjectGuid guid, uint32 entry, bool requireAlive = true)
     {
+        Creature* actor = m_creature->GetMap()->GetCreature(guid);
+        if (!actor || actor->GetEntry() != entry || actor->GetSpawnerGuid() != m_creature->GetObjectGuid() ||
+            (requireAlive && !actor->IsAlive()))
+            return nullptr;
+        return actor;
+    }
+
+    void DespawnOwnedActor(ObjectGuid guid, uint32 entry)
+    {
+        if (Creature* actor = GetOwnedActor(guid, entry, false))
+            actor->ForcedDespawn();
+    }
+
+    void ResetScene()
+    {
+        if (m_cleaning)
+            return;
+
+        m_cleaning = true;
+        ++m_round;
+        m_phase = PHASE_IDLE;
+        DisableDialogue();
         m_uiDelayTimer = 0;
         m_uiCurrentWaypoint = 0;
+        m_uiFinishTimer = 0;
+        m_creditPending = false;
+        m_waitingGoGuid.Clear();
+        m_altarGuid.Clear();
+
+        ObjectGuid first = m_firstPriestessGuid;
+        ObjectGuid second = m_secondPriestessGuid;
+        ObjectGuid guard = m_guardEluneGuid;
+        ObjectGuid voice = m_voiceEluneGuid;
+        m_firstPriestessGuid.Clear();
+        m_secondPriestessGuid.Clear();
+        m_guardEluneGuid.Clear();
+        m_voiceEluneGuid.Clear();
+
+        // Clear local ownership before despawn callbacks can re-enter cleanup.
+        DespawnOwnedActor(first, NPC_PRIESTESS_ELUNE);
+        DespawnOwnedActor(second, NPC_PRIESTESS_ELUNE);
+        DespawnOwnedActor(guard, NPC_GUARDIAN_ELUNE);
+        DespawnOwnedActor(voice, NPC_VOICE_ELUNE);
+        m_cleaning = false;
+    }
+
+    void BeginEscort(Player* player, const Quest* quest)
+    {
+        if (!player || !quest || quest->GetQuestId() != QUEST_GUARDIANS_ALTAR || m_cleaning || m_dialogueUpdating ||
+            m_phase != PHASE_IDLE || HasEscortState(STATE_ESCORT_ESCORTING) ||
+            !m_creature->IsAlive() || m_creature->GetVictim())
+            return;
+
+        uint32 round = m_round;
+        Start(false, player, quest, true);
+        if (!HasEscortState(STATE_ESCORT_ESCORTING) || m_round != round)
+            return;
+
+        ++m_round;
+        m_phase = PHASE_ESCORTING;
+        m_creature->SetStandState(UNIT_STAND_STATE_STAND);
+        m_creature->SetFactionTemporary(FACTION_ESCORT_A_NEUTRAL_PASSIVE, TEMPFACTION_RESTORE_RESPAWN);
+        DoScriptText(SAY_QUEST_START, m_creature);
+    }
+
+    void AbortScene()
+    {
+        if (m_cleaning || m_phase == PHASE_IDLE || m_phase == PHASE_COMPLETE)
+            return;
+        ResetScene();
+        uint32 round = m_round;
+        FailQuestForPlayerAndGroup();
+        if (round == m_round && m_phase == PHASE_IDLE)
+            m_creature->ForcedDespawn();
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        ResetScene();
+        npc_escortAI::JustDied(killer);
+    }
+
+    void CorpseRemoved(uint32& respawnDelay) override
+    {
+        ResetScene();
+        npc_escortAI::CorpseRemoved(respawnDelay);
+    }
+
+    void JustRespawned() override
+    {
+        npc_escortAI::JustRespawned();
+        ResetScene();
+        m_creature->SetStandState(UNIT_STAND_STATE_STAND);
+    }
+
+    void Reset() override
+    {
+        // Combat evade must retain a torch point and an accepted continuation.
+        if (!HasEscortState(STATE_ESCORT_ESCORTING))
+            ResetScene();
     }
 
     // Called when the player activates the torch / altar
-    void DoContinueEscort(bool bIsAltarWaypoint = false)
+    void DoContinueEscort(GameObject* object)
     {
-        if (bIsAltarWaypoint)
+        if (!object || m_cleaning || !m_creature->IsAlive() || !HasEscortState(STATE_ESCORT_ESCORTING) ||
+            !HasEscortState(STATE_ESCORT_PAUSED) ||
+            (m_phase != PHASE_WAIT_FIRE && m_phase != PHASE_WAIT_ALTAR) ||
+            object->GetMap() != m_creature->GetMap() || object->GetObjectGuid() != m_waitingGoGuid ||
+            !m_creature->IsWithinDistInMap(object, 10.0f))
+            return;
+
+        bool isAltar = m_phase == PHASE_WAIT_ALTAR;
+        if (object->GetEntry() != (isAltar ? GO_ELUNE_ALTAR : GO_ELUNE_FIRE))
+            return;
+
+        m_waitingGoGuid.Clear();
+        m_phase = PHASE_CONTINUING;
+        m_uiDelayTimer = 2000;
+        if (isAltar)
             DoScriptText(SAY_RANSHALLA_ALTAR_1, m_creature);
         else
         {
@@ -179,79 +308,95 @@ struct npc_ranshallaAI : public npc_escortAI, private DialogueHelper
                 case 1: DoScriptText(SAY_AFTER_TORCH_2, m_creature); break;
             }
         }
-
-        m_uiDelayTimer = 2000;
     }
 
-    void SpellHit(Unit* /*pCaster*/, const SpellEntry* pSpell) override
+    void SpellHit(Unit* /*pCaster*/, const SpellEntry* spell) override
     {
-        // If Ranshalla cast the torch lightening spell for too long she will trigger SPELL_RANSHALLA_DESPAWN (quest failed and despawn)
-        if (pSpell->Id == SPELL_RANSHALLA_DESPAWN)
-        {
-            FailQuestForPlayerAndGroup();
-            m_creature->ForcedDespawn();
-        }
+        if (spell && spell->Id == SPELL_RANSHALLA_DESPAWN &&
+            (m_phase == PHASE_WAIT_FIRE || m_phase == PHASE_WAIT_ALTAR || m_phase == PHASE_CONTINUING))
+            AbortScene();
     }
 
     // Called when Ranshalla starts to channel on a torch / altar
-    void DoChannelTorchSpell(bool bIsAltarWaypoint = false)
+    void DoChannelTorchSpell(bool isAltar = false)
     {
-        // Check if we are using the fire or the altar and remove the no_interact flag
-        if (bIsAltarWaypoint)
+        if (m_cleaning || !HasEscortState(STATE_ESCORT_ESCORTING) ||
+            m_phase != (isAltar ? PHASE_ALTAR_INTRO : PHASE_ESCORTING))
+            return;
+
+        m_waitingGoGuid.Clear();
+        m_phase = isAltar ? PHASE_WAIT_ALTAR : PHASE_WAIT_FIRE;
+        if (GameObject* object = GetClosestGameObjectWithEntry(m_creature, isAltar ? GO_ELUNE_ALTAR : GO_ELUNE_FIRE, 10.0f))
         {
-            if (GameObject* pGo = GetClosestGameObjectWithEntry(m_creature, GO_ELUNE_ALTAR, 10.0f))
+            m_waitingGoGuid = object->GetObjectGuid();
+            object->RemoveFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
+            if (isAltar)
             {
-                pGo->RemoveFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
-                m_creature->SetFacingToObject(pGo);
-                m_altarGuid = pGo->GetObjectGuid();
+                m_creature->SetFacingToObject(object);
+                m_altarGuid = object->GetObjectGuid();
             }
         }
-        else
-        {
-            if (GameObject* pGo = GetClosestGameObjectWithEntry(m_creature, GO_ELUNE_FIRE, 10.0f))
-                pGo->RemoveFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
-        }
 
-        // Yell and set escort to pause
         switch (urand(0, 2))
         {
             case 0: DoScriptText(SAY_REACH_TORCH_1, m_creature); break;
             case 1: DoScriptText(SAY_REACH_TORCH_2, m_creature); break;
             case 2: DoScriptText(SAY_REACH_TORCH_3, m_creature); break;
         }
-
         DoScriptText(EMOTE_CHANT_SPELL, m_creature);
         DoCastSpellIfCan(m_creature, SPELL_LIGHT_TORCH);
         SetEscortPaused(true);
     }
 
-    void DoSummonPriestess()
+    bool DoSummonPriestess()
     {
-        // Summon 2 Elune priestess and make each of them move to a different spot
-        if (Creature* pPriestess = m_creature->SummonCreature(NPC_PRIESTESS_ELUNE, aWingThicketLocations[0].x, aWingThicketLocations[0].y, aWingThicketLocations[0].z, aWingThicketLocations[0].o, TEMPSPAWN_CORPSE_DESPAWN, 0))
+        if (m_cleaning || m_phase != PHASE_WAIT_PRIESTESS || !HasEscortState(STATE_ESCORT_ESCORTING))
+            return false;
+        uint32 round = m_round;
+        if (Creature* priestess = m_creature->SummonCreature(NPC_PRIESTESS_ELUNE, aWingThicketLocations[0].x, aWingThicketLocations[0].y, aWingThicketLocations[0].z, aWingThicketLocations[0].o, TEMPSPAWN_CORPSE_DESPAWN, 0))
         {
-            pPriestess->GetMotionMaster()->MovePoint(0, aWingThicketLocations[3].x, aWingThicketLocations[3].y, aWingThicketLocations[3].z);
-            m_firstPriestessGuid = pPriestess->GetObjectGuid();
+            if (round != m_round || m_phase != PHASE_WAIT_PRIESTESS)
+            {
+                DespawnOwnedActor(priestess->GetObjectGuid(), NPC_PRIESTESS_ELUNE);
+                return false;
+            }
+            m_firstPriestessGuid = priestess->GetObjectGuid();
+            priestess->GetMotionMaster()->MovePoint(0, aWingThicketLocations[3].x, aWingThicketLocations[3].y, aWingThicketLocations[3].z);
         }
-        if (Creature* pPriestess = m_creature->SummonCreature(NPC_PRIESTESS_ELUNE, aWingThicketLocations[1].x, aWingThicketLocations[1].y, aWingThicketLocations[1].z, aWingThicketLocations[1].o, TEMPSPAWN_CORPSE_DESPAWN, 0))
+        if (round != m_round || m_phase != PHASE_WAIT_PRIESTESS)
+            return false;
+
+        if (Creature* priestess = m_creature->SummonCreature(NPC_PRIESTESS_ELUNE, aWingThicketLocations[1].x, aWingThicketLocations[1].y, aWingThicketLocations[1].z, aWingThicketLocations[1].o, TEMPSPAWN_CORPSE_DESPAWN, 0))
         {
-            // Left priestess should have a distinct move point because she is the one who starts the dialogue at point reach
-            pPriestess->GetMotionMaster()->MovePoint(1, aWingThicketLocations[4].x, aWingThicketLocations[4].y, aWingThicketLocations[4].z);
-            m_secondPriestessGuid = pPriestess->GetObjectGuid();
+            if (round != m_round || m_phase != PHASE_WAIT_PRIESTESS)
+            {
+                DespawnOwnedActor(priestess->GetObjectGuid(), NPC_PRIESTESS_ELUNE);
+                return false;
+            }
+            m_secondPriestessGuid = priestess->GetObjectGuid();
+            priestess->GetMotionMaster()->MovePoint(1, aWingThicketLocations[4].x, aWingThicketLocations[4].y, aWingThicketLocations[4].z);
+            return true;
         }
+
+        AbortScene();
+        return false;
     }
 
-    void SummonedMovementInform(Creature* pSummoned, uint32 uiType, uint32 uiPointId) override
+    void SummonedMovementInform(Creature* summoned, uint32 type, uint32 point) override
     {
-        if (uiType != POINT_MOTION_TYPE || pSummoned->GetEntry() != NPC_PRIESTESS_ELUNE || uiPointId != 1)
+        if (m_cleaning || m_phase != PHASE_WAIT_PRIESTESS || !HasEscortState(STATE_ESCORT_ESCORTING) ||
+            !m_creature->IsAlive() || type != POINT_MOTION_TYPE || point != 1 || !summoned ||
+            summoned != GetOwnedActor(m_secondPriestessGuid, NPC_PRIESTESS_ELUNE))
             return;
 
-        // Start the dialogue when the priestess reach the altar (they should both reach the point in the same time)
+        m_phase = PHASE_CINEMATIC;
         StartNextDialogueText(SAY_PRIESTESS_ALTAR_3);
     }
 
     void WaypointReached(uint32 uiPointId) override
     {
+        if (m_cleaning || !HasEscortState(STATE_ESCORT_ESCORTING) || m_phase == PHASE_IDLE || m_phase == PHASE_COMPLETE)
+            return;
         switch (uiPointId)
         {
             case 3:
@@ -262,10 +407,15 @@ struct npc_ranshallaAI : public npc_escortAI, private DialogueHelper
             case 20: // Cavern 3
             case 25: // Cavern 4
             case 36: // Cavern 5
+                if (m_phase != PHASE_ESCORTING)
+                    break;
                 m_uiCurrentWaypoint = uiPointId;
                 DoChannelTorchSpell();
                 break;
             case 39:
+                if (m_phase != PHASE_ESCORTING)
+                    break;
+                m_phase = PHASE_ALTAR_INTRO;
                 m_uiCurrentWaypoint = uiPointId;
                 StartNextDialogueText(SAY_REACH_ALTAR_1);
                 SetEscortPaused(true);
@@ -289,10 +439,12 @@ struct npc_ranshallaAI : public npc_escortAI, private DialogueHelper
                 break;
             }
             case 42:
-                // Summon the 2 priestess
+                if (m_phase != PHASE_ESCORTING)
+                    break;
+                m_phase = PHASE_WAIT_PRIESTESS;
                 SetEscortPaused(true);
-                DoSummonPriestess();
-                DoScriptText(SAY_RANSHALLA_ALTAR_2, m_creature);
+                if (DoSummonPriestess())
+                    DoScriptText(SAY_RANSHALLA_ALTAR_2, m_creature);
                 break;
             case 44:
                 // Stop the escort and turn towards the altar
@@ -305,6 +457,9 @@ struct npc_ranshallaAI : public npc_escortAI, private DialogueHelper
 
     void JustDidDialogueStep(int32 iEntry) override
     {
+        if (m_cleaning || !HasEscortState(STATE_ESCORT_ESCORTING) ||
+            (m_phase != PHASE_ALTAR_INTRO && m_phase != PHASE_CINEMATIC))
+            return;
         switch (iEntry)
         {
             case NPC_RANSHALLA:
@@ -335,37 +490,50 @@ struct npc_ranshallaAI : public npc_escortAI, private DialogueHelper
                 break;
             case SAY_PRIESTESS_ALTAR_9:
                 // move near the escort npc
-                if (Creature* pPriestess = m_creature->GetMap()->GetCreature(m_firstPriestessGuid))
+                if (Creature* pPriestess = GetOwnedActor(m_firstPriestessGuid, NPC_PRIESTESS_ELUNE))
                     pPriestess->GetMotionMaster()->MovePoint(0, aWingThicketLocations[6].x, aWingThicketLocations[6].y, aWingThicketLocations[6].z);
                 break;
             case SAY_PRIESTESS_ALTAR_13:
-                // summon the Guardian of Elune
-                if (Creature* pGuard = m_creature->SummonCreature(NPC_GUARDIAN_ELUNE, aWingThicketLocations[2].x, aWingThicketLocations[2].y, aWingThicketLocations[2].z, aWingThicketLocations[2].o, TEMPSPAWN_CORPSE_DESPAWN, 0))
+            {
+                uint32 round = m_round;
+                if (Creature* guard = m_creature->SummonCreature(NPC_GUARDIAN_ELUNE, aWingThicketLocations[2].x, aWingThicketLocations[2].y, aWingThicketLocations[2].z, aWingThicketLocations[2].o, TEMPSPAWN_CORPSE_DESPAWN, 0))
                 {
-                    pGuard->GetMotionMaster()->MovePoint(0, aWingThicketLocations[5].x, aWingThicketLocations[5].y, aWingThicketLocations[5].z);
-                    m_guardEluneGuid = pGuard->GetObjectGuid();
+                    if (round != m_round || m_phase != PHASE_CINEMATIC)
+                    {
+                        DespawnOwnedActor(guard->GetObjectGuid(), NPC_GUARDIAN_ELUNE);
+                        break;
+                    }
+                    m_guardEluneGuid = guard->GetObjectGuid();
+                    guard->GetMotionMaster()->MovePoint(0, aWingThicketLocations[5].x, aWingThicketLocations[5].y, aWingThicketLocations[5].z);
                 }
-                // summon the Voice of Elune
-                if (GameObject* pAltar = m_creature->GetMap()->GetGameObject(m_altarGuid))
+                if (round != m_round || m_phase != PHASE_CINEMATIC)
+                    break;
+                if (GameObject* altar = m_creature->GetMap()->GetGameObject(m_altarGuid))
                 {
-                    if (Creature* pVoice = m_creature->SummonCreature(NPC_VOICE_ELUNE, pAltar->GetPositionX(), pAltar->GetPositionY(), pAltar->GetPositionZ(), 0, TEMPSPAWN_TIMED_DESPAWN, 30000))
-                        m_voiceEluneGuid = pVoice->GetObjectGuid();
+                    if (Creature* voice = m_creature->SummonCreature(NPC_VOICE_ELUNE, altar->GetPositionX(), altar->GetPositionY(), altar->GetPositionZ(), 0, TEMPSPAWN_TIMED_DESPAWN, 30000))
+                    {
+                        if (round == m_round && m_phase == PHASE_CINEMATIC)
+                            m_voiceEluneGuid = voice->GetObjectGuid();
+                        else
+                            DespawnOwnedActor(voice->GetObjectGuid(), NPC_VOICE_ELUNE);
+                    }
                 }
                 break;
+            }
             case SAY_VOICE_ALTAR_15:
                 // move near the escort npc and continue dialogue
-                if (Creature* pPriestess = m_creature->GetMap()->GetCreature(m_secondPriestessGuid))
+                if (Creature* pPriestess = GetOwnedActor(m_secondPriestessGuid, NPC_PRIESTESS_ELUNE))
                 {
                     DoScriptText(SAY_PRIESTESS_ALTAR_14, pPriestess);
                     pPriestess->GetMotionMaster()->MovePoint(0, aWingThicketLocations[7].x, aWingThicketLocations[7].y, aWingThicketLocations[7].z);
                 }
                 // make the voice of elune cast Bind Wildkin
-                if (Creature* pGuard = m_creature->GetMap()->GetCreature(m_guardEluneGuid))
+                if (Creature* pGuard = GetOwnedActor(m_guardEluneGuid, NPC_GUARDIAN_ELUNE))
                     pGuard->CastSpell(pGuard, SPELL_BIND_WILDKIN, TRIGGERED_NONE);
                 break;
             case SAY_PRIESTESS_ALTAR_19:
                 // make the voice of elune leave
-                if (Creature* pGuard = m_creature->GetMap()->GetCreature(m_guardEluneGuid))
+                if (Creature* pGuard = GetOwnedActor(m_guardEluneGuid, NPC_GUARDIAN_ELUNE))
                 {
                     pGuard->GetMotionMaster()->MovePoint(0, aWingThicketLocations[2].x, aWingThicketLocations[2].y, aWingThicketLocations[2].z);
                     pGuard->ForcedDespawn(4000);
@@ -373,7 +541,7 @@ struct npc_ranshallaAI : public npc_escortAI, private DialogueHelper
                 break;
             case SAY_PRIESTESS_ALTAR_20:
                 // make the first priestess leave
-                if (Creature* pPriestess = m_creature->GetMap()->GetCreature(m_firstPriestessGuid))
+                if (Creature* pPriestess = GetOwnedActor(m_firstPriestessGuid, NPC_PRIESTESS_ELUNE))
                 {
                     pPriestess->GetMotionMaster()->MovePoint(0, aWingThicketLocations[0].x, aWingThicketLocations[0].y, aWingThicketLocations[0].z);
                     pPriestess->ForcedDespawn(4000);
@@ -381,7 +549,7 @@ struct npc_ranshallaAI : public npc_escortAI, private DialogueHelper
                 break;
             case SAY_PRIESTESS_ALTAR_21:
                 // make the second priestess leave
-                if (Creature* pPriestess = m_creature->GetMap()->GetCreature(m_secondPriestessGuid))
+                if (Creature* pPriestess = GetOwnedActor(m_secondPriestessGuid, NPC_PRIESTESS_ELUNE))
                 {
                     pPriestess->GetMotionMaster()->MovePoint(0, aWingThicketLocations[1].x, aWingThicketLocations[1].y, aWingThicketLocations[1].z);
                     pPriestess->ForcedDespawn(4000);
@@ -396,13 +564,16 @@ struct npc_ranshallaAI : public npc_escortAI, private DialogueHelper
                 }
                 break;
             case SAY_QUEST_END_2:
+                m_phase = PHASE_COMPLETE;
+                DisableDialogue();
+                m_uiDelayTimer = 0;
+                m_waitingGoGuid.Clear();
+                m_uiFinishTimer = 1 * MINUTE * IN_MILLISECONDS;
                 // Turn towards the altar and kneel - quest complete
                 if (GameObject* pAltar = m_creature->GetMap()->GetGameObject(m_altarGuid))
                     m_creature->SetFacingToObject(pAltar);
                 m_creature->SetStandState(UNIT_STAND_STATE_KNEEL);
-                if (Player* pPlayer = GetPlayerForEscort())
-                    pPlayer->RewardPlayerAndGroupAtEventExplored(QUEST_GUARDIANS_ALTAR, m_creature);
-                m_creature->ForcedDespawn(1 * MINUTE * IN_MILLISECONDS);
+                m_creditPending = true;
                 break;
         }
     }
@@ -412,37 +583,71 @@ struct npc_ranshallaAI : public npc_escortAI, private DialogueHelper
         switch (uiEntry)
         {
             case NPC_RANSHALLA:        return m_creature;
-            case NPC_VOICE_ELUNE:      return m_creature->GetMap()->GetCreature(m_voiceEluneGuid);
-            case NPC_PRIESTESS_DATA_1: return m_creature->GetMap()->GetCreature(m_firstPriestessGuid);
-            case NPC_PRIESTESS_DATA_2: return m_creature->GetMap()->GetCreature(m_secondPriestessGuid);
+            case NPC_VOICE_ELUNE:      return GetOwnedActor(m_voiceEluneGuid, NPC_VOICE_ELUNE);
+            case NPC_PRIESTESS_DATA_1: return GetOwnedActor(m_firstPriestessGuid, NPC_PRIESTESS_ELUNE);
+            case NPC_PRIESTESS_DATA_2: return GetOwnedActor(m_secondPriestessGuid, NPC_PRIESTESS_ELUNE);
 
             default:
                 return nullptr;
         }
     }
 
-    void UpdateEscortAI(const uint32 uiDiff) override
+    void UpdateEscortAI(const uint32 diff) override
     {
-        DialogueUpdate(uiDiff);
+        if (m_dialogueUpdating)
+            return;
+        uint32 round = m_round;
+        if (m_phase == PHASE_COMPLETE && m_uiFinishTimer)
+        {
+            if (m_uiFinishTimer <= diff)
+            {
+                ResetScene();
+                m_creature->ForcedDespawn();
+                return;
+            }
+            m_uiFinishTimer -= diff;
+        }
+
+        if (m_phase == PHASE_ALTAR_INTRO || m_phase == PHASE_CINEMATIC)
+        {
+            m_dialogueUpdating = true;
+            DialogueUpdate(diff);
+            m_dialogueUpdating = false;
+        }
+        if (round != m_round)
+            return;
+
+        // The helper has finished advancing its pointer before quest callbacks.
+        if (m_creditPending && m_phase == PHASE_COMPLETE)
+        {
+            m_creditPending = false;
+            if (Player* player = GetPlayerForEscort())
+                player->RewardPlayerAndGroupAtEventExplored(QUEST_GUARDIANS_ALTAR, m_creature);
+            if (round != m_round)
+                return;
+        }
 
         if (m_uiDelayTimer)
         {
-            if (m_uiDelayTimer <= uiDiff)
+            if (m_uiDelayTimer <= diff)
             {
-                m_creature->InterruptNonMeleeSpells(false);
-                SetEscortPaused(false);
-                // Spell Ranshalla Waiting applies a root aura that triggers an internal timer in the waypoint movement manager
-                // We need to manually set the movement manager to the next waypoint in order to reset the timer unless the NPC will wait 3 min before moving again
-                m_creature->GetMotionMaster()->SetNextWaypoint(m_uiCurrentWaypoint + 1);
+                uint32 nextPoint = m_uiCurrentWaypoint + 1;
                 m_uiDelayTimer = 0;
+                m_phase = PHASE_ESCORTING;
+                m_creature->InterruptNonMeleeSpells(false);
+                if (round != m_round)
+                    return;
+                SetEscortPaused(false);
+                if (round != m_round)
+                    return;
+                m_creature->GetMotionMaster()->SetNextWaypoint(nextPoint);
             }
             else
-                m_uiDelayTimer -= uiDiff;
+                m_uiDelayTimer -= diff;
         }
 
         if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
             return;
-
         DoMeleeAttackIfReady();
     }
 };
@@ -456,11 +661,8 @@ bool QuestAccept_npc_ranshalla(Player* pPlayer, Creature* pCreature, const Quest
 {
     if (pQuest->GetQuestId() == QUEST_GUARDIANS_ALTAR)
     {
-        DoScriptText(SAY_QUEST_START, pCreature);
-        pCreature->SetFactionTemporary(FACTION_ESCORT_A_NEUTRAL_PASSIVE, TEMPFACTION_RESTORE_RESPAWN);
-
         if (npc_ranshallaAI* pEscortAI = dynamic_cast<npc_ranshallaAI*>(pCreature->AI()))
-            pEscortAI->Start(false, pPlayer, pQuest, true);
+            pEscortAI->BeginEscort(pPlayer, pQuest);
 
         return true;
     }
@@ -470,18 +672,12 @@ bool QuestAccept_npc_ranshalla(Player* pPlayer, Creature* pCreature, const Quest
 
 bool GOUse_go_elune_fire(Player* /*pPlayer*/, GameObject* pGo)
 {
-    // Check if we are using the torches or the altar
-    bool bIsAltar = false;
+    if (pGo->GetEntry() != GO_ELUNE_ALTAR && pGo->GetEntry() != GO_ELUNE_FIRE)
+        return false;
 
-    if (pGo->GetEntry() == GO_ELUNE_ALTAR)
-        bIsAltar = true;
-
-    if (Creature* pRanshalla = GetClosestCreatureWithEntry(pGo, NPC_RANSHALLA, 10.0f))
-    {
-        if (npc_ranshallaAI* pEscortAI = dynamic_cast<npc_ranshallaAI*>(pRanshalla->AI()))
-            pEscortAI->DoContinueEscort(bIsAltar);
-    }
-
+    if (Creature* ranshalla = GetClosestCreatureWithEntry(pGo, NPC_RANSHALLA, 10.0f))
+        if (npc_ranshallaAI* escortAI = dynamic_cast<npc_ranshallaAI*>(ranshalla->AI()))
+            escortAI->DoContinueEscort(pGo);
     return false;
 }
 
@@ -569,9 +765,22 @@ struct npc_artoriusAI : public ScriptedAI
         Reset();
     }
 
-    void BeginEvent(ObjectGuid playerGuid)
+    bool CanBeginEvent(Player* player) const
     {
-        m_hunterGuid = playerGuid;
+        return player && player->IsAlive() && player->IsInWorld() &&
+            player->GetMap() == m_creature->GetMap() && player->getClass() == CLASS_HUNTER &&
+            player->GetQuestStatus(QUEST_STAVE_OF_THE_ANCIENTS) == QUEST_STATUS_INCOMPLETE &&
+            m_creature->GetEntry() == NPC_ARTORIUS_THE_AMIABLE && m_creature->IsAlive() &&
+            m_creature->IsInWorld() && !m_creature->IsInCombat() && !m_bTransform &&
+            !m_uiDespawn_Timer && m_creature->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
+    }
+
+    void BeginEvent(Player* player)
+    {
+        if (!CanBeginEvent(player))
+            return;
+
+        m_hunterGuid = player->GetObjectGuid();
         m_creature->GetMotionMaster()->Clear(false);
         m_creature->GetMotionMaster()->MoveIdle();
         m_creature->SetUInt32Value(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_NONE);
@@ -664,7 +873,10 @@ struct npc_artoriusAI : public ScriptedAI
             if (m_uiDespawn_Timer <= uiDiff)
             {
                 if (m_creature->IsAlive() && !m_creature->IsInCombat())
+                {
                     DemonDespawn(false);
+                    return;
+                }
             }
             else
                 m_uiDespawn_Timer -= uiDiff;
@@ -674,7 +886,10 @@ struct npc_artoriusAI : public ScriptedAI
             return;
 
         if (m_creature->getThreatManager().getThreatList().size() > 1)
+        {
             DemonDespawn();
+            return;
+        }
 
         if (m_uiDemonic_Frenzy_Timer < uiDiff)
         {
@@ -701,17 +916,20 @@ struct npc_artoriusAI : public ScriptedAI
 
 bool GossipHello_npc_artorius(Player* pPlayer, Creature* pCreature)
 {
-    if (pPlayer->GetQuestStatus(QUEST_STAVE_OF_THE_ANCIENTS) == QUEST_STATUS_INCOMPLETE)
-        pPlayer->ADD_GOSSIP_ITEM(0, GOSSIP_ITEM, GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF);
+    if (npc_artoriusAI* ai = dynamic_cast<npc_artoriusAI*>(pCreature->AI()))
+        if (ai->CanBeginEvent(pPlayer))
+            pPlayer->ADD_GOSSIP_ITEM(0, GOSSIP_ITEM, GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF);
 
     pPlayer->SEND_GOSSIP_MENU(pPlayer->GetGossipTextId(pCreature), pCreature->GetObjectGuid());
     return true;
 }
 
-bool GossipSelect_npc_artorius(Player* pPlayer, Creature* pCreature, uint32 /*uiSender*/, uint32 /*uiAction*/)
+bool GossipSelect_npc_artorius(Player* pPlayer, Creature* pCreature, uint32 uiSender, uint32 uiAction)
 {
     pPlayer->CLOSE_GOSSIP_MENU();
-    ((npc_artoriusAI*)pCreature->AI())->BeginEvent(pPlayer->GetObjectGuid());
+    if (uiSender == GOSSIP_SENDER_MAIN && uiAction == GOSSIP_ACTION_INFO_DEF)
+        if (npc_artoriusAI* ai = dynamic_cast<npc_artoriusAI*>(pCreature->AI()))
+            ai->BeginEvent(pPlayer);
     return true;
 }
 
