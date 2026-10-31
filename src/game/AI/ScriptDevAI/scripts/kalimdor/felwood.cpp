@@ -56,7 +56,7 @@ enum
 
 struct npc_kittenAI : public FollowerAI
 {
-    npc_kittenAI(Creature* pCreature) : FollowerAI(pCreature)
+    npc_kittenAI(Creature* pCreature) : FollowerAI(pCreature), m_released(false)
     {
         if (pCreature->GetOwner() && pCreature->GetOwner()->GetTypeId() == TYPEID_PLAYER)
         {
@@ -74,8 +74,35 @@ struct npc_kittenAI : public FollowerAI
     }
 
     uint32 m_uiMoonwellCooldown;
+    bool m_released;
 
     void Reset() override { }
+
+    bool CanReleaseToWinna(Player* player)
+    {
+        if (!player || m_released || !player->IsAlive() || !player->IsInWorld() ||
+            !m_creature->IsAlive() || !m_creature->IsInWorld() || m_creature->IsInCombat() ||
+            player->GetMap() != m_creature->GetMap() || m_creature->GetEntry() != NPC_CORRUPT_SABER ||
+            player->GetQuestStatus(QUEST_CORRUPT_SABER) != QUEST_STATUS_INCOMPLETE ||
+            !HasFollowState(STATE_FOLLOW_INPROGRESS) ||
+            HasFollowState(STATE_FOLLOW_PAUSED | STATE_FOLLOW_COMPLETE | STATE_FOLLOW_POSTEVENT) ||
+            GetLeaderForFollower() != player)
+            return false;
+
+        Creature* winna = GetClosestCreatureWithEntry(m_creature, NPC_WINNA, INTERACTION_DISTANCE);
+        return winna && winna->IsAlive();
+    }
+
+    bool ReleaseToWinna(Player* player)
+    {
+        if (!CanReleaseToWinna(player))
+            return false;
+
+        // Commit before motion or quest callbacks can re-enter the release.
+        m_released = true;
+        SetFollowComplete();
+        return true;
+    }
 
     void MoveInLineOfSight(Unit* pWho) override
     {
@@ -136,9 +163,9 @@ struct CorruptedSaberVisual : public SpellScript
 
 bool GossipHello_npc_corrupt_saber(Player* pPlayer, Creature* pCreature)
 {
-    if (pPlayer->GetQuestStatus(QUEST_CORRUPT_SABER) == QUEST_STATUS_INCOMPLETE)
+    if (npc_kittenAI* pKittenAI = dynamic_cast<npc_kittenAI*>(pCreature->AI()))
     {
-        if (GetClosestCreatureWithEntry(pCreature, NPC_WINNA, INTERACTION_DISTANCE))
+        if (pKittenAI->CanReleaseToWinna(pPlayer))
             pPlayer->ADD_GOSSIP_ITEM(GOSSIP_ICON_CHAT, GOSSIP_ITEM_RELEASE, GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF + 1);
     }
 
@@ -146,16 +173,18 @@ bool GossipHello_npc_corrupt_saber(Player* pPlayer, Creature* pCreature)
     return true;
 }
 
-bool GossipSelect_npc_corrupt_saber(Player* pPlayer, Creature* pCreature, uint32 /*uiSender*/, uint32 uiAction)
+bool GossipSelect_npc_corrupt_saber(Player* pPlayer, Creature* pCreature, uint32 uiSender, uint32 uiAction)
 {
-    if (uiAction == GOSSIP_ACTION_INFO_DEF + 1)
+    if (uiSender == GOSSIP_SENDER_MAIN && uiAction == GOSSIP_ACTION_INFO_DEF + 1)
     {
-        pPlayer->CLOSE_GOSSIP_MENU();
-
         if (npc_kittenAI* pKittenAI = dynamic_cast<npc_kittenAI*>(pCreature->AI()))
-            pKittenAI->SetFollowComplete();
-
-        pPlayer->AreaExploredOrEventHappens(QUEST_CORRUPT_SABER);
+        {
+            if (pKittenAI->ReleaseToWinna(pPlayer))
+            {
+                pPlayer->CLOSE_GOSSIP_MENU();
+                pPlayer->AreaExploredOrEventHappens(QUEST_CORRUPT_SABER);
+            }
+        }
     }
 
     return true;
@@ -207,6 +236,12 @@ struct npc_captured_arkonarinAI : public npc_escortAI
 
         m_uiMortalStrikeTimer = urand(5000, 7000);
         m_uiCleaveTimer = urand(1000, 4000);
+    }
+
+    void JustRespawned() override
+    {
+        npc_escortAI::JustRespawned();
+        m_creature->SetStandState(UNIT_STAND_STATE_KNEEL, true);
     }
 
     void Aggro(Unit* pWho) override
@@ -420,9 +455,19 @@ struct npc_areiAI : public npc_escortAI, private DialogueHelper
         {
             SetEscortPaused(true);
 
-            m_creature->SummonCreature(NPC_IRONTREE_STOMPER, 6573.321f, -1195.213f, 442.489f, 0, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 60000);
-            m_creature->SummonCreature(NPC_IRONTREE_WANDERER, 6573.240f, -1213.475f, 443.643f, 0, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 60000);
-            m_creature->SummonCreature(NPC_IRONTREE_WANDERER, 6583.354f, -1209.811f, 444.769f, 0, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 60000);
+            uint32 summoned = 0;
+            if (m_creature->SummonCreature(NPC_IRONTREE_STOMPER, 6573.321f, -1195.213f, 442.489f, 0, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 60000))
+                ++summoned;
+            if (m_creature->SummonCreature(NPC_IRONTREE_WANDERER, 6573.240f, -1213.475f, 443.643f, 0, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 60000))
+                ++summoned;
+            if (m_creature->SummonCreature(NPC_IRONTREE_WANDERER, 6583.354f, -1209.811f, 444.769f, 0, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 60000))
+                ++summoned;
+
+            if (!summoned)
+            {
+                FailQuestForPlayerAndGroup();
+                m_creature->ForcedDespawn();
+            }
         }
     }
 
