@@ -62,7 +62,11 @@ struct world_map_kalimdor : public ScriptedMap
         }
     }
     void OnCreatureRespawn(Creature* actor) override { m_arena.OnCreatureRespawn(actor); }
-    void OnCreatureDespawn(Creature* actor) override { m_arena.OnCreatureDespawn(actor); }
+    void OnCreatureDespawn(Creature* actor) override
+    {
+        m_arena.OnCreatureDespawn(actor);
+        m_freedomEvent.OwnerRemoved(actor->GetObjectGuid());
+    }
     void OnPlayerEnter(Player* player) override { m_arena.OnPlayerEnter(player); }
     void OnPlayerLeave(Player* player) override { m_arena.OnPlayerLeave(player); }
 
@@ -76,7 +80,7 @@ struct world_map_kalimdor : public ScriptedMap
     bool b_isOmenSpellCreditDone;
     std::array<std::vector<ObjectGuid>, MAX_ELEMENTS> m_aElementalRiftGUIDs;
     uint32 m_uiDronesTimer;
-    uint32 m_freedSpriteDarter;
+    FeralasFreedomEvent m_freedomEvent;
 
     void Initialize() override
     {
@@ -85,7 +89,7 @@ struct world_map_kalimdor : public ScriptedMap
         m_uiOmenResetTimer = 0;
         m_uiOmenMoonlightTimer = 0;
         m_uiRocketsCounter = 0;
-        m_freedSpriteDarter = 0;
+        m_freedomEvent.Reset();
         b_isOmenSpellCreditDone = false;
         for (auto& riftList : m_aElementalRiftGUIDs)
             riftList.clear();
@@ -425,20 +429,19 @@ struct world_map_kalimdor : public ScriptedMap
                     m_uiDronesTimer = 5 * MINUTE * IN_MILLISECONDS;
                 break;
             case TYPE_FREEDOM_CREATURES:
-                if (uiData == IN_PROGRESS)
-                    m_freedSpriteDarter = 0;
-                else if (uiData == SPECIAL)
-                {
-                    ++m_freedSpriteDarter;
-                    if (m_freedSpriteDarter >= 6)
-                        uiData = DONE;
-                }
-                break;
+                // Anonymous SPECIAL callbacks cannot prove round or actor identity.
+                // The Feralas callbacks use m_freedomEvent's explicit GUID protocol.
+                if (uiData == NOT_STARTED)
+                    m_freedomEvent.Reset();
+                return;
         }
         m_encounter[uiType] = uiData;
     }
 
-    uint32 GetData(uint32 uiType) const override { return m_encounter[uiType]; }
+    uint32 GetData(uint32 uiType) const override
+    {
+        return uiType == TYPE_FREEDOM_CREATURES ? m_freedomEvent.GetState() : m_encounter[uiType];
+    }
 };
 
 DireMaulArena* GetDireMaulArena(Map* map)
@@ -446,6 +449,14 @@ DireMaulArena* GetDireMaulArena(Map* map)
     if (!map || map->GetId() != DMA_MAP || map->Instanceable()) return nullptr;
     auto* owner = dynamic_cast<world_map_kalimdor*>(map->GetInstanceData());
     return owner ? &owner->m_arena : nullptr;
+}
+
+FeralasFreedomEvent* GetFeralasFreedomEvent(Map* map)
+{
+    if (!map || map->GetId() != 1 || map->Instanceable())
+        return nullptr;
+    auto* owner = dynamic_cast<world_map_kalimdor*>(map->GetInstanceData());
+    return owner ? &owner->m_freedomEvent : nullptr;
 }
 
 InstanceData* GetInstanceData_world_map_kalimdor(Map* pMap)

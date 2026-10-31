@@ -67,6 +67,19 @@ struct npc_oox22feAI : public npc_escortAI
 
     GuidList m_lSummonsList;
 
+    void CleanupSummons()
+    {
+        // Clear first: ForcedDespawn may synchronously dispatch other callbacks.
+        GuidList summons;
+        summons.swap(m_lSummonsList);
+        for (ObjectGuid guid : summons)
+        {
+            if (Creature* summoned = m_creature->GetMap()->GetCreature(guid))
+                if (summoned->GetSpawnerGuid() == m_creature->GetObjectGuid())
+                    summoned->ForcedDespawn();
+        }
+    }
+
     void WaypointReached(uint32 i) override
     {
         switch (i)
@@ -105,7 +118,10 @@ struct npc_oox22feAI : public npc_escortAI
     void Reset() override
     {
         if (!HasEscortState(STATE_ESCORT_ESCORTING))
+        {
+            CleanupSummons();
             m_creature->SetStandState(UNIT_STAND_STATE_DEAD);
+        }
     }
 
     void Aggro(Unit* /*who*/) override
@@ -120,19 +136,20 @@ struct npc_oox22feAI : public npc_escortAI
 
     void JustSummoned(Creature* summoned) override
     {
-        summoned->AI()->AttackStart(m_creature);
         m_lSummonsList.push_back(summoned->GetObjectGuid());
+        summoned->AI()->AttackStart(m_creature);
     }
 
     void JustDied(Unit* pKiller) override
     {
-        for (GuidList::const_iterator itr = m_lSummonsList.begin(); itr != m_lSummonsList.end(); ++itr)
-        {
-            if (Creature* pSummoned = m_creature->GetMap()->GetCreature(*itr))
-                pSummoned->ForcedDespawn();
-        }
-
+        CleanupSummons();
         npc_escortAI::JustDied(pKiller);
+    }
+
+    void CorpseRemoved(uint32& respawnDelay) override
+    {
+        CleanupSummons();
+        npc_escortAI::CorpseRemoved(respawnDelay);
     }
 };
 
@@ -222,7 +239,7 @@ struct npc_shay_leafrunnerAI : public FollowerAI
             pWho->GetContactPoint(m_creature, fX, fY, fZ, INTERACTION_DISTANCE);
             m_creature->GetMotionMaster()->MovePoint(0, fX, fY, fZ);
         }
-        else if (m_bIsRecalled && pWho->GetTypeId() == TYPEID_PLAYER && pWho->IsWithinDistInMap(pWho, INTERACTION_DISTANCE))
+        else if (m_bIsRecalled && pWho->GetTypeId() == TYPEID_PLAYER && m_creature->IsWithinDistInMap(pWho, INTERACTION_DISTANCE))
         {
             m_uiWanderTimer = 60000;
             m_bIsRecalled = false;
@@ -334,8 +351,8 @@ enum {
     QUEST_FREEDOM_ALL_CREATURES = 2969,
 
     SPELL_MANA_BURN             = 11981,
-    SPELL_SHOOT                 = 14443,
-    SPELL_MULTI_SHOT            = 6660
+    SPELL_SHOOT                 = 6660,
+    SPELL_MULTI_SHOT            = 14443
 };
 
 static const float raiderSpawnPos[4] = { -4515.35f, 811.36f, 62.99f, 3.60244f };
@@ -354,9 +371,54 @@ struct npc_captured_sprite_darterAI : public npc_escortAI
 
     ScriptedMap* m_map;
     uint32 m_manaBurnTimer;
+    uint32 m_freedomRound = 0;
+
+    void ClearFreedomActor()
+    {
+        uint32 round = m_freedomRound;
+        m_freedomRound = 0;
+        if (FeralasFreedomEvent* event = GetFeralasFreedomEvent(m_creature->GetMap()))
+            event->RemoveActor(round, m_creature->GetObjectGuid());
+    }
+
+    bool CanStartFreedom() const
+    {
+        return m_creature->IsAlive() && !m_creature->GetVictim() && !HasEscortState(STATE_ESCORT_ESCORTING);
+    }
+
+    bool StartFreedom(uint32 round, Player* player)
+    {
+        FeralasFreedomEvent* event = GetFeralasFreedomEvent(m_creature->GetMap());
+        if (!CanStartFreedom() || !event || !event->AddActor(round, m_creature->GetObjectGuid()))
+            return false;
+
+        m_freedomRound = round;
+        Start(true, player, nullptr);
+        if (!HasEscortState(STATE_ESCORT_ESCORTING))
+        {
+            ClearFreedomActor();
+            return false;
+        }
+        return true;
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        ClearFreedomActor();
+        npc_escortAI::JustDied(killer);
+    }
+
+    void CorpseRemoved(uint32& respawnDelay) override
+    {
+        ClearFreedomActor();
+        npc_escortAI::CorpseRemoved(respawnDelay);
+    }
 
     void Reset() override
     {
+        // Reset also runs on combat evade; keep the in-flight round in that case.
+        if (!HasEscortState(STATE_ESCORT_ESCORTING))
+            ClearFreedomActor();
         m_manaBurnTimer = urand(3, 6) * IN_MILLISECONDS;
         // Randomly pick a pre-set flight path amongst 4
         SetEscortWaypoints(urand(0, 3));
@@ -367,7 +429,9 @@ struct npc_captured_sprite_darterAI : public npc_escortAI
         // When we reach the end of the path, despawn and inform map script that we are free
         if (pointId == 8)
         {
-            m_map->SetData(TYPE_FREEDOM_CREATURES, SPECIAL);
+            if (FeralasFreedomEvent* event = GetFeralasFreedomEvent(m_creature->GetMap()))
+                event->RecordEscape(m_freedomRound, m_creature->GetObjectGuid());
+            m_freedomRound = 0;
             m_creature->ForcedDespawn();
         }
     }
@@ -403,29 +467,49 @@ UnitAI* GetAI_npc_captured_sprite_darter(Creature* pCreature)
 
 bool GOUse_go_cage_door(Player* player, GameObject* go)
 {
-    ScriptedInstance* mapScript = (ScriptedInstance*)go->GetInstanceData();
-
-    if (!mapScript)
+    // This template is also used by an ordinary door in Eastern Kingdoms.
+    // Returning false leaves its normal GameObject::Use door action intact.
+    if (go->GetMapId() != 1)
         return false;
 
-    // Omen encounter is set to NOT_STARTED every time the GO cluster is used
-    // This increases an internal counter that handles the event in the map script
-    mapScript->SetData(TYPE_FREEDOM_CREATURES, IN_PROGRESS);
+    FeralasFreedomEvent* event = GetFeralasFreedomEvent(go->GetMap());
+    if (!event || !event->CanStart())
+        return false;
 
-    // Make all Captured Sprite Darters flee
     CreatureList spriteDarts;
     MaNGOS::AllCreaturesOfEntryInRangeCheck checkerForWaypoint(go, NPC_CAPTURED_SPRITE_DARTER, 20.0f);
     MaNGOS::CreatureListSearcher<MaNGOS::AllCreaturesOfEntryInRangeCheck> searcher(spriteDarts, checkerForWaypoint);
     Cell::VisitGridObjects(go, searcher, 20.0f);
 
-    for (auto& spriteDart : spriteDarts)
+    bool hasAvailableSprite = false;
+    for (Creature* sprite : spriteDarts)
+        if (auto* escortAI = dynamic_cast<npc_captured_sprite_darterAI*>(sprite->AI()))
+            if (escortAI->CanStartFreedom())
+                hasAvailableSprite = true;
+    if (!hasAvailableSprite || !event->Start())
+        return false;
+
+    uint32 round = event->GetRound();
+    bool started = false;
+    for (Creature* sprite : spriteDarts)
     {
-        spriteDart->SetFactionTemporary(FACTION_ESCORT_N_FRIEND_ACTIVE, TEMPFACTION_RESTORE_RESPAWN);
-        if (auto* escortAI = dynamic_cast<npc_captured_sprite_darterAI*>(spriteDart->AI()))
-            escortAI->Start(true, player, nullptr);
+        if (auto* escortAI = dynamic_cast<npc_captured_sprite_darterAI*>(sprite->AI()))
+        {
+            if (escortAI->StartFreedom(round, player))
+            {
+                sprite->SetFactionTemporary(FACTION_ESCORT_N_FRIEND_ACTIVE, TEMPFACTION_RESTORE_RESPAWN);
+                started = true;
+            }
+        }
     }
-    // Spawn a Grimtotem Raider
-    if (Creature* grimtotemRaider = player->SummonCreature(NPC_GRIMTOTEM_RAIDER, raiderSpawnPos[0], raiderSpawnPos[1], raiderSpawnPos[2], raiderSpawnPos[3],TEMPSPAWN_DEAD_DESPAWN, 10 * MINUTE * IN_MILLISECONDS))
+    if (!started)
+    {
+        // A failed path start must leave the same follower able to retry.
+        event->Retry(round);
+        return false;
+    }
+
+    if (Creature* grimtotemRaider = player->SummonCreature(NPC_GRIMTOTEM_RAIDER, raiderSpawnPos[0], raiderSpawnPos[1], raiderSpawnPos[2], raiderSpawnPos[3], TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 10 * MINUTE * IN_MILLISECONDS))
     {
         grimtotemRaider->AI()->AttackStart(player);
         if (Creature* kindal = GetClosestCreatureWithEntry(player, NPC_KINDAL_MOONWEAVER, 20.0f))
@@ -453,13 +537,49 @@ struct npc_kindal_moonweaverAI : public FollowerAI
     uint32 m_checkCompletionTimer;
     uint32 m_shootTimer;
     uint32 m_multiShotTimer;
-    uint32 m_despawnTimer;
+    uint32 m_despawnTimer = 0;
+    uint32 m_freedomRound = 0;
     bool m_hasFleed;
+
+    void EndFreedomEvent()
+    {
+        uint32 round = m_freedomRound;
+        m_freedomRound = 0;
+        if (FeralasFreedomEvent* event = GetFeralasFreedomEvent(m_creature->GetMap()))
+            event->End(round, m_creature->GetObjectGuid());
+    }
+
+    void StartFreedomFollow(Player* player, const Quest* quest)
+    {
+        if (HasFollowState(STATE_FOLLOW_INPROGRESS))
+            return;
+        StartFollow(player, FACTION_ESCORT_A_NEUTRAL_ACTIVE, quest);
+        if (HasFollowState(STATE_FOLLOW_INPROGRESS))
+            if (FeralasFreedomEvent* event = GetFeralasFreedomEvent(m_creature->GetMap()))
+                m_freedomRound = event->Begin(m_creature->GetObjectGuid());
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        EndFreedomEvent();
+        FollowerAI::JustDied(killer);
+    }
+
+    void CorpseRemoved(uint32& respawnDelay) override
+    {
+        EndFreedomEvent();
+        m_despawnTimer = 0;
+        FollowerAI::CorpseRemoved(respawnDelay);
+    }
 
     void Reset() override
     {
         m_checkCompletionTimer = 1 * IN_MILLISECONDS;
-        m_despawnTimer = 0;
+        if (!HasFollowState(STATE_FOLLOW_INPROGRESS))
+        {
+            EndFreedomEvent();
+            m_despawnTimer = 0;
+        }
         m_shootTimer = urand(2, 4) * IN_MILLISECONDS;
         m_multiShotTimer = urand(8, 11) * IN_MILLISECONDS;
         m_hasFleed = false;
@@ -473,36 +593,41 @@ struct npc_kindal_moonweaverAI : public FollowerAI
 
     void UpdateFollowerAI(const uint32 diff) override
     {
-        if (HasFollowState(STATE_FOLLOW_INPROGRESS))
+        bool completedThisUpdate = false;
+        if (HasFollowState(STATE_FOLLOW_INPROGRESS) && !HasFollowState(STATE_FOLLOW_COMPLETE))
         {
-            // Periodically ask map script if quest is completed or not
-            if (m_checkCompletionTimer < diff)
+            if (m_checkCompletionTimer <= diff)
             {
-                if (m_map->GetData(TYPE_FREEDOM_CREATURES) == DONE)
+                m_checkCompletionTimer = IN_MILLISECONDS;
+                FeralasFreedomEvent* event = GetFeralasFreedomEvent(m_creature->GetMap());
+                if (event && event->IsComplete(m_freedomRound, m_creature->GetObjectGuid()))
                 {
-                    m_map->SetData(TYPE_FREEDOM_CREATURES, NOT_STARTED);
+                    // Close the round and mark completion before external callbacks.
+                    EndFreedomEvent();
+                    SetFollowComplete(true);
+                    m_despawnTimer = 5 * IN_MILLISECONDS;
+                    completedThisUpdate = true;
                     if (Player* player = GetLeaderForFollower())
                     {
                         if (player->GetQuestStatus(QUEST_FREEDOM_ALL_CREATURES) == QUEST_STATUS_INCOMPLETE)
                             player->RewardPlayerAndGroupAtEventExplored(QUEST_FREEDOM_ALL_CREATURES, m_creature);
                         DoScriptText(SAY_KINDAL_QUEST_COMPLETE, m_creature, player);
                     }
-                    m_despawnTimer = 5 * IN_MILLISECONDS;
-                    SetFollowComplete(true);
                 }
             }
             else
                 m_checkCompletionTimer -= diff;
         }
 
-        if (m_despawnTimer)
+        if (m_despawnTimer && !completedThisUpdate)
         {
-            if (m_despawnTimer < diff)
+            if (m_despawnTimer <= diff)
             {
+                m_despawnTimer = 0;
                 m_creature->SetImmuneToNPC(true);
                 m_creature->ForcedDespawn();
                 m_creature->Respawn();
-                m_despawnTimer = 0;
+                return;
             }
             else
                 m_despawnTimer -= diff;
@@ -542,7 +667,7 @@ struct npc_kindal_moonweaverAI : public FollowerAI
             {
                 if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_MULTI_SHOT) == CAST_OK)
                 {
-                    m_shootTimer = urand(8, 11) * IN_MILLISECONDS;
+                    m_multiShotTimer = urand(8, 11) * IN_MILLISECONDS;
                     return;
                 }
             }
@@ -564,7 +689,7 @@ bool QuestAccept_npc_kindal_moonweaver(Player* player, Creature* creature, const
     if (quest->GetQuestId() == QUEST_FREEDOM_ALL_CREATURES)
     {
         if (npc_kindal_moonweaverAI* kindal = dynamic_cast<npc_kindal_moonweaverAI*>(creature->AI()))
-            kindal->StartFollow(player, FACTION_ESCORT_A_NEUTRAL_ACTIVE, quest);
+            kindal->StartFreedomFollow(player, quest);
         DoScriptText(SAY_KINDAL_QUEST_START, creature);
         creature->SetStandState(UNIT_STAND_STATE_STAND);
         creature->SetImmuneToNPC(false);

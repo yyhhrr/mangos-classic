@@ -2,6 +2,9 @@
 #ifndef DEF_WORLD_MAP_KALIMDOR_SCRIPTS_H
 #define DEF_WORLD_MAP_KALIMDOR_SCRIPTS_H
 
+#include "AI/ScriptDevAI/include/sc_instance.h"
+#include <set>
+
 enum
 {
     // Quest 4740
@@ -48,6 +51,109 @@ enum Encounters
     TYPE_GONG_TIME          = 4, // War Effort
     MAX_ENCOUNTER
 };
+
+// One Feralas rescue round belongs to the actual Kindal follower, never to a
+// particular player: FollowerAI may hand leadership to an eligible group member.
+class FeralasFreedomEvent
+{
+public:
+    uint32 Begin(ObjectGuid owner)
+    {
+        Reset();
+        if (!owner)
+            return 0;
+        if (++m_generation == 0)
+            ++m_generation;
+        m_owner = owner;
+        m_active = true;
+        return m_generation;
+    }
+
+    void Reset()
+    {
+        m_owner.Clear();
+        m_roster.clear();
+        m_pending.clear();
+        m_escaped = 0;
+        m_active = false;
+        m_started = false;
+        m_complete = false;
+    }
+
+    bool CanStart() const { return m_active && !m_started; }
+    bool Start()
+    {
+        if (!CanStart())
+            return false;
+        m_started = true;
+        return true;
+    }
+
+    bool AddActor(uint32 round, ObjectGuid actor)
+    {
+        if (!IsCurrent(round) || !m_started || m_complete || !actor || !m_roster.insert(actor).second)
+            return false;
+        m_pending.insert(actor);
+        return true;
+    }
+
+    void RemoveActor(uint32 round, ObjectGuid actor)
+    {
+        if (IsCurrent(round))
+            m_pending.erase(actor);
+    }
+
+    bool RecordEscape(uint32 round, ObjectGuid actor)
+    {
+        if (!IsCurrent(round) || !m_started || m_complete || !m_pending.erase(actor))
+            return false;
+        if (++m_escaped >= 6)
+            m_complete = true;
+        return true;
+    }
+
+    void Retry(uint32 round)
+    {
+        if (IsCurrent(round) && m_pending.empty() && !m_escaped)
+        {
+            m_roster.clear();
+            m_started = false;
+        }
+    }
+
+    bool IsComplete(uint32 round, ObjectGuid owner) const
+    {
+        return IsCurrent(round) && m_owner == owner && m_complete;
+    }
+
+    void End(uint32 round, ObjectGuid owner)
+    {
+        if (IsCurrent(round) && m_owner == owner)
+            Reset();
+    }
+
+    void OwnerRemoved(ObjectGuid owner)
+    {
+        if (m_active && m_owner == owner)
+            Reset();
+    }
+
+    uint32 GetRound() const { return m_active ? m_generation : 0; }
+    uint32 GetState() const { return !m_active ? NOT_STARTED : m_complete ? DONE : IN_PROGRESS; }
+
+private:
+    bool IsCurrent(uint32 round) const { return m_active && round && round == m_generation; }
+    uint32 m_generation = 0;
+    ObjectGuid m_owner;
+    std::set<ObjectGuid> m_roster;
+    std::set<ObjectGuid> m_pending;
+    uint32 m_escaped = 0;
+    bool m_active = false;
+    bool m_started = false;
+    bool m_complete = false;
+};
+
+FeralasFreedomEvent* GetFeralasFreedomEvent(Map* map);
 
 enum SpawnIndexes
 {
