@@ -58,6 +58,12 @@ struct npc_ame01AI : public npc_escortAI
 
     void Reset() override {}
 
+    void JustRespawned() override
+    {
+        npc_escortAI::JustRespawned();
+        m_creature->SetStandState(UNIT_STAND_STATE_DEAD, true);
+    }
+
     void WaypointReached(uint32 uiPointId) override
     {
         switch (uiPointId)
@@ -165,14 +171,20 @@ struct npc_ringoAI : public FollowerAI
     uint32 m_uiEndEventProgress;
     uint32 m_uiEndEventTimer;
 
-    Unit* pSpraggle;
+    ObjectGuid m_spraggleGuid;
 
     void Reset() override
     {
         m_uiFaintTimer = urand(30000, 60000);
         m_uiEndEventProgress = 0;
         m_uiEndEventTimer = 1000;
-        pSpraggle = nullptr;
+        m_spraggleGuid.Clear();
+    }
+
+    void JustRespawned() override
+    {
+        FollowerAI::JustRespawned();
+        m_creature->SetStandState(UNIT_STAND_STATE_DEAD);
     }
 
     void MoveInLineOfSight(Unit* pWho) override
@@ -183,21 +195,20 @@ struct npc_ringoAI : public FollowerAI
         {
             if (m_creature->IsWithinDistInMap(pWho, INTERACTION_DISTANCE))
             {
-                if (Player* pPlayer = GetLeaderForFollower())
-                {
-                    if (pPlayer->GetQuestStatus(QUEST_A_LITTLE_HELP) == QUEST_STATUS_INCOMPLETE)
-                        pPlayer->RewardPlayerAndGroupAtEventExplored(QUEST_A_LITTLE_HELP, m_creature);
-                }
-
-                pSpraggle = pWho;
+                Player* pPlayer = GetLeaderForFollower();
+                m_spraggleGuid = pWho->GetObjectGuid();
                 SetFollowComplete(true);
+
+                if (pPlayer && pPlayer->GetQuestStatus(QUEST_A_LITTLE_HELP) == QUEST_STATUS_INCOMPLETE)
+                    pPlayer->RewardPlayerAndGroupAtEventExplored(QUEST_A_LITTLE_HELP, m_creature);
             }
         }
     }
 
     void SpellHit(Unit* /*pCaster*/, const SpellEntry* pSpell) override
     {
-        if (HasFollowState(STATE_FOLLOW_INPROGRESS | STATE_FOLLOW_PAUSED) && pSpell->Id == SPELL_REVIVE_RINGO)
+        if (pSpell->Id == SPELL_REVIVE_RINGO && HasFollowState(STATE_FOLLOW_INPROGRESS) &&
+            HasFollowState(STATE_FOLLOW_PAUSED) && !HasFollowState(STATE_FOLLOW_COMPLETE | STATE_FOLLOW_POSTEVENT))
             ClearFaint();
     }
 
@@ -246,7 +257,8 @@ struct npc_ringoAI : public FollowerAI
             {
                 if (m_uiEndEventTimer < uiDiff)
                 {
-                    if (!pSpraggle || !pSpraggle->IsAlive())
+                    Creature* pSpraggle = m_creature->GetMap()->GetCreature(m_spraggleGuid);
+                    if (!pSpraggle || !pSpraggle->IsAlive() || pSpraggle->GetEntry() != NPC_SPRAGGLE)
                     {
                         SetFollowComplete();
                         return;
@@ -593,7 +605,10 @@ struct npc_simone_seductressAI : public ScriptedAI
         if (m_uiDespawn_Timer < uiDiff)
         {
             if (m_creature->IsAlive() && !m_creature->IsInCombat())
+            {
                 DemonDespawn(false);
+                return;
+            }
         }
         else
             m_uiDespawn_Timer -= uiDiff;
@@ -618,6 +633,7 @@ struct npc_simone_seductressAI : public ScriptedAI
         if (m_creature->getThreatManager().getThreatList().size() > 1)
         {
             DemonDespawn();
+            return;
         }
         if (m_uiThreatCheck_Timer < uiDiff)
         {
@@ -625,7 +641,10 @@ struct npc_simone_seductressAI : public ScriptedAI
             if (Creature* pPrecious = m_creature->GetMap()->GetCreature(m_preciousGuid))
             {
                 if (pPrecious->getThreatManager().getThreatList().size() > 1)
+                {
                     DemonDespawn();
+                    return;
+                }
             }
         }
         else
@@ -671,6 +690,18 @@ struct npc_simone_the_inconspicuousAI : public ScriptedAI
 
     ObjectGuid m_playerGuid;
 
+    bool IsEventPlayerValid(Player const* pPlayer) const
+    {
+        return pPlayer && pPlayer->IsAlive() && pPlayer->IsInWorld() && pPlayer->GetMap() == m_creature->GetMap() &&
+            (pPlayer->IsGameMaster() || (pPlayer->getClass() == CLASS_HUNTER && pPlayer->GetQuestStatus(QUEST_STAVE_OF_THE_ANCIENTS) == QUEST_STATUS_INCOMPLETE));
+    }
+
+    bool CanBeginEvent(Player const* pPlayer) const
+    {
+        return !m_bTransform && m_creature->IsAlive() && m_creature->IsInWorld() && !m_creature->IsInCombat() &&
+            m_creature->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP) && IsEventPlayerValid(pPlayer);
+    }
+
     void Reset() override
     {
         m_creature->SetRespawnDelay(35 * MINUTE);
@@ -683,6 +714,7 @@ struct npc_simone_the_inconspicuousAI : public ScriptedAI
         m_uiTransform_Timer = 10000;
         m_uiTransformEmote_Timer = 5000;
         m_bTransform = false;
+        m_playerGuid.Clear();
 
         Creature* pPrecious = GetClosestCreatureWithEntry(m_creature, NPC_PRECIOUS, 100.0f);
         if (pPrecious)
@@ -694,59 +726,90 @@ struct npc_simone_the_inconspicuousAI : public ScriptedAI
         {
             pPrecious = m_creature->SummonCreature(NPC_PRECIOUS,
                 m_creature->GetPositionX(), m_creature->GetPositionY(), m_creature->GetPositionZ(), m_creature->GetOrientation(), TEMPSPAWN_DEAD_DESPAWN, 0);
-            pPrecious->GetMotionMaster()->MoveFollow(m_creature, PET_FOLLOW_DIST, PET_FOLLOW_ANGLE);
+            if (pPrecious)
+                pPrecious->GetMotionMaster()->MoveFollow(m_creature, PET_FOLLOW_DIST, PET_FOLLOW_ANGLE);
         }
+    }
+
+    void RestoreEvent()
+    {
+        Reset();
+        m_creature->GetMotionMaster()->Clear();
     }
 
     void Transform()
     {
-        if (m_creature->GetMap()->GetPlayer(m_playerGuid))
+        if (!IsEventPlayerValid(m_creature->GetMap()->GetPlayer(m_playerGuid)))
         {
-            Creature* pDemon = m_creature->SummonCreature(NPC_SIMONE_THE_SEDUCTRESS,
-                m_creature->GetPositionX(), m_creature->GetPositionY(), m_creature->GetPositionZ(), m_creature->GetOrientation(), TEMPSPAWN_DEAD_DESPAWN, 0);
-            Creature* pPrecious = GetClosestCreatureWithEntry(m_creature, NPC_PRECIOUS, 100.0f);
-
-            if (pDemon)
-            {
-                if (npc_simone_seductressAI * pSimone = dynamic_cast<npc_simone_seductressAI*> (pDemon->AI()))
-                    pSimone->m_simoneGuid = m_creature->GetObjectGuid();
-
-                m_creature->SetVisibility(VISIBILITY_OFF);
-                m_creature->ForcedDespawn();
-            }
-
-            if (pDemon && pPrecious)
-            {
-                Creature* pPreciousDevourer = m_creature->SummonCreature(NPC_PRECIOUS_THE_DEVOURER,
-                    pPrecious->GetPositionX(), pPrecious->GetPositionY(), pPrecious->GetPositionZ(), pPrecious->GetAngle(pPrecious), TEMPSPAWN_DEAD_DESPAWN, 0, true);
-
-                if (pPreciousDevourer)
-                {
-                    if (npc_simone_seductressAI * pSimone = dynamic_cast<npc_simone_seductressAI*> (pDemon->AI()))
-                        pSimone->m_preciousGuid = pPreciousDevourer->GetObjectGuid();
-
-                    if (npc_precious_the_devourerAI * pDevourer = dynamic_cast<npc_precious_the_devourerAI*> (pPreciousDevourer->AI()))
-                        pDevourer->m_simoneGuid = pDemon->GetObjectGuid();
-                }
-
-                pPrecious->SetVisibility(VISIBILITY_OFF);
-                pPrecious->ForcedDespawn();
-            }
+            RestoreEvent();
+            return;
         }
+
+        Creature* pPrecious = GetClosestCreatureWithEntry(m_creature, NPC_PRECIOUS, 100.0f);
+        if (!pPrecious)
+        {
+            RestoreEvent();
+            return;
+        }
+
+        Creature* pDemon = m_creature->SummonCreature(NPC_SIMONE_THE_SEDUCTRESS,
+            m_creature->GetPositionX(), m_creature->GetPositionY(), m_creature->GetPositionZ(), m_creature->GetOrientation(), TEMPSPAWN_DEAD_DESPAWN, 0);
+        npc_simone_seductressAI* pSimone = pDemon ? dynamic_cast<npc_simone_seductressAI*>(pDemon->AI()) : nullptr;
+        if (!pSimone)
+        {
+            if (pDemon)
+                pDemon->ForcedDespawn();
+            RestoreEvent();
+            return;
+        }
+
+        Creature* pPreciousDevourer = m_creature->SummonCreature(NPC_PRECIOUS_THE_DEVOURER,
+            pPrecious->GetPositionX(), pPrecious->GetPositionY(), pPrecious->GetPositionZ(), pPrecious->GetAngle(pPrecious), TEMPSPAWN_DEAD_DESPAWN, 0, true);
+        npc_precious_the_devourerAI* pDevourer = pPreciousDevourer ? dynamic_cast<npc_precious_the_devourerAI*>(pPreciousDevourer->AI()) : nullptr;
+        if (!pDevourer)
+        {
+            if (pPreciousDevourer)
+                pPreciousDevourer->ForcedDespawn();
+            pDemon->ForcedDespawn();
+            RestoreEvent();
+            return;
+        }
+
+        pSimone->m_simoneGuid = m_creature->GetObjectGuid();
+        pSimone->m_preciousGuid = pPreciousDevourer->GetObjectGuid();
+        pDevourer->m_simoneGuid = pDemon->GetObjectGuid();
+        m_bTransform = false;
+
+        m_creature->SetVisibility(VISIBILITY_OFF);
+        m_creature->ForcedDespawn();
+        pPrecious->SetVisibility(VISIBILITY_OFF);
+        pPrecious->ForcedDespawn();
     }
 
-    void BeginEvent(ObjectGuid playerGuid)
+    bool BeginEvent(Player* pPlayer)
     {
-        m_playerGuid = playerGuid;
+        if (!CanBeginEvent(pPlayer))
+            return false;
+
+        m_playerGuid = pPlayer->GetObjectGuid();
+        m_uiTransform_Timer = 10000;
+        m_uiTransformEmote_Timer = 5000;
         m_creature->GetMotionMaster()->MoveIdle();
         m_creature->SetUInt32Value(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_NONE);
         m_bTransform = true;
+        return true;
     }
 
     void UpdateAI(const uint32 uiDiff) override
     {
         if (m_bTransform)
         {
+            if (!IsEventPlayerValid(m_creature->GetMap()->GetPlayer(m_playerGuid)))
+            {
+                RestoreEvent();
+                return;
+            }
+
             if (m_uiTransformEmote_Timer)
             {
                 if (m_uiTransformEmote_Timer <= uiDiff)
@@ -760,8 +823,8 @@ struct npc_simone_the_inconspicuousAI : public ScriptedAI
 
             if (m_uiTransform_Timer < uiDiff)
             {
-                m_bTransform = false;
                 Transform();
+                return;
             }
             else
                 m_uiTransform_Timer -= uiDiff;
@@ -785,18 +848,27 @@ struct npc_simone_the_inconspicuousAI : public ScriptedAI
 bool GossipHello_npc_simone_the_inconspicuous(Player* player, Creature* creature)
 {
     player->PrepareGossipMenu(creature, creature->GetDefaultGossipMenuId());
-    if (player->GetQuestStatus(QUEST_STAVE_OF_THE_ANCIENTS) == QUEST_STATUS_INCOMPLETE || player->IsGameMaster())
-        player->ADD_GOSSIP_ITEM_ID_BCT(0, 9755, Gender(creature->getGender()), GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF);
+    if (npc_simone_the_inconspicuousAI* pSimone = dynamic_cast<npc_simone_the_inconspicuousAI*>(creature->AI()))
+    {
+        if (pSimone->CanBeginEvent(player))
+            player->ADD_GOSSIP_ITEM_ID_BCT(0, 9755, Gender(creature->getGender()), GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF);
+    }
 
     player->SendPreparedGossip(creature);
     return true;
 }
 
-bool GossipSelect_npc_simone_the_inconspicuous(Player* pPlayer, Creature* pCreature, uint32 /*uiSender*/, uint32 /*uiAction*/)
+bool GossipSelect_npc_simone_the_inconspicuous(Player* pPlayer, Creature* pCreature, uint32 uiSender, uint32 uiAction)
 {
     pPlayer->CLOSE_GOSSIP_MENU();
-    ((npc_simone_the_inconspicuousAI*)pCreature->AI())->BeginEvent(pPlayer->GetObjectGuid());
-    pCreature->HandleEmote(EMOTE_ONESHOT_LAUGH);
+    if (uiSender != GOSSIP_SENDER_MAIN || uiAction != GOSSIP_ACTION_INFO_DEF)
+        return true;
+
+    if (npc_simone_the_inconspicuousAI* pSimone = dynamic_cast<npc_simone_the_inconspicuousAI*>(pCreature->AI()))
+    {
+        if (pSimone->BeginEvent(pPlayer))
+            pCreature->HandleEmote(EMOTE_ONESHOT_LAUGH);
+    }
     return true;
 }
 
