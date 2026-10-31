@@ -216,6 +216,7 @@ struct AhnQirajData
         memset(m_WarEffortCounters, 0, sizeof(m_WarEffortCounters));
     }
     std::string GetData();
+    bool LoadData(std::string const& data, TimePoint now);
     uint32 GetDaysRemaining() const;
 };
 
@@ -441,6 +442,11 @@ class WorldState
         uint8 m_emeraldDragonsState;
         uint32 m_emeraldDragonsTimer;
         std::vector<uint32> m_emeraldDragonsChosenPositions;
+        // These helpers require m_aqData.m_warEffortMutex to be held by the caller.
+        void HandleWarEffortPhaseTransitionLocked(uint32 newPhase);
+        void ChangeWarEffortPhase2TierLocked(uint32 remainingDays, bool save = true);
+        void BroadcastWarEffortDaysRemaining();
+
         AhnQirajData m_aqData;
         std::map<uint32, AQResources> m_aqWorldstateMapReverse;
 

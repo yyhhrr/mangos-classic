@@ -77,6 +77,14 @@ struct npc_solenorAI : public ScriptedAI
     uint32 m_uiCastSoulFlame_Timer;
     uint32 m_uiDespawn_Timer;
 
+    bool CanBeginEvent(Player const* pPlayer) const
+    {
+        return pPlayer && pPlayer->IsAlive() && pPlayer->IsInWorld() && pPlayer->GetMap() == m_creature->GetMap() &&
+            pPlayer->getClass() == CLASS_HUNTER && pPlayer->GetQuestStatus(QUEST_STAVE_OF_THE_ANCIENTS) == QUEST_STATUS_INCOMPLETE &&
+            m_creature->GetEntry() == NPC_NELSON_THE_NICE && m_creature->IsAlive() && m_creature->IsInWorld() &&
+            !m_creature->IsInCombat() && !m_bTransform && m_creature->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
+    }
+
     void Reset() override
     {
         switch (m_creature->GetEntry())
@@ -121,13 +129,19 @@ struct npc_solenorAI : public ScriptedAI
         Reset();
     }
 
-    void BeginEvent(ObjectGuid playerGuid)
+    bool BeginEvent(Player* pPlayer)
     {
-        m_hunterGuid = playerGuid;
+        if (!CanBeginEvent(pPlayer))
+            return false;
+
+        m_hunterGuid = pPlayer->GetObjectGuid();
+        m_uiTransform_Timer = 10000;
+        m_uiTransformEmote_Timer = 5000;
         m_creature->GetMotionMaster()->Clear(false);
         m_creature->GetMotionMaster()->MoveIdle();
         m_creature->SetUInt32Value(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_NONE);
         m_bTransform = true;
+        return true;
     }
 
     /** Solenor the Slayer */
@@ -231,7 +245,10 @@ struct npc_solenorAI : public ScriptedAI
             if (m_uiDespawn_Timer <= uiDiff)
             {
                 if (m_creature->IsAlive() && !m_creature->IsInCombat())
+                {
                     DemonDespawn(false);
+                    return;
+                }
             }
             else
                 m_uiDespawn_Timer -= uiDiff;
@@ -256,7 +273,10 @@ struct npc_solenorAI : public ScriptedAI
             m_creature->RemoveAurasDueToSpell(SPELL_SOUL_FLAME);
 
         if (m_creature->getThreatManager().getThreatList().size() > 1 /*|| pHunter->IsDead()*/)
+        {
             DemonDespawn();
+            return;
+        }
 
         if (m_uiCreepingDoom_Timer < uiDiff)
         {
@@ -286,17 +306,24 @@ struct npc_solenorAI : public ScriptedAI
 
 bool GossipHello_npc_solenor(Player* pPlayer, Creature* pCreature)
 {
-    if (pPlayer->GetQuestStatus(QUEST_STAVE_OF_THE_ANCIENTS) == QUEST_STATUS_INCOMPLETE)
-        pPlayer->ADD_GOSSIP_ITEM(0, GOSSIP_ITEM, GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF);
+    if (npc_solenorAI* pSolenor = dynamic_cast<npc_solenorAI*>(pCreature->AI()))
+    {
+        if (pSolenor->CanBeginEvent(pPlayer))
+            pPlayer->ADD_GOSSIP_ITEM(0, GOSSIP_ITEM, GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF);
+    }
 
     pPlayer->SEND_GOSSIP_MENU(pPlayer->GetGossipTextId(pCreature), pCreature->GetObjectGuid());
     return true;
 }
 
-bool GossipSelect_npc_solenor(Player* pPlayer, Creature* pCreature, uint32 /*uiSender*/, uint32 /*uiAction*/)
+bool GossipSelect_npc_solenor(Player* pPlayer, Creature* pCreature, uint32 uiSender, uint32 uiAction)
 {
     pPlayer->CLOSE_GOSSIP_MENU();
-    ((npc_solenorAI*)pCreature->AI())->BeginEvent(pPlayer->GetObjectGuid());
+    if (uiSender != GOSSIP_SENDER_MAIN || uiAction != GOSSIP_ACTION_INFO_DEF)
+        return true;
+
+    if (npc_solenorAI* pSolenor = dynamic_cast<npc_solenorAI*>(pCreature->AI()))
+        pSolenor->BeginEvent(pPlayer);
     return true;
 }
 

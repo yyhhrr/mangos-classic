@@ -142,27 +142,12 @@ void WorldState::Load()
                 }
                 case SAVE_ID_AHN_QIRAJ:
                 {
-                    if (data.size())
+                    if (!data.empty())
                     {
-                        auto curTime = World::GetCurrentClockTime();
-                        uint64 time;
-                        try
-                        {
-                            loadStream >> m_aqData.m_phase >> time;
-                            if (time)
-                            {
-                                TimePoint timePoint = std::chrono::time_point_cast<std::chrono::milliseconds>(Clock::from_time_t(time));
-                                m_aqData.m_timer = std::chrono::duration_cast<std::chrono::milliseconds>(timePoint - curTime).count();
-                            }
-                            for (uint32 i = 0; i < RESOURCE_MAX; ++i)
-                                loadStream >> m_aqData.m_WarEffortCounters[i];
-                            loadStream >> m_aqData.m_phase2Tier >> m_aqData.m_killedBosses;
-                        }
-                        catch (std::exception& e)
-                        {
-                            sLog.outError("%s", e.what());
-                            memset(m_loveIsInTheAirData.counters, 0, sizeof(LoveIsInTheAir));
-                        }
+                        if (m_aqData.LoadData(data, World::GetCurrentClockTime()))
+                            Save(SAVE_ID_AHN_QIRAJ);
+                        else
+                            sLog.outError("Invalid saved Ahn'Qiraj war effort state; keeping the current state.");
                     }
                     break;
                 }
@@ -501,20 +486,25 @@ void WorldState::Update(const uint32 diff)
         else m_emeraldDragonsTimer -= diff;
     }
 
-    if (m_aqData.m_timer)
     {
-        if (m_aqData.m_timer <= diff)
+        std::lock_guard<std::mutex> aqGuard(m_aqData.m_warEffortMutex);
+        if (m_aqData.m_timer)
         {
-            m_aqData.m_timer = 0;
-            HandleWarEffortPhaseTransition(m_aqData.m_phase + 1);
-        }
-        else m_aqData.m_timer -= diff;
-
-        if (m_aqData.m_phase == PHASE_2_TRANSPORTING_RESOURCES)
-        {
-            uint32 remainingDays = m_aqData.m_timer % (DAY * IN_MILLISECONDS);
-            if (remainingDays < m_aqData.m_phase2Tier)
-                ChangeWarEffortPhase2Tier(remainingDays);
+            if (m_aqData.m_timer <= diff)
+            {
+                m_aqData.m_timer = 0;
+                HandleWarEffortPhaseTransitionLocked(m_aqData.m_phase + 1);
+            }
+            else
+            {
+                m_aqData.m_timer -= diff;
+                if (m_aqData.m_phase == PHASE_2_TRANSPORTING_RESOURCES)
+                {
+                    uint32 remainingDays = m_aqData.GetDaysRemaining();
+                    if (remainingDays != m_aqData.m_phase2Tier)
+                        ChangeWarEffortPhase2TierLocked(remainingDays);
+                }
+            }
         }
     }
 
@@ -658,32 +648,38 @@ void WorldState::AddWarEffortProgress(AQResources resource, uint32 count)
             }
         }
         if (success)
-            HandleWarEffortPhaseTransition(PHASE_2_TRANSPORTING_RESOURCES);
+            HandleWarEffortPhaseTransitionLocked(PHASE_2_TRANSPORTING_RESOURCES);
     }
 }
 
 void WorldState::HandleWarEffortPhaseTransition(uint32 newPhase)
 {
+    std::lock_guard<std::mutex> guard(m_aqData.m_warEffortMutex);
+    HandleWarEffortPhaseTransitionLocked(newPhase);
+}
+
+void WorldState::HandleWarEffortPhaseTransitionLocked(uint32 newPhase)
+{
+    uint32 oldPhase = m_aqData.m_phase;
     StopWarEffortEvent();
     m_aqData.m_phase = newPhase;
+    m_aqData.m_timer = 0;
     switch (m_aqData.m_phase)
     {
         case PHASE_2_TRANSPORTING_RESOURCES:
-            m_aqData.m_phase = PHASE_2_TRANSPORTING_RESOURCES;
             m_aqData.m_timer = 5 * DAY * IN_MILLISECONDS;
-            {
-                std::lock_guard<std::mutex> guard(m_aqData.m_warEffortMutex);
-                for (ObjectGuid& guid : m_aqData.m_warEffortWorldstatesPlayers)
-                    if (Player* player = sObjectMgr.GetPlayer(guid))
-                        player->SendUpdateWorldState(WORLD_STATE_AQ_DAYS_LEFT, m_aqData.GetDaysRemaining());
-            }
+            m_aqData.m_phase2Tier = m_aqData.GetDaysRemaining();
+            SpawnWarEffortGos();
+            BroadcastWarEffortDaysRemaining();
             break;
         case PHASE_4_10_HOUR_WAR:
-            m_aqData.m_phase = PHASE_4_10_HOUR_WAR;
             m_aqData.m_timer = 10 * HOUR * IN_MILLISECONDS;
             break;
         default: break;
     }
+    if (oldPhase == PHASE_2_TRANSPORTING_RESOURCES && newPhase != PHASE_2_TRANSPORTING_RESOURCES)
+        ChangeWarEffortPhase2TierLocked(0, false);
+
     StartWarEffortEvent();
     Save(SAVE_ID_AHN_QIRAJ);
 }
@@ -854,7 +850,7 @@ void WorldState::ChangeWarEffortGoSpawns(AQResources resource, int32 forcedTier)
         tier = AQResourceTier(uint32(forcedTier));
     std::vector<uint32> spawnsForSchedule;
     for (auto& spawn : warEffortSpawns)
-        if (resourceInfo.first == spawn.resourceGroup && tier >= spawn.resourceTier)
+        if (resourceInfo.first == spawn.resourceGroup && resourceInfo.second == spawn.team && tier >= spawn.resourceTier)
             if (m_aqData.m_spawnedDbGuids.find(spawn.dbGuid) == m_aqData.m_spawnedDbGuids.end())
                 spawnsForSchedule.push_back(spawn.dbGuid);
     for (uint32 dbGuid : spawnsForSchedule)
@@ -871,6 +867,12 @@ void WorldState::ChangeWarEffortGoSpawns(AQResources resource, int32 forcedTier)
 
 void WorldState::ChangeWarEffortPhase2Tier(uint32 remainingDays)
 {
+    std::lock_guard<std::mutex> guard(m_aqData.m_warEffortMutex);
+    ChangeWarEffortPhase2TierLocked(remainingDays);
+}
+
+void WorldState::ChangeWarEffortPhase2TierLocked(uint32 remainingDays, bool save)
+{
     m_aqData.m_phase2Tier = remainingDays;
     std::set<std::pair<uint32, Team>> guidsForDespawn;
     for (uint32 dbGuid : m_aqData.m_spawnedDbGuids)
@@ -879,7 +881,17 @@ void WorldState::ChangeWarEffortPhase2Tier(uint32 remainingDays)
                 guidsForDespawn.insert({ dbGuid, spawn.team});
 
     DespawnWarEffortGuids(guidsForDespawn);
-    Save(SAVE_ID_AHN_QIRAJ);
+    BroadcastWarEffortDaysRemaining();
+    if (save)
+        Save(SAVE_ID_AHN_QIRAJ);
+}
+
+void WorldState::BroadcastWarEffortDaysRemaining()
+{
+    for (ObjectGuid const& guid : m_aqData.m_warEffortWorldstatesPlayers)
+        if (Player* player = sObjectMgr.GetPlayer(guid))
+            player->SendUpdateWorldState(WORLD_STATE_AQ_DAYS_LEFT,
+                m_aqData.m_phase == PHASE_2_TRANSPORTING_RESOURCES ? m_aqData.GetDaysRemaining() : 0);
 }
 
 void WorldState::DespawnWarEffortGuids(std::set<std::pair<uint32, Team>>& guids)
@@ -997,18 +1009,71 @@ std::string WorldState::GetAQPrintout()
 
 std::string AhnQirajData::GetData()
 {
-    auto curTime = World::GetCurrentClockTime();
-    auto respawnTime = std::chrono::milliseconds(m_timer) + curTime;
-    std::string output = std::to_string(m_phase) + " " + std::to_string(uint64(Clock::to_time_t(respawnTime)));
+    uint64 deadline = 0;
+    if (m_timer)
+    {
+        auto respawnTime = std::chrono::milliseconds(m_timer) + World::GetCurrentClockTime();
+        deadline = uint64(Clock::to_time_t(respawnTime));
+    }
+    std::string output = std::to_string(m_phase) + " " + std::to_string(deadline);
     for (uint32 value : m_WarEffortCounters)
         output += " " + std::to_string(value);
     output += " " + std::to_string(m_phase2Tier) + " " + std::to_string(m_killedBosses);
     return output;
 }
 
+bool AhnQirajData::LoadData(std::string const& data, TimePoint now)
+{
+    std::istringstream stream(data);
+    uint32 phase, tier, killedBosses;
+    uint64 deadline;
+    uint32 counters[RESOURCE_MAX];
+    if (!(stream >> phase >> deadline) || phase > PHASE_5_DONE)
+        return false;
+    for (uint32& value : counters)
+        if (!(stream >> value))
+            return false;
+    if (!(stream >> tier >> killedBosses))
+        return false;
+
+    uint64 remaining = 0;
+    if (deadline && (phase == PHASE_2_TRANSPORTING_RESOURCES || phase == PHASE_4_10_HOUR_WAR))
+    {
+        TimePoint end = std::chrono::time_point_cast<std::chrono::milliseconds>(Clock::from_time_t(deadline));
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - now).count();
+        if (duration > 0)
+            remaining = uint64(duration);
+    }
+
+    m_phase = phase;
+    m_timer = remaining;
+    std::copy(counters, counters + RESOURCE_MAX, m_WarEffortCounters);
+    m_phase2Tier = tier;
+    m_killedBosses = killedBosses;
+    if (m_phase == PHASE_2_TRANSPORTING_RESOURCES)
+    {
+        m_timer = std::min<uint64>(m_timer, 5 * DAY * IN_MILLISECONDS);
+        m_phase2Tier = GetDaysRemaining();
+        if (!m_timer)
+            m_phase = PHASE_3_GONG_TIME;
+    }
+    else if (m_phase >= PHASE_3_GONG_TIME)
+    {
+        m_phase2Tier = 0;
+        if (m_phase == PHASE_4_10_HOUR_WAR)
+        {
+            m_timer = std::min<uint64>(m_timer, 10 * HOUR * IN_MILLISECONDS);
+            if (!m_timer)
+                m_phase = PHASE_5_DONE;
+        }
+    }
+    return true;
+}
+
 uint32 AhnQirajData::GetDaysRemaining() const
 {
-    return uint32(m_timer / (DAY * IN_MILLISECONDS)) + 1;
+    uint64 day = DAY * IN_MILLISECONDS;
+    return uint32(m_timer / day + (m_timer % day != 0));
 }
 
 // Scourge invasion section
