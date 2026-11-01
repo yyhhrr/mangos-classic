@@ -174,58 +174,190 @@ static Position defendersLocations [] =
 
 struct npc_keeper_remulosAI : public npc_escortAI, private DialogueHelper
 {
-    npc_keeper_remulosAI(Creature* creature) : npc_escortAI(creature), DialogueHelper(aIntroDialogue)
-    {
-        Reset();
-    }
+    npc_keeper_remulosAI(Creature* creature) : npc_escortAI(creature), DialogueHelper(aIntroDialogue) { Reset(); }
 
-    uint32 m_healTimer;
-    uint32 m_starfireTimer;
-    uint32 m_shadesummonTimer;
-    uint32 m_outroTimer;
-
+    uint32 m_healTimer = 0;
+    uint32 m_starfireTimer = 0;
+    uint32 m_shadesummonTimer = 0;
+    uint32 m_outroTimer = 0;
+    uint32 m_finishTimer = 0;
+    uint32 m_riftRetryTimer = 0;
+    uint32 m_round = 0;
     ObjectGuid m_eranikusGuid;
     GuidList m_defendersList;
+    GuidList m_shadowsList;
+    uint8 m_outroPhase = 0;
+    uint8 m_summonCount = 0;
+    uint8 m_riftAttempts = 0;
+    bool m_isFirstWave = true;
+    bool m_eventActive = false;
+    bool m_finishing = false;
+    bool m_riftAwaiting = false;
+    bool m_abortPending = false;
 
-    uint8 m_outroPhase;
-    uint8 m_summonCount;
+    bool IsOwned(Creature* actor, uint32 entry) const
+    {
+        return actor && actor->GetEntry() == entry && actor->GetSpawnerGuid() == m_creature->GetObjectGuid();
+    }
 
-    bool m_isFirstWave;
+    bool IsCurrentBoss(Creature* actor) const
+    {
+        return m_eventActive && actor && actor->GetObjectGuid() == m_eranikusGuid &&
+            actor->GetSpawnerGuid() == m_creature->GetObjectGuid() &&
+            (actor->GetEntry() == NPC_ERANIKUS_TYRANT || actor->GetEntry() == 15628);
+    }
+
+    Creature* GetEranikus() const
+    {
+        Creature* actor = m_creature->GetMap()->GetCreature(m_eranikusGuid);
+        return IsCurrentBoss(actor) && actor->IsAlive() ? actor : nullptr;
+    }
+
+    void DespawnList(GuidList& actors, uint32 entry)
+    {
+        GuidList owned;
+        owned.swap(actors); // UnSummon may immediately call back into this AI.
+        for (ObjectGuid guid : owned)
+            if (Creature* actor = m_creature->GetMap()->GetCreature(guid))
+                if (IsOwned(actor, entry))
+                    actor->ForcedDespawn();
+    }
+
+    void DoDespawnSummoned()
+    {
+        GuidList defenders, shadows;
+        defenders.swap(m_defendersList);
+        shadows.swap(m_shadowsList);
+        DespawnList(defenders, NPC_NIGHTHAVEN_DEFENDER);
+        DespawnList(shadows, NPC_NIGHTMARE_PHANTASM);
+    }
+
+    void CleanupEvent()
+    {
+        if (m_eventActive || m_riftAttempts)
+            m_creature->InterruptNonMeleeSpells(false, SPELL_CONJURE_RIFT);
+        m_eventActive = false;
+        m_finishing = false;
+        m_riftAwaiting = false;
+        m_abortPending = false;
+        ++m_round;
+        DisableDialogue();
+        m_shadesummonTimer = m_outroTimer = m_finishTimer = m_riftRetryTimer = 0;
+        m_outroPhase = m_summonCount = m_riftAttempts = 0;
+        m_isFirstWave = true;
+        ObjectGuid bossGuid = m_eranikusGuid;
+        m_eranikusGuid.Clear();
+        m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PVP);
+        DoDespawnSummoned();
+        if (Creature* boss = m_creature->GetMap()->GetCreature(bossGuid))
+            if (boss->GetSpawnerGuid() == m_creature->GetObjectGuid() &&
+                (boss->GetEntry() == NPC_ERANIKUS_TYRANT || boss->GetEntry() == 15628))
+                boss->ForcedDespawn();
+    }
 
     void Reset() override
     {
+        // An ordinary combat evade must not discard a live escort or its dialogue.
         if (!HasEscortState(STATE_ESCORT_ESCORTING))
         {
-            m_outroTimer          = 0;
-            m_outroPhase          = 0;
-            m_summonCount         = 0;
-
-            m_eranikusGuid.Clear();
-
-            m_shadesummonTimer    = 0;
-            m_healTimer           = 10 * IN_MILLISECONDS;
-            m_starfireTimer       = 25 * IN_MILLISECONDS;
-
-            m_isFirstWave          = true;
+            CleanupEvent();
+            m_healTimer = 10 * IN_MILLISECONDS;
+            m_starfireTimer = 25 * IN_MILLISECONDS;
         }
+    }
+
+    void JustStartedEscort() override
+    {
+        CleanupEvent();
+        m_eventActive = true;
+    }
+
+    void AbortEvent()
+    {
+        if (!m_eventActive || m_finishing)
+            return;
+        // Close the round before quest/actor callbacks can re-enter it.
+        m_eventActive = false;
+        const uint32 round = m_round;
+        FailQuestForPlayerAndGroup();
+        if (round != m_round) return;
+        CleanupEvent();
+        if (m_round != round + 1) return;
+        m_creature->ForcedDespawn();
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        const uint32 round = m_round;
+        m_eventActive = false;
+        DisableDialogue();
+        npc_escortAI::JustDied(killer);
+        if (round == m_round) CleanupEvent();
+    }
+
+    void CorpseRemoved(uint32& respawnDelay) override
+    {
+        npc_escortAI::CorpseRemoved(respawnDelay);
+        CleanupEvent();
+    }
+
+    void JustRespawned() override
+    {
+        // Also handles a direct same-AI respawn, without requiring a preceding corpse.
+        uint32 respawnDelay = 0;
+        npc_escortAI::CorpseRemoved(respawnDelay);
+        const uint32 round = m_round;
+        CleanupEvent();
+        if (m_round != round + 1) return;
+        npc_escortAI::JustRespawned();
     }
 
     void JustSummoned(Creature* summoned) override
     {
+        if (summoned->GetSpawnerGuid() != m_creature->GetObjectGuid())
+            return;
+        if (!m_eventActive || m_finishing)
+        {
+            if (summoned->GetEntry() == NPC_ERANIKUS_TYRANT || summoned->GetEntry() == NPC_NIGHTMARE_PHANTASM || summoned->GetEntry() == NPC_NIGHTHAVEN_DEFENDER)
+                summoned->ForcedDespawn();
+            return;
+        }
         switch (summoned->GetEntry())
         {
             case NPC_ERANIKUS_TYRANT:
+                if (summoned->GetObjectGuid() == m_eranikusGuid)
+                    return;
+                if (GetEranikus())
+                {
+                    summoned->ForcedDespawn();
+                    return;
+                }
+                if (!m_riftAwaiting)
+                {
+                    summoned->ForcedDespawn();
+                    return;
+                }
+                m_riftAwaiting = false;
                 m_eranikusGuid = summoned->GetObjectGuid();
-                // Make Eranikus unattackable until the right moment during the event
                 summoned->SetImmuneToNPC(true);
                 summoned->SetImmuneToPlayer(true);
                 break;
             case NPC_NIGHTMARE_PHANTASM:
-                // ToDo: set faction to DB
+                if (std::find(m_shadowsList.begin(), m_shadowsList.end(), summoned->GetObjectGuid()) != m_shadowsList.end())
+                    return;
+                m_shadowsList.push_back(summoned->GetObjectGuid());
                 summoned->setFaction(14);
                 summoned->AI()->AttackStart(m_creature);
                 break;
-                case NPC_NIGHTHAVEN_DEFENDER:
+            case NPC_NIGHTHAVEN_DEFENDER:
+                if (std::find(m_defendersList.begin(), m_defendersList.end(), summoned->GetObjectGuid()) != m_defendersList.end())
+                    return;
+                PruneDefenders();
+                if (m_defendersList.size() >= MAX_DEFENDERS)
+                {
+                    summoned->ForcedDespawn();
+                    return;
+                }
                 m_defendersList.push_back(summoned->GetObjectGuid());
                 summoned->SetWalk(false);
                 summoned->GetMotionMaster()->MoveWaypoint(0);
@@ -235,90 +367,97 @@ struct npc_keeper_remulosAI : public npc_escortAI, private DialogueHelper
 
     void SummonedCreatureJustDied(Creature* summoned) override
     {
-        if (summoned->GetEntry() == NPC_NIGHTHAVEN_DEFENDER)
+        if (IsOwned(summoned, NPC_NIGHTHAVEN_DEFENDER))
             m_defendersList.remove(summoned->GetObjectGuid());
+        else if (IsOwned(summoned, NPC_NIGHTMARE_PHANTASM))
+            m_shadowsList.remove(summoned->GetObjectGuid());
     }
 
-    void DoDespawnSummoned()
+    void SummonedCreatureDespawn(Creature* summoned) override
     {
-        for (auto defenderGuid : m_defendersList)
-        {
-            if (Creature* defender = m_creature->GetMap()->GetCreature(defenderGuid))
-                defender->ForcedDespawn();
-        }
+        SummonedCreatureJustDied(summoned);
+        if (IsCurrentBoss(summoned) && !m_finishing)
+            AbortEvent();
     }
 
     void SummonedJustReachedHome(Creature* summoned) override
     {
-        if (summoned->GetEntry() == NPC_NIGHTHAVEN_DEFENDER)
+        if (m_eventActive && !m_finishing && IsOwned(summoned, NPC_NIGHTHAVEN_DEFENDER) &&
+            std::find(m_defendersList.begin(), m_defendersList.end(), summoned->GetObjectGuid()) != m_defendersList.end())
             summoned->GetMotionMaster()->MoveWaypoint(0);
     }
 
     void SummonedMovementInform(Creature* summoned, uint32 type, uint32 pointId) override
     {
-        if (type != POINT_MOTION_TYPE || summoned->GetEntry() != NPC_ERANIKUS_TYRANT)
-            return;
-
-        if (pointId == POINT_ID_ERANIKUS_FLIGHT)
-            // Set Eranikus to face Remulos
+        if (type == POINT_MOTION_TYPE && pointId == POINT_ID_ERANIKUS_FLIGHT && IsCurrentBoss(summoned) && !m_finishing)
             summoned->SetFacingToObject(m_creature);
-    }
-
-    void JustDied(Unit* killer) override
-    {
-        // Make Eranikus evade in order to despawn all the summons
-        if (Creature* eranikus = m_creature->GetMap()->GetCreature(m_eranikusGuid))
-            eranikus->AI()->EnterEvadeMode();
-
-        // Remulos is only targetable for friendly player spells during Eranikus event so reset on death
-        m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PVP);
-
-        npc_escortAI::JustDied(killer);
     }
 
     void WaypointReached(uint32 pointId) override
     {
+        if (!m_eventActive || m_finishing)
+            return;
         switch (pointId)
         {
             case 1:
                 if (Player* player = GetPlayerForEscort())
                 {
                     DoScriptText(SAY_REMULOS_INTRO_1, m_creature, player);
-                    // Remulos is only targetable for friendly player spells during Eranikus event
                     m_creature->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PVP);
                 }
                 break;
-            case 2:
-                DoScriptText(SAY_REMULOS_INTRO_2, m_creature);
-                break;
+            case 2: DoScriptText(SAY_REMULOS_INTRO_2, m_creature); break;
             case 14:
                 StartNextDialogueText(NPC_REMULOS);
                 SetEscortPaused(true);
                 break;
             case 18:
+                if (!GetEranikus()) { AbortEvent(); return; }
                 StartNextDialogueText(SAY_REMULOS_DEFEND_2);
                 SetEscortPaused(true);
                 break;
-            case 19:
-                SetEscortPaused(true);
-                break;
+            case 19: SetEscortPaused(true); break;
         }
     }
 
     Creature* GetSpeakerByEntry(uint32 entry) override
     {
+        if (!m_eventActive || m_finishing)
+            return nullptr;
         switch (entry)
         {
-            case NPC_REMULOS:         return m_creature;
-            case NPC_ERANIKUS_TYRANT: return m_creature->GetMap()->GetCreature(m_eranikusGuid);
+            case NPC_REMULOS: return m_creature;
+            case NPC_ERANIKUS_TYRANT: return GetEranikus();
+            default: return nullptr;
+        }
+    }
 
-            default:
-                return nullptr;
+    void PruneDefenders()
+    {
+        m_defendersList.remove_if([this](ObjectGuid guid)
+        {
+            Creature* defender = m_creature->GetMap()->GetCreature(guid);
+            return !IsOwned(defender, NPC_NIGHTHAVEN_DEFENDER) || !defender->IsAlive();
+        });
+    }
+
+    void RetryRift()
+    {
+        if (m_riftAttempts < 3)
+            m_riftRetryTimer = 5 * IN_MILLISECONDS;
+        else
+        {
+            // DialogueHelper advances its cursor after this callback returns.
+            // Defer quest callbacks until that helper frame has fully unwound.
+            m_abortPending = true;
+            DisableDialogue();
         }
     }
 
     void JustDidDialogueStep(int32 entry) override
     {
+        if (!m_eventActive || m_finishing)
+            return;
         switch (entry)
         {
             case NPC_REMULOS:
@@ -326,26 +465,40 @@ struct npc_keeper_remulosAI : public npc_escortAI, private DialogueHelper
                     DoScriptText(SAY_REMULOS_INTRO_3, m_creature, player);
                 break;
             case SPELL_CONJURE_RIFT:
-                DoCastSpellIfCan(m_creature, SPELL_CONJURE_RIFT);
+                if (GetEranikus()) break;
+                ++m_riftAttempts;
+                // Cast preparation is not the summon: this spell has a ten-second
+                // cast. Preserve the original thirteen-second dialogue wait.
+                m_riftAwaiting = true;
+                if (DoCastSpellIfCan(m_creature, SPELL_CONJURE_RIFT) != CAST_OK)
+                {
+                    m_riftAwaiting = false;
+                    RetryRift();
+                }
                 break;
             case SAY_ERANIKUS_SPAWN:
-                // This big yellow emote was removed at some point in WotLK
-                if (Creature* eranikus = m_creature->GetMap()->GetCreature(m_eranikusGuid))
+                if (Creature* eranikus = GetEranikus())
                     DoScriptText(EMOTE_SUMMON_ERANIKUS, eranikus);
+                else
+                    RetryRift();
                 break;
             case NPC_ERANIKUS_TYRANT:
-                if (Player* player = GetPlayerForEscort())
-                    DoScriptText(SAY_REMULOS_DEFEND_1, m_creature, player);
-                if (Creature* eranikus = m_creature->GetMap()->GetCreature(m_eranikusGuid))
+                if (Creature* eranikus = GetEranikus())
                 {
+                    if (Player* player = GetPlayerForEscort())
+                        DoScriptText(SAY_REMULOS_DEFEND_1, m_creature, player);
                     eranikus->RemoveAurasDueToSpell(SPELL_DRAGON_HOVER);
                     eranikus->GetMotionMaster()->MovePoint(POINT_ID_ERANIKUS_FLIGHT, eranikusLocations[1].x, eranikusLocations[1].y, eranikusLocations[1].z, FORCED_MOVEMENT_FLIGHT);
+                    SetEscortPaused(false);
                 }
-                SetEscortPaused(false);
+                else
+                {
+                    m_abortPending = true;
+                    DisableDialogue();
+                }
                 break;
             case SAY_REMULOS_DEFEND_2:
-                if (Creature* eranikus = m_creature->GetMap()->GetCreature(m_eranikusGuid))
-                    m_creature->SetFacingToObject(eranikus);
+                if (Creature* eranikus = GetEranikus()) m_creature->SetFacingToObject(eranikus);
                 break;
             case SAY_REMULOS_DEFEND_3:
                 SetEscortPaused(true);
@@ -357,77 +510,103 @@ struct npc_keeper_remulosAI : public npc_escortAI, private DialogueHelper
 
     void DoHandleOutro(Creature* target)
     {
-        if (Player* pPlayer = GetPlayerForEscort())
-            pPlayer->RewardPlayerAndGroupAtEventExplored(QUEST_NIGHTMARE_MANIFESTS, target);
-
-        DoDespawnSummoned();
-        // Remulos is only targetable for friendly player spells during Eranikus event: remove flag on quest completion
-        m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PVP);
-
+        if (!IsCurrentBoss(target) || !target->IsAlive() || m_finishing || target->GetEntry() != 15628)
+            return;
+        m_finishing = true;
+        DisableDialogue();
+        m_shadesummonTimer = m_riftRetryTimer = 0;
+        m_outroPhase = 0;
         m_outroTimer = 3 * IN_MILLISECONDS;
+        m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PVP);
+        const uint32 round = m_round;
+        Player* player = GetPlayerForEscort();
+        DoDespawnSummoned();
+        if (round != m_round || !IsCurrentBoss(target)) return;
+        // Commit local completion before the group-credit callback can re-enter.
+        if (player)
+            player->RewardPlayerAndGroupAtEventExplored(QUEST_NIGHTMARE_MANIFESTS, target);
     }
 
     void UpdateEscortAI(const uint32 diff) override
     {
-        DialogueUpdate(diff);
+        if (!m_eventActive)
+            return;
+        const uint32 round = m_round;
+        if (m_finishTimer)
+        {
+            if (m_finishTimer <= diff)
+            {
+                CleanupEvent();
+                if (m_round != round + 1) return;
+                m_creature->ForcedDespawn();
+            }
+            else m_finishTimer -= diff;
+            return;
+        }
+        if (m_riftRetryTimer)
+        {
+            if (m_riftRetryTimer <= diff)
+            {
+                m_riftRetryTimer = 0;
+                // A delayed successful cast may have completed during the retry wait.
+                StartNextDialogueText(GetEranikus() ? SAY_ERANIKUS_SPAWN : SPELL_CONJURE_RIFT);
+            }
+            else m_riftRetryTimer -= diff;
+        }
+        else if (!m_finishing)
+            DialogueUpdate(diff);
+        if (!m_eventActive || round != m_round)
+            return;
+        if (m_abortPending)
+        {
+            m_abortPending = false;
+            AbortEvent();
+            return;
+        }
 
         if (m_outroTimer)
         {
             if (m_outroTimer <= diff)
             {
-                switch (m_outroPhase)
+                if (m_outroPhase++ == 0)
                 {
-                    case 0:
-                        DoScriptText(SAY_REMULOS_OUTRO_1, m_creature);
-                        m_outroTimer = 3 * IN_MILLISECONDS;
-                        break;
-                    case 1:
-                        // Despawn Remulos after the outro is finished - he will respawn automatically at his home position after a few min
-                        DoScriptText(SAY_REMULOS_OUTRO_2, m_creature);
-                        m_creature->SetRespawnDelay(1 * MINUTE);
-                        m_creature->ForcedDespawn(3 * IN_MILLISECONDS);
-                        m_outroTimer = 0;
-                        break;
+                    DoScriptText(SAY_REMULOS_OUTRO_1, m_creature);
+                    m_outroTimer = 3 * IN_MILLISECONDS;
                 }
-                ++m_outroPhase;
+                else
+                {
+                    DoScriptText(SAY_REMULOS_OUTRO_2, m_creature);
+                    m_creature->SetRespawnDelay(1 * MINUTE);
+                    m_outroTimer = 0;
+                    // AI-local retirement cannot fire against a later same-AI respawn.
+                    m_finishTimer = 3 * IN_MILLISECONDS;
+                }
             }
-            else
-                m_outroTimer -= diff;
+            else m_outroTimer -= diff;
         }
 
-        // during the battle
         if (m_shadesummonTimer)
         {
             if (m_shadesummonTimer <= diff)
             {
-                // do this yell only first time
                 if (m_isFirstWave)
                 {
-                    // summon 3 shades inside the house
                     for (uint8 i = 0; i < MAX_SHADOWS; ++i)
                         m_creature->SummonCreature(NPC_NIGHTMARE_PHANTASM, shadowsLocations[i].x, shadowsLocations[i].y, shadowsLocations[i].z, 0, TEMPSPAWN_DEAD_DESPAWN, 0);
-
                     for (uint8 i = 0; i < MAX_DEFENDERS; ++i)
                     {
-                        // Alternate between two spawn positions
                         uint8 index = i % 2;
                         float fX, fY, fZ;
                         m_creature->GetRandomPoint(defendersLocations[index].x, defendersLocations[index].y, defendersLocations[index].z, 3.0f, fX, fY, fZ);
                         m_creature->SummonCreature(NPC_NIGHTHAVEN_DEFENDER, fX, fY, fZ, 0, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 3 * MINUTE * IN_MILLISECONDS);
                     }
-
-                    if (Creature* eranikus = m_creature->GetMap()->GetCreature(m_eranikusGuid))
-                        DoScriptText(SAY_ERANIKUS_ATTACK_1, eranikus);
-
+                    if (Creature* eranikus = GetEranikus()) DoScriptText(SAY_ERANIKUS_ATTACK_1, eranikus);
                     ++m_summonCount;
                     m_isFirstWave = false;
                 }
 
-                // Summon 3 shades per turn until the maximum summon turns are reached
                 float fX, fY, fZ;
-                // Randomize the summon point
                 uint8 summonPoint = roll_chance_i(70) ? uint32(MAX_SHADOWS) : urand(MAX_SHADOWS + 1, MAX_SHADOWS + 2);
-
                 if (m_summonCount < MAX_SUMMON_TURNS)
                 {
                     for (uint8 i = 0; i < MAX_SHADOWS; ++i)
@@ -435,34 +614,27 @@ struct npc_keeper_remulosAI : public npc_escortAI, private DialogueHelper
                         m_creature->GetRandomPoint(shadowsLocations[summonPoint].x, shadowsLocations[summonPoint].y, shadowsLocations[summonPoint].z, 10.0f, fX, fY, fZ);
                         m_creature->SummonCreature(NPC_NIGHTMARE_PHANTASM, fX, fY, fZ, 0.0f, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 3 * MINUTE * IN_MILLISECONDS);
                     }
-
-                    // Summon Moonglade Defender to patrol the area (and fight) if any are dead
-                    for (uint32 i = 0; i < MAX_DEFENDERS - m_defendersList.size(); ++i)
+                    // Prune deaths/despawns even when their callback was unavailable.
+                    PruneDefenders();
+                    const uint32 missing = m_defendersList.size() < MAX_DEFENDERS ? MAX_DEFENDERS - m_defendersList.size() : 0;
+                    for (uint32 i = 0; i < missing; ++i)
                     {
-                        // Alternate between two spawn positions
                         uint8 index = i % 2;
                         m_creature->GetRandomPoint(defendersLocations[index].x, defendersLocations[index].y, defendersLocations[index].z, 3.0f, fX, fY, fZ);
                         m_creature->SummonCreature(NPC_NIGHTHAVEN_DEFENDER, fX, fY, fZ, 0, TEMPSPAWN_DEAD_DESPAWN, 0);
                     }
-
                     ++m_summonCount;
                 }
-
-                // If all the shades were summoned then set Eranikus in combat
-                // We don't count the dead shades, because the boss is usually set in combat before all shades are dead
                 if (m_summonCount == MAX_SUMMON_TURNS)
                 {
                     m_shadesummonTimer = 0;
-
-                    if (Creature* eranikus = m_creature->GetMap()->GetCreature(m_eranikusGuid))
-                        // Land and start attacking
+                    if (Creature* eranikus = GetEranikus())
                         eranikus->GetMotionMaster()->MovePoint(POINT_ID_ERANIKUS_COMBAT, eranikusLocations[2].x, eranikusLocations[2].y, eranikusLocations[2].z);
+                    else AbortEvent();
                 }
-                else
-                    m_shadesummonTimer = urand(20 * IN_MILLISECONDS, 30 * IN_MILLISECONDS);
+                else m_shadesummonTimer = urand(20 * IN_MILLISECONDS, 30 * IN_MILLISECONDS);
             }
-            else
-                m_shadesummonTimer -= diff;
+            else m_shadesummonTimer -= diff;
         }
 
         // Combat spells
@@ -549,6 +721,12 @@ struct boss_eranikusAI : public ScriptedAI
     uint32 m_shadowboltVolleyTimer;
     uint32 m_eventTimer;
     uint32 m_tyrandeMoveTimer;
+    uint32 m_finishTimer = 0;
+    uint32 m_generation = 0;
+    bool m_terminating = false;
+    bool m_redeeming = false;
+    bool m_finished = false;
+    bool m_landed = false;
 
     uint8 m_eventPhase;
     uint8 m_tyrandeMovePoint;
@@ -557,15 +735,22 @@ struct boss_eranikusAI : public ScriptedAI
     ObjectGuid m_remulosGuid;
     ObjectGuid m_tyrandeGuid;
     GuidList m_priestessList;
+    GuidList m_tyrandeList;
 
     void Reset() override
     {
+        const uint32 generation = ++m_generation;
+        CleanupActors();
+        if (generation != m_generation) return;
+        m_terminating = m_redeeming = m_finished = m_landed = false;
+        m_finishTimer = 0;
         m_acidBreathTimer         = 10 * IN_MILLISECONDS;
         m_noxiousBreathTimer      = 3 * IN_MILLISECONDS;
         m_shadowboltVolleyTimer   = 5 * IN_MILLISECONDS;
         m_tyrandeMoveTimer        = 0;
+        m_tyrandeMovePoint        = POINT_ID_TYRANDE_HEAL;
 
-        m_remulosGuid.Clear();
+        m_remulosGuid = m_creature->GetSpawnerGuid();
         m_tyrandeGuid.Clear();
 
         m_healthCheck             = 85;
@@ -576,39 +761,94 @@ struct boss_eranikusAI : public ScriptedAI
         SetCombatMovement(false);
     }
 
+    npc_keeper_remulosAI* GetRemulosAI() const
+    {
+        Creature* remulos = m_creature->GetMap()->GetCreature(m_remulosGuid);
+        if (!remulos || !remulos->IsAlive() || remulos->GetEntry() != NPC_KEEPER_REMULOS)
+            return nullptr;
+        npc_keeper_remulosAI* ai = dynamic_cast<npc_keeper_remulosAI*>(remulos->AI());
+        return ai && ai->IsCurrentBoss(m_creature) ? ai : nullptr;
+    }
+
+    bool IsOwned(Creature* actor, uint32 entry) const
+    {
+        return actor && actor->GetEntry() == entry && actor->GetSpawnerGuid() == m_creature->GetObjectGuid();
+    }
+
+    void DespawnActors(GuidList& actors, uint32 entry)
+    {
+        GuidList owned;
+        owned.swap(actors);
+        for (ObjectGuid guid : owned)
+            if (Creature* actor = m_creature->GetMap()->GetCreature(guid))
+                if (IsOwned(actor, entry)) actor->ForcedDespawn();
+    }
+
+    void CleanupActors()
+    {
+        GuidList priestesses, tyrande;
+        priestesses.swap(m_priestessList);
+        tyrande.swap(m_tyrandeList);
+        m_tyrandeGuid.Clear();
+        m_tyrandeMoveTimer = 0;
+        DespawnActors(priestesses, NPC_ELUNE_PRIESTESS);
+        DespawnActors(tyrande, NPC_TYRANDE_WHISPERWIND);
+    }
+
+    void EndEvent(bool notifyKeeper)
+    {
+        if (m_terminating) return;
+        const uint32 generation = m_generation;
+        m_terminating = true;
+        m_eventTimer = m_finishTimer = 0;
+        CleanupActors();
+        if (generation != m_generation) return;
+        if (notifyKeeper && !m_finished)
+            if (npc_keeper_remulosAI* ai = GetRemulosAI()) ai->AbortEvent();
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        EndEvent(true);
+        ScriptedAI::JustDied(killer);
+    }
+
+    void CorpseRemoved(uint32& respawnDelay) override
+    {
+        EndEvent(true);
+        ScriptedAI::CorpseRemoved(respawnDelay);
+    }
+
+    void JustRespawned() override
+    {
+        EndEvent(true);
+        ScriptedAI::JustRespawned();
+    }
+
     void EnterEvadeMode() override
     {
-        if (m_creature->GetHealthPercent() < 20.0f)
+        if (m_terminating || m_finished || m_redeeming) return;
+        npc_keeper_remulosAI* ai = GetRemulosAI();
+        if (m_creature->GetHealthPercent() < 20.0f && ai)
         {
+            m_redeeming = true;
             m_creature->RemoveAllAurasOnEvade();
             m_creature->CombatStop(true);
             m_creature->LoadCreatureAddon(true);
-
             m_creature->SetLootRecipient(nullptr);
-
-            // Get Remulos guid and make him stop summoning shades
-            if (Creature* remulos = GetClosestCreatureWithEntry(m_creature, NPC_REMULOS, 50.0f))
-            {
-                m_remulosGuid = remulos->GetObjectGuid();
-                remulos->AI()->EnterEvadeMode();
-            }
-
-            // Despawn the priestess
+            ai->m_shadesummonTimer = 0;
+            ai->EnterEvadeMode();
+            const uint32 generation = m_generation;
             DoDespawnSummoned();
-
-            // redeem Eranikus
+            if (generation != m_generation || !GetRemulosAI()) return;
+            m_eventPhase = 0;
             m_eventTimer = 5 * IN_MILLISECONDS;
             m_creature->UpdateEntry(NPC_ERANIKUS_REDEEMED);
         }
         else
         {
-            // There may be a core issue related to the reached home function for summoned creatures so we are cleaning things up here
-            // if the creature evades while the event is in progress then we despawn all the summoned, including himself
-            m_creature->ForcedDespawn();
-            DoDespawnSummoned();
-
-            if (Creature* tyrande = m_creature->GetMap()->GetCreature(m_tyrandeGuid))
-                tyrande->ForcedDespawn();
+            EndEvent(true);
+            if (m_terminating) m_creature->ForcedDespawn();
         }
     }
 
@@ -633,14 +873,19 @@ struct boss_eranikusAI : public ScriptedAI
 
     void JustSummoned(Creature* summoned) override
     {
+        if (m_terminating || m_finished || !GetRemulosAI() || summoned->GetSpawnerGuid() != m_creature->GetObjectGuid()) return;
         switch (summoned->GetEntry())
         {
             case NPC_TYRANDE_WHISPERWIND:
+                if (std::find(m_tyrandeList.begin(), m_tyrandeList.end(), summoned->GetObjectGuid()) != m_tyrandeList.end()) return;
+                m_tyrandeMovePoint = POINT_ID_TYRANDE_HEAL;
+                m_tyrandeList.push_back(summoned->GetObjectGuid());
                 m_tyrandeGuid = summoned->GetObjectGuid();
                 summoned->SetWalk(false);
                 summoned->GetMotionMaster()->MovePoint(POINT_ID_TYRANDE_HEAL, tyrandeLocations[1].x, tyrandeLocations[1].y, tyrandeLocations[1].z);
                 break;
             case NPC_ELUNE_PRIESTESS:
+                if (std::find(m_priestessList.begin(), m_priestessList.end(), summoned->GetObjectGuid()) != m_priestessList.end()) return;
                 m_priestessList.push_back(summoned->GetObjectGuid());
                 float fX, fY, fZ;
                 summoned->SetWalk(false);
@@ -652,38 +897,61 @@ struct boss_eranikusAI : public ScriptedAI
 
     void DoDespawnSummoned()
     {
-        for (auto priestressGuid : m_priestessList)
+        DespawnActors(m_priestessList, NPC_ELUNE_PRIESTESS);
+    }
+
+    void SummonedCreatureDespawn(Creature* summoned) override
+    {
+        if (IsOwned(summoned, NPC_ELUNE_PRIESTESS)) m_priestessList.remove(summoned->GetObjectGuid());
+        if (IsOwned(summoned, NPC_TYRANDE_WHISPERWIND))
         {
-            if (Creature* priestress = m_creature->GetMap()->GetCreature(priestressGuid))
-                priestress->ForcedDespawn();
+            m_tyrandeList.remove(summoned->GetObjectGuid());
+            if (m_tyrandeGuid == summoned->GetObjectGuid())
+            {
+                m_tyrandeGuid.Clear();
+                m_tyrandeMoveTimer = 0;
+            }
         }
+    }
+
+    void SummonedCreatureJustDied(Creature* summoned) override
+    {
+        SummonedCreatureDespawn(summoned);
     }
 
     void SummonedMovementInform(Creature* summoned, uint32 type, uint32 pointId) override
     {
-        if (type != POINT_MOTION_TYPE)
+        if (type != POINT_MOTION_TYPE || m_terminating || m_finished || m_redeeming || !GetRemulosAI())
             return;
+        const bool tyrande = IsOwned(summoned, NPC_TYRANDE_WHISPERWIND) && summoned->GetObjectGuid() == m_tyrandeGuid;
+        const bool priestess = IsOwned(summoned, NPC_ELUNE_PRIESTESS) &&
+            std::find(m_priestessList.begin(), m_priestessList.end(), summoned->GetObjectGuid()) != m_priestessList.end();
+        if (!tyrande && !priestess) return;
 
         switch (pointId)
         {
             case POINT_ID_TYRANDE_HEAL:
-                if (summoned->GetEntry() == NPC_TYRANDE_WHISPERWIND)
+                if (tyrande)
                 {
+                    if (m_tyrandeMovePoint != pointId || m_tyrandeMoveTimer) return;
+                    m_tyrandeMovePoint = POINT_ID_TYRANDE_ABSOLUTION;
                     // Unmont, yell and prepare to channel the spell on Eranikus
                     DoScriptText(SAY_TYRANDE_HEAL, summoned);
                     summoned->Unmount();
                     m_tyrandeMoveTimer = 5 * IN_MILLISECONDS;
                 }
                 // Unmount the priestess - unk what is their exact purpose (maybe healer)
-                else if (summoned->GetEntry() == NPC_ELUNE_PRIESTESS)
+                else if (priestess)
                 {
                     summoned->Unmount();
                     summoned->AI()->AttackStart(m_creature);    // Prietess of Elune do not really attack Eranikus but they need to be in combat to periodically cast Mass Heal
                 }
                 break;
             case POINT_ID_TYRANDE_ABSOLUTION:
-                if (summoned->GetEntry() == NPC_TYRANDE_WHISPERWIND)
+                if (tyrande)
                 {
+                    if (m_tyrandeMovePoint != pointId || m_tyrandeMoveTimer) return;
+                    ++m_tyrandeMovePoint;
                     summoned->CastSpell(summoned, SPELL_ARCANE_CHANNELING, TRIGGERED_NONE);
                     DoScriptText(SAY_TYRANDE_FORGIVEN_1, summoned);
                 }
@@ -693,17 +961,20 @@ struct boss_eranikusAI : public ScriptedAI
 
     void MovementInform(uint32 type, uint32 pointId) override
     {
-        if (type != POINT_MOTION_TYPE)
+        if (type != POINT_MOTION_TYPE || m_terminating || m_finished || !GetRemulosAI())
             return;
 
         switch (pointId)
         {
             case POINT_ID_ERANIKUS_COMBAT:
             {
-                // Land and start attacking
+                if (m_landed || m_redeeming || GetRemulosAI()->m_summonCount != MAX_SUMMON_TURNS) return;
+                m_landed = true;
+                // Land and attack the current event keeper, never the dragon itself.
                 m_creature->SetImmuneToNPC(false);
                 m_creature->SetImmuneToPlayer(false);
-                m_creature->AI()->AttackStart(m_creature);
+                if (Creature* remulos = m_creature->GetMap()->GetCreature(m_remulosGuid))
+                    AttackStart(remulos);
                 DoScriptText(SAY_ERANIKUS_ATTACK_2, m_creature);
                 m_creature->RemoveAurasDueToSpell(SPELL_DRAGON_HOVER);
                 m_creature->SetHover(false);
@@ -712,6 +983,7 @@ struct boss_eranikusAI : public ScriptedAI
             }
             case POINT_ID_ERANIKUS_REDEEMED:
             {
+                if (!m_redeeming || m_eventPhase != 4 || m_eventTimer) return;
                 DoScriptText(SAY_REDEEMED_1, m_creature);
                 m_eventTimer = 11 * IN_MILLISECONDS;
                 break;
@@ -722,6 +994,23 @@ struct boss_eranikusAI : public ScriptedAI
 
     void UpdateAI(const uint32 diff) override
     {
+        if (m_terminating) return;
+        if (m_finishTimer)
+        {
+            if (m_finishTimer <= diff)
+            {
+                EndEvent(false);
+                if (m_terminating) m_creature->ForcedDespawn();
+            }
+            else m_finishTimer -= diff;
+            return;
+        }
+        if (!GetRemulosAI())
+        {
+            EndEvent(false);
+            if (m_terminating) m_creature->ForcedDespawn();
+            return;
+        }
         if (m_eventTimer)
         {
             if (m_eventTimer <= diff)
@@ -780,10 +1069,17 @@ struct boss_eranikusAI : public ScriptedAI
                             tyrande->SetStandState(UNIT_STAND_STATE_STAND);
                             tyrande->ForcedDespawn(9 * IN_MILLISECONDS);
                         }
-                        if (Creature* remulos = m_creature->GetMap()->GetCreature(m_remulosGuid))
-                            ((npc_keeper_remulosAI*)remulos->AI())->DoHandleOutro(m_creature);
+                        m_finished = true;
+                        m_eventTimer = 0;
+                        m_finishTimer = 2 * IN_MILLISECONDS;
+                        // Tyrande has her own bounded nine-second farewell. Detach it
+                        // before the dragon's two-second retirement cleans the round.
+                        m_tyrandeGuid.Clear();
+                        m_tyrandeList.clear();
                         m_creature->HandleEmote(EMOTE_ONESHOT_BOW);
-                        m_creature->ForcedDespawn(2 * IN_MILLISECONDS);
+                        if (npc_keeper_remulosAI* ai = GetRemulosAI())
+                            ai->DoHandleOutro(m_creature);
+                        return;
                         break;
                 }
                 ++m_eventPhase;
@@ -932,7 +1228,8 @@ bool GOUse_go_omen_cluster(Player* /*player*/, GameObject* pGo)
     // This increases an internal counter that handles the event in the map script
     pInstance->SetData(TYPE_OMEN, NOT_STARTED);
 
-    return true;
+    // Keep the template-use script responsible for legitimate launcher quest credit.
+    return false;
 }
 
 void AddSC_moonglade()
