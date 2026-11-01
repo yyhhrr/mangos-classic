@@ -77,6 +77,7 @@ struct boss_kazzakAI : public ScriptedAI
 
     void JustRespawned() override
     {
+        ScriptedAI::JustRespawned();
         DoScriptText(SAY_INTRO, m_creature);
     }
 
@@ -117,11 +118,10 @@ struct boss_kazzakAI : public ScriptedAI
                 DoScriptText(urand(0, 1) ? SAY_SURPREME1 : SAY_SURPREME2, m_creature);
                 m_bIsInBerserk = true;
                 m_uiShadowVolleyTimer = 1000;
+                m_uiSupremeTimer = 0;
             }
-            // a small amount of time will be lost, but this is acceptable.
-            m_uiSupremeTimer = 0;
         }
-        else
+        else if (m_uiSupremeTimer)
             m_uiSupremeTimer -= uiDiff;
 
         // Shadow Volley
