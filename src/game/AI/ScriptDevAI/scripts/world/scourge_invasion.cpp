@@ -20,6 +20,7 @@
 //#include "CreatureGroups.h"
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
+#include "Entities/TemporarySpawn.h"
 #include "World/WorldStateDefines.h"
 #include "Grids/CellImpl.h"
 #include "GameEvents/GameEventMgr.h"
@@ -933,19 +934,89 @@ npc_cultist_engineer
 */
 struct npc_cultist_engineer : public ScriptedAI
 {
+    static constexpr uint32 EVENT_SUMMON_TIMEOUT = 100;
+
     npc_cultist_engineer(Creature* creature) : ScriptedAI(creature)
     {
         AddCustomAction(EVENT_CULTIST_CHANNELING, false, [&]()
         {
             m_creature->CastSpell(nullptr, SPELL_BUTTRESS_CHANNEL, TRIGGERED_OLD_TRIGGERED);
         });
+        AddCustomAction(EVENT_SUMMON_TIMEOUT, true, [this]() { ClearPendingSummon(); });
         SetReactState(REACT_PASSIVE);
     }
 
-    void Reset() override {}
+    ObjectGuid m_pendingPlayer;
+    Spell* m_pendingSpell = nullptr; // Identity only; never dereferenced after the cast.
+    uint32 m_requestSerial = 0;
+    bool m_completed = false;
+
+    void ClearPendingSummon()
+    {
+        m_pendingPlayer.Clear();
+        m_pendingSpell = nullptr;
+        ++m_requestSerial;
+        DisableTimer(EVENT_SUMMON_TIMEOUT);
+    }
+
+    void Reset() override
+    {
+        ClearPendingSummon();
+    }
+
+    void JustRespawned() override
+    {
+        m_completed = false;
+        ScriptedAI::JustRespawned();
+    }
+
+    bool CanSummonFor(Player* player) const
+    {
+        return player && player->IsAlive() && player->IsInWorld() &&
+            m_creature->IsAlive() && m_creature->IsInWorld() &&
+            m_creature->GetEntry() == NPC_CULTIST_ENGINEER && m_creature->AI() == this &&
+            !m_completed && player->GetNPCIfCanInteractWith(m_creature->GetObjectGuid(), UNIT_NPC_FLAG_GOSSIP) == m_creature;
+    }
+
+    SpellCastResult CheckSummon(Spell* spell, Player* player, bool strict)
+    {
+        if (!CanSummonFor(player) || m_pendingPlayer != player->GetObjectGuid())
+            return SPELL_FAILED_BAD_TARGETS;
+        if (m_pendingSpell && m_pendingSpell != spell)
+            return SPELL_FAILED_NOT_READY;
+        if (!m_pendingSpell && !strict)
+            return SPELL_FAILED_BAD_TARGETS;
+        if (!player->HasItemCount(ITEM_NECROTIC_RUNE, 8))
+            return SPELL_FAILED_REAGENTS;
+
+        m_pendingSpell = spell;
+        return SPELL_CAST_OK;
+    }
+
+    bool CanCompleteSummon(Spell* spell, Player* player) const
+    {
+        return CanSummonFor(player) && m_pendingSpell == spell &&
+            m_pendingPlayer == player->GetObjectGuid() && player->HasItemCount(ITEM_NECROTIC_RUNE, 8);
+    }
+
+    uint32 CommitSummon()
+    {
+        m_completed = true;
+        m_pendingPlayer.Clear();
+        m_pendingSpell = nullptr;
+        DisableTimer(EVENT_SUMMON_TIMEOUT);
+        return m_requestSerial;
+    }
+
+    void CancelSummon(Spell* spell, ObjectGuid playerGuid)
+    {
+        if (m_pendingSpell == spell && m_pendingPlayer == playerGuid)
+            ClearPendingSummon();
+    }
 
     void JustDied(Unit*) override
     {
+        ClearPendingSummon();
         if (Creature* shard = GetClosestCreatureWithEntry(m_creature, NPC_DAMAGED_NECROTIC_SHARD, 15.0f))
             shard->CastSpell(shard, SPELL_DAMAGE_CRYSTAL, TRIGGERED_OLD_TRIGGERED);
 
@@ -960,10 +1031,21 @@ struct npc_cultist_engineer : public ScriptedAI
         {
             if (Player* player = dynamic_cast<Player*>(invoker))
             {
-                // Player summons a Shadow of Doom for 1 hour.
-                player->CastSpell(nullptr, SPELL_SUMMON_BOSS, TRIGGERED_OLD_TRIGGERED);
-                m_creature->CastSpell(nullptr, SPELL_QUIET_SUICIDE, TRIGGERED_OLD_TRIGGERED);
+                if (!CanSummonFor(player) || !m_pendingPlayer.IsEmpty() || !player->HasItemCount(ITEM_NECROTIC_RUNE, 8))
+                    return;
+
+                m_pendingPlayer = player->GetObjectGuid();
+                m_pendingSpell = nullptr;
+                uint32 serial = ++m_requestSerial;
+                ResetTimer(EVENT_SUMMON_TIMEOUT, 15000);
+
+                SpellCastArgs args;
+                args.SetScriptValue(m_creature->GetObjectGuid().GetRawValue());
+                SpellCastResult result = player->CastSpell(args, SPELL_SUMMON_BOSS, TRIGGERED_OLD_TRIGGERED);
+                if (result != SPELL_CAST_OK && m_requestSerial == serial && !m_completed)
+                    ClearPendingSummon();
             }
+            return;
         }
         if (eventType == AI_EVENT_CUSTOM_A && miscValue == NPC_CULTIST_ENGINEER)
         {
@@ -977,14 +1059,88 @@ struct npc_cultist_engineer : public ScriptedAI
 
 struct SummonBoss : public SpellScript
 {
+    static void DiscardSummon(Creature* summon)
+    {
+        if (summon->IsTemporarySummon())
+            static_cast<TemporarySpawn*>(summon)->UnSummon();
+        else
+            summon->ForcedDespawn();
+    }
+
+    static npc_cultist_engineer* GetCultist(Spell* spell, Player*& player, Creature*& cultist)
+    {
+        player = dynamic_cast<Player*>(spell->GetCaster());
+        if (!player || !player->IsInWorld())
+            return nullptr;
+
+        ObjectGuid guid(spell->GetScriptValue());
+        if (!guid.IsCreature() || guid.GetEntry() != NPC_CULTIST_ENGINEER)
+            return nullptr;
+
+        cultist = player->GetMap()->GetCreature(guid);
+        return cultist ? dynamic_cast<npc_cultist_engineer*>(cultist->AI()) : nullptr;
+    }
+
+    SpellCastResult OnCheckCast(Spell* spell, bool strict) const override
+    {
+        Player* player = nullptr;
+        Creature* cultist = nullptr;
+        if (npc_cultist_engineer* ai = GetCultist(spell, player, cultist))
+            return ai->CheckSummon(spell, player, strict);
+        return SPELL_FAILED_BAD_TARGETS;
+    }
+
+    void OnSuccessfulFinish(Spell* spell) const override
+    {
+        Player* player = nullptr;
+        Creature* cultist = nullptr;
+        if (npc_cultist_engineer* ai = GetCultist(spell, player, cultist))
+            ai->CancelSummon(spell, player->GetObjectGuid());
+    }
+
     void OnSummon(Spell* spell, Creature* summon) const override
     {
-        Unit* caster = spell->GetCaster();
+        if (!summon)
+            return;
+
+        // A committed Spell keeps its accepted actor receipt after the Cultist
+        // dies, so duplicate callbacks never remove the already paid summon.
+        ObjectGuid receipt(spell->GetScriptValue());
+        if (receipt.IsCreature() && receipt.GetEntry() == NPC_SHADOW_OF_DOOM)
+        {
+            if (summon->GetObjectGuid() != receipt)
+                DiscardSummon(summon);
+            return;
+        }
+
+        Player* player = nullptr;
+        Creature* cultist = nullptr;
+        npc_cultist_engineer* ai = GetCultist(spell, player, cultist);
+        if (summon->GetEntry() != NPC_SHADOW_OF_DOOM || !summon->AI() || !ai ||
+            !ai->CanCompleteSummon(spell, player) || !summon->IsAlive() || !summon->IsInWorld() ||
+            summon->GetMap() != player->GetMap() || summon->GetSpawnerGuid() != player->GetObjectGuid())
+        {
+            DiscardSummon(summon);
+            return;
+        }
+
+        ObjectGuid cultistGuid = cultist->GetObjectGuid();
+        Map* cultistMap = cultist->GetMap();
+        uint32 serial = ai->CommitSummon();
+        spell->SetScriptValue(summon->GetObjectGuid().GetRawValue());
+        player->DestroyItemCount(ITEM_NECROTIC_RUNE, 8, true);
+
         summon->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PLAYER);
-        summon->SetFacingToObject(caster);
-        summon->AI()->SendAIEvent(AI_EVENT_CUSTOM_A, caster, summon, NPC_SHADOW_OF_DOOM);
-        if (caster->IsPlayer())
-            static_cast<Player*>(caster)->DestroyItemCount(ITEM_NECROTIC_RUNE, 8, true);
+        summon->SetFacingToObject(player);
+        summon->AI()->SendAIEvent(AI_EVENT_CUSTOM_A, player, summon, NPC_SHADOW_OF_DOOM);
+
+        // Inventory and summon callbacks may have retired or reset the actor.
+        // Do not kill a new round that happens to reuse this Cultist GUID.
+        if (Creature* current = cultistMap->GetCreature(cultistGuid))
+            if (npc_cultist_engineer* currentAI = dynamic_cast<npc_cultist_engineer*>(current->AI()))
+                if (currentAI == ai && currentAI->m_requestSerial == serial && currentAI->m_completed && current->IsAlive())
+                    if (current->CastSpell(nullptr, SPELL_QUIET_SUICIDE, TRIGGERED_OLD_TRIGGERED) != SPELL_CAST_OK)
+                        current->Suicide();
     }
 };
 

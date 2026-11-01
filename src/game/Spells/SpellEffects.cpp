@@ -2816,7 +2816,7 @@ void Spell::EffectSummonWild(SpellEffectIndex eff_idx)
 
             // Preserve the three spells' existing summon hooks (e.g. 4072's
             // no-follow script) when adapting their former guardian path.
-            if (engineeringDummy)
+            if (engineeringDummy || (m_spellInfo->Id == 31315 && creature_entry == 16143))
                 OnSummon(summon);
         }
     }

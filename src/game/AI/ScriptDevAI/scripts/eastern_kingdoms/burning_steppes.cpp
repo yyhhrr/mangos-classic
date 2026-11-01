@@ -87,53 +87,143 @@ static const DialogueEntry aOutroDialogue[] =
 
 struct npc_grark_lorkrubAI : public npc_escortAI, private DialogueHelper
 {
-    npc_grark_lorkrubAI(Creature* pCreature) : npc_escortAI(pCreature), DialogueHelper(aOutroDialogue), m_shackled(false)
-    {
-        Reset();
-    }
+    npc_grark_lorkrubAI(Creature* creature) : npc_escortAI(creature), DialogueHelper(aOutroDialogue) { Reset(); }
 
     ObjectGuid m_nuzarkGuid;
     ObjectGuid m_lexlortGuid;
-
     GuidList m_lSearscaleGuidList;
+    GuidList m_ownedActors;
+    GuidList m_waveActors;
+    uint32 m_round = 0;
+    uint32 m_dialogueRound = 0;
+    uint32 m_expectedEntry = 0;
+    uint8 m_uiKilledCreatures = 0;
+    uint8 m_wave = 0;
+    uint8 m_waveDeaths = 0;
+    uint8 m_completedWaves = 0;
+    bool m_bIsFirstSearScale = true;
+    bool m_shackled = false;
+    bool m_eventActive = false;
+    bool m_spawningWave = false;
+    bool m_drakesAnnounced = false;
+    bool m_outroStarted = false;
+    bool m_abortPending = false;
+    bool m_creditPending = false;
+    bool m_finished = false;
+    bool m_updatingDialogue = false;
+    bool m_dialoguePending = false;
 
-    uint8 m_uiKilledCreatures;
-    bool m_bIsFirstSearScale;
-    bool m_shackled;
+    bool IsEventEntry(uint32 entry) const
+    {
+        return entry == NPC_BLACKROCK_AMBUSHER || entry == NPC_BLACKROCK_RAIDER ||
+            entry == NPC_FLAMESCALE_DRAGONSPAWN || entry == NPC_SEARSCALE_DRAKE ||
+            entry == NPC_HIGH_EXECUTIONER_NUZARK || entry == NPC_SHADOW_OF_LEXLORT;
+    }
+
+    bool IsOwned(Creature* actor) const
+    {
+        return actor && IsEventEntry(actor->GetEntry()) && actor->GetSpawnerGuid() == m_creature->GetObjectGuid();
+    }
+
+    bool IsMember(GuidList const& actors, ObjectGuid guid) const
+    {
+        return std::find(actors.begin(), actors.end(), guid) != actors.end();
+    }
+
+    void CleanupEvent()
+    {
+        m_eventActive = false;
+        ++m_round;
+        DisableDialogue();
+        m_shackled = m_spawningWave = m_drakesAnnounced = m_outroStarted = false;
+        m_abortPending = m_creditPending = m_finished = m_dialoguePending = false;
+        m_bIsFirstSearScale = true;
+        m_expectedEntry = m_uiKilledCreatures = m_wave = m_waveDeaths = m_completedWaves = 0;
+        m_nuzarkGuid.Clear();
+        m_lexlortGuid.Clear();
+        m_lSearscaleGuidList.clear();
+        m_waveActors.clear();
+        GuidList actors;
+        actors.swap(m_ownedActors); // Clear every local identity before synchronous despawn callbacks.
+        SetDeathPrevention(false);
+        m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE);
+        for (ObjectGuid guid : actors)
+            if (Creature* actor = m_creature->GetMap()->GetCreature(guid))
+                if (IsOwned(actor)) actor->ForcedDespawn();
+    }
 
     void Reset() override
     {
-        if (!HasEscortState(STATE_ESCORT_ESCORTING))
-        {
-            m_uiKilledCreatures = 0;
-            m_bIsFirstSearScale = true;
-
-            m_lSearscaleGuidList.clear();
-
-            m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE);
-        }
+        // Combat evade preserves a live escort, its wave and its valid outro.
+        if (!HasEscortState(STATE_ESCORT_ESCORTING)) CleanupEvent();
         SetDeathPrevention(false);
     }
 
-    void Aggro(Unit* /*pWho*/) override
+    void JustStartedEscort() override
     {
-        if (!HasEscortState(STATE_ESCORT_ESCORTING))
-            DoScriptText(SAY_AGGRO, m_creature);
+        CleanupEvent();
+        m_eventActive = true;
     }
 
-    void MoveInLineOfSight(Unit* pWho) override
+    void AbortEvent()
     {
-        // No combat during escort
-        if (HasEscortState(STATE_ESCORT_ESCORTING))
-            return;
-
-        npc_escortAI::MoveInLineOfSight(pWho);
+        if (!m_eventActive || m_finished) return;
+        const uint32 round = m_round;
+        m_eventActive = false;
+        m_shackled = m_abortPending = m_creditPending = false;
+        DisableDialogue();
+        FailQuestForPlayerAndGroup();
+        if (round != m_round) return;
+        CleanupEvent();
+        if (m_round != round + 1) return;
+        // Retain the creature's ordinary respawn policy after a failed escort.
+        m_creature->ForcedDespawn();
     }
 
-    void ReceiveAIEvent(AIEventType eventType, Unit* /*pSender*/, Unit* pInvoker, uint32 /*uiMiscValue*/) override
+    void JustDied(Unit* killer) override
     {
-        // rejoin head on request
-        if (eventType == AI_EVENT_CUSTOM_A)
+        const uint32 round = m_round;
+        m_eventActive = false;
+        m_shackled = false;
+        DisableDialogue();
+        npc_escortAI::JustDied(killer);
+        if (round == m_round) CleanupEvent();
+    }
+
+    void CorpseRemoved(uint32& respawnDelay) override
+    {
+        const uint32 round = m_round;
+        const bool fail = m_eventActive && !m_finished;
+        m_eventActive = false;
+        m_shackled = false;
+        DisableDialogue();
+        npc_escortAI::CorpseRemoved(respawnDelay);
+        if (fail) FailQuestForPlayerAndGroup();
+        if (round == m_round) CleanupEvent();
+    }
+
+    void JustRespawned() override
+    {
+        const uint32 round = m_round;
+        uint32 respawnDelay = 0;
+        CorpseRemoved(respawnDelay); // Also covers a direct same-AI respawn.
+        if (m_round != round + 1) return;
+        npc_escortAI::JustRespawned();
+    }
+
+    void Aggro(Unit* /*who*/) override
+    {
+        if (!HasEscortState(STATE_ESCORT_ESCORTING)) DoScriptText(SAY_AGGRO, m_creature);
+    }
+
+    void MoveInLineOfSight(Unit* who) override
+    {
+        if (!HasEscortState(STATE_ESCORT_ESCORTING)) npc_escortAI::MoveInLineOfSight(who);
+    }
+
+    void ReceiveAIEvent(AIEventType eventType, Unit* /*sender*/, Unit* /*invoker*/, uint32 /*miscValue*/) override
+    {
+        if (eventType == AI_EVENT_CUSTOM_A && !m_eventActive && !HasEscortState(STATE_ESCORT_ESCORTING) && m_creature->IsAlive())
         {
             m_shackled = true;
             SetDeathPrevention(true);
@@ -142,90 +232,149 @@ struct npc_grark_lorkrubAI : public npc_escortAI, private DialogueHelper
 
     void HandleLowHp()
     {
+        m_shackled = false; // Capture submission is one-shot, including across a later respawn.
         DoScriptText(EMOTE_SUBMIT, m_creature);
-        static_cast<Creature*>(m_creature)->SetFactionTemporary(FACTION_GRARK_FRIENDLY, TEMPFACTION_RESTORE_RESPAWN);
+        m_creature->SetFactionTemporary(FACTION_GRARK_FRIENDLY, TEMPFACTION_RESTORE_RESPAWN);
         EnterEvadeMode();
         SetDeathPrevention(false);
         m_creature->SetFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER);
     }
 
-    void WaypointReached(uint32 uiPointId) override
+    Creature* SummonOwned(uint32 entry, float x, float y, float z, float o, TempSpawnType type, uint32 lifetime)
     {
-        switch (uiPointId)
+        const uint32 round = m_round;
+        m_expectedEntry = entry;
+        Creature* actor = m_creature->SummonCreature(entry, x, y, z, o, type, lifetime);
+        m_expectedEntry = 0;
+        if (round != m_round || !m_eventActive) return nullptr;
+        if (!actor || !IsMember(m_ownedActors, actor->GetObjectGuid()) || !actor->IsAlive()) m_abortPending = true;
+        return actor;
+    }
+
+    void FinishWaveIfReady()
+    {
+        const uint8 required = m_wave == 3 ? 3 : 4;
+        if (!m_wave || m_spawningWave || m_abortPending || m_waveDeaths != required || !m_waveActors.empty()) return;
+        m_completedWaves = m_wave;
+        m_wave = 0;
+        if (m_completedWaves == 1) DoScriptText(SAY_FIRST_AMBUSH_END, m_creature);
+        else if (m_completedWaves == 2) DoScriptText(SAY_SEC_AMBUSH_END, m_creature);
+        else if (m_drakesAnnounced) DoScriptText(SAY_THIRD_AMBUSH_END, m_creature);
+        // Drakes may be killed before point30. Their completed state survives that arrival.
+        SetEscortPaused(false);
+    }
+
+    void StartWave(uint8 wave)
+    {
+        m_wave = wave;
+        m_waveDeaths = 0;
+        m_waveActors.clear();
+        m_spawningWave = true;
+    }
+
+    void StartOutroDialogue()
+    {
+        if (m_updatingDialogue) { m_dialoguePending = true; return; }
+        m_dialoguePending = false;
+        m_updatingDialogue = true;
+        m_dialogueRound = m_round;
+        StartNextDialogueText(SAY_LAST_STAND);
+        m_updatingDialogue = false;
+    }
+
+    void WaypointReached(uint32 pointId) override
+    {
+        if (!m_eventActive || m_finished || m_abortPending) return;
+        const uint32 round = m_round;
+        switch (pointId)
         {
-            case 1:
-                DoScriptText(SAY_START, m_creature);
-                break;
-            case 7:
-                DoScriptText(SAY_PAY, m_creature);
-                break;
+            case 1: DoScriptText(SAY_START, m_creature); break;
+            case 7: DoScriptText(SAY_PAY, m_creature); break;
             case 12:
+                if (m_wave || m_completedWaves != 0) return;
                 DoScriptText(SAY_FIRST_AMBUSH_START, m_creature);
                 SetEscortPaused(true);
-
-                m_creature->SummonCreature(NPC_BLACKROCK_AMBUSHER, -7844.3f, -1521.6f, 139.2f, 0.0f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
-                m_creature->SummonCreature(NPC_BLACKROCK_AMBUSHER, -7860.4f, -1507.8f, 141.0f, 6.0f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
-                m_creature->SummonCreature(NPC_BLACKROCK_RAIDER,   -7845.6f, -1508.1f, 138.8f, 6.1f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
-                m_creature->SummonCreature(NPC_BLACKROCK_RAIDER,   -7859.8f, -1521.8f, 139.2f, 6.2f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
+                StartWave(1);
+                SummonOwned(NPC_BLACKROCK_AMBUSHER, -7844.3f, -1521.6f, 139.2f, 0.0f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
+                if (round != m_round) return;
+                SummonOwned(NPC_BLACKROCK_AMBUSHER, -7860.4f, -1507.8f, 141.0f, 6.0f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
+                if (round != m_round) return;
+                SummonOwned(NPC_BLACKROCK_RAIDER, -7845.6f, -1508.1f, 138.8f, 6.1f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
+                if (round != m_round) return;
+                SummonOwned(NPC_BLACKROCK_RAIDER, -7859.8f, -1521.8f, 139.2f, 6.2f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
                 break;
             case 24:
+                if (m_wave || m_completedWaves != 1) return;
                 DoScriptText(SAY_SEC_AMBUSH_START, m_creature);
                 SetEscortPaused(true);
-
-                m_creature->SummonCreature(NPC_BLACKROCK_AMBUSHER,     -8035.3f, -1222.2f, 135.5f, 5.1f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
-                m_creature->SummonCreature(NPC_FLAMESCALE_DRAGONSPAWN, -8037.5f, -1216.9f, 135.8f, 5.1f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
-                m_creature->SummonCreature(NPC_BLACKROCK_AMBUSHER,     -8009.5f, -1222.1f, 139.2f, 3.9f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
-                m_creature->SummonCreature(NPC_FLAMESCALE_DRAGONSPAWN, -8007.1f, -1219.4f, 140.1f, 3.9f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
+                StartWave(2);
+                SummonOwned(NPC_BLACKROCK_AMBUSHER, -8035.3f, -1222.2f, 135.5f, 5.1f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
+                if (round != m_round) return;
+                SummonOwned(NPC_FLAMESCALE_DRAGONSPAWN, -8037.5f, -1216.9f, 135.8f, 5.1f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
+                if (round != m_round) return;
+                SummonOwned(NPC_BLACKROCK_AMBUSHER, -8009.5f, -1222.1f, 139.2f, 3.9f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
+                if (round != m_round) return;
+                SummonOwned(NPC_FLAMESCALE_DRAGONSPAWN, -8007.1f, -1219.4f, 140.1f, 3.9f, TEMPSPAWN_TIMED_OOC_DESPAWN, 20000);
                 break;
             case 28:
-                m_creature->SummonCreature(NPC_SEARSCALE_DRAKE, -7897.8f, -1123.1f, 233.4f, 3.0f, TEMPSPAWN_TIMED_OOC_DESPAWN, 60000);
-                m_creature->SummonCreature(NPC_SEARSCALE_DRAKE, -7898.8f, -1125.1f, 193.9f, 3.0f, TEMPSPAWN_TIMED_OOC_DESPAWN, 60000);
-                m_creature->SummonCreature(NPC_SEARSCALE_DRAKE, -7895.6f, -1119.5f, 194.5f, 3.1f, TEMPSPAWN_TIMED_OOC_DESPAWN, 60000);
+                if (m_wave || m_completedWaves != 2) return;
+                StartWave(3);
+                SummonOwned(NPC_SEARSCALE_DRAKE, -7897.8f, -1123.1f, 233.4f, 3.0f, TEMPSPAWN_TIMED_OOC_DESPAWN, 60000);
+                if (round != m_round) return;
+                SummonOwned(NPC_SEARSCALE_DRAKE, -7898.8f, -1125.1f, 193.9f, 3.0f, TEMPSPAWN_TIMED_OOC_DESPAWN, 60000);
+                if (round != m_round) return;
+                SummonOwned(NPC_SEARSCALE_DRAKE, -7895.6f, -1119.5f, 194.5f, 3.1f, TEMPSPAWN_TIMED_OOC_DESPAWN, 60000);
                 break;
             case 30:
-            {
-                SetEscortPaused(true);
+                if (m_drakesAnnounced || (m_wave != 3 && m_completedWaves != 3)) return;
+                m_drakesAnnounced = true;
                 DoScriptText(SAY_THIRD_AMBUSH_START, m_creature);
-
-                Player* pPlayer = GetPlayerForEscort();
-                if (!pPlayer)
-                    return;
-
-                // Set all the dragons in combat
-                for (GuidList::const_iterator itr = m_lSearscaleGuidList.begin(); itr != m_lSearscaleGuidList.end(); ++itr)
+                if (m_completedWaves == 3)
                 {
-                    if (Creature* pTemp = m_creature->GetMap()->GetCreature(*itr))
-                        pTemp->AI()->AttackStart(pPlayer);
+                    DoScriptText(SAY_THIRD_AMBUSH_END, m_creature);
+                    SetEscortPaused(false);
+                    return;
                 }
-                break;
-            }
-            case 36:
-                DoScriptText(EMOTE_LAUGH, m_creature);
-                break;
-            case 45:
-                StartNextDialogueText(SAY_LAST_STAND);
                 SetEscortPaused(true);
-
-                m_creature->SummonCreature(NPC_HIGH_EXECUTIONER_NUZARK, -7532.3f, -1029.4f, 258.0f, 2.7f, TEMPSPAWN_TIMED_DESPAWN, 40000);
-                m_creature->SummonCreature(NPC_SHADOW_OF_LEXLORT,       -7532.8f, -1032.9f, 258.2f, 2.5f, TEMPSPAWN_TIMED_DESPAWN, 40000);
-                break;
+                if (Player* player = GetPlayerForEscort())
+                {
+                    for (ObjectGuid guid : m_waveActors)
+                        if (Creature* actor = m_creature->GetMap()->GetCreature(guid))
+                            if (IsOwned(actor) && actor->IsAlive()) actor->AI()->AttackStart(player);
+                }
+                else m_abortPending = true;
+                return;
+            case 36: DoScriptText(EMOTE_LAUGH, m_creature); break;
+            case 45:
+                if (m_completedWaves != 3 || !m_drakesAnnounced || m_outroStarted) return;
+                m_outroStarted = true;
+                SetEscortPaused(true);
+                SummonOwned(NPC_HIGH_EXECUTIONER_NUZARK, -7532.3f, -1029.4f, 258.0f, 2.7f, TEMPSPAWN_TIMED_DESPAWN, 40000);
+                if (round != m_round) return;
+                SummonOwned(NPC_SHADOW_OF_LEXLORT, -7532.8f, -1032.9f, 258.2f, 2.5f, TEMPSPAWN_TIMED_DESPAWN, 40000);
+                if (round == m_round && !m_abortPending) StartOutroDialogue();
+                return;
+            default: return;
+        }
+        if (round != m_round) return;
+        if (m_spawningWave)
+        {
+            m_spawningWave = false;
+            FinishWaveIfReady();
+            if (m_abortPending) SetEscortPaused(true);
         }
     }
 
-    void JustDidDialogueStep(int32 iEntry) override
+    void JustDidDialogueStep(int32 entry) override
     {
-        switch (iEntry)
+        if (!m_eventActive || !m_outroStarted || m_finished || m_abortPending || !m_updatingDialogue || m_dialogueRound != m_round) return;
+        switch (entry)
         {
-            case SAY_LEXLORT_1:
-                m_creature->SetStandState(UNIT_STAND_STATE_KNEEL);
-                break;
+            case SAY_LEXLORT_1: m_creature->SetStandState(UNIT_STAND_STATE_KNEEL); break;
             case SAY_LEXLORT_3:
-                // Note: this part isn't very clear. Should he just simply attack him, or charge him?
-                if (Creature* pNuzark = m_creature->GetMap()->GetCreature(m_nuzarkGuid))
-                    pNuzark->HandleEmote(EMOTE_ONESHOT_ATTACK2HTIGHT);
+                if (Creature* actor = GetSpeakerByEntry(NPC_HIGH_EXECUTIONER_NUZARK)) actor->HandleEmote(EMOTE_ONESHOT_ATTACK2HTIGHT);
                 break;
             case NPC_GRARK_LORKRUB:
-                // Fake death creature when the axe is lowered. This will allow us to finish the event
                 m_creature->InterruptNonMeleeSpells(true);
                 m_creature->StopMoving();
                 m_creature->ClearComboPointHolders();
@@ -238,81 +387,107 @@ struct npc_grark_lorkrubAI : public npc_escortAI, private DialogueHelper
                 m_creature->SetStandState(UNIT_STAND_STATE_DEAD);
                 break;
             case SAY_LEXLORT_4:
-                // Finish the quest
-                if (Player* pPlayer = GetPlayerForEscort())
-                    pPlayer->RewardPlayerAndGroupAtEventExplored(QUEST_ID_PRECARIOUS_PREDICAMENT, m_creature);
-                // Kill self
-                m_creature->Suicide();
+                m_finished = m_creditPending = true;
+                DisableDialogue(); // Reward only after DialogueHelper's cursor increment has returned.
                 break;
         }
     }
 
-    void JustSummoned(Creature* pSummoned) override
+    void JustSummoned(Creature* actor) override
     {
-        switch (pSummoned->GetEntry())
+        if (!IsOwned(actor)) return;
+        ObjectGuid guid = actor->GetObjectGuid();
+        if (IsMember(m_ownedActors, guid)) return;
+        if (!m_eventActive || m_finished || actor->GetEntry() != m_expectedEntry)
         {
-            case NPC_HIGH_EXECUTIONER_NUZARK: m_nuzarkGuid  = pSummoned->GetObjectGuid(); break;
-            case NPC_SHADOW_OF_LEXLORT:       m_lexlortGuid = pSummoned->GetObjectGuid(); break;
+            actor->ForcedDespawn();
+            return;
+        }
+        m_ownedActors.push_back(guid);
+        switch (actor->GetEntry())
+        {
+            case NPC_HIGH_EXECUTIONER_NUZARK: m_nuzarkGuid = guid; break;
+            case NPC_SHADOW_OF_LEXLORT: m_lexlortGuid = guid; break;
             case NPC_SEARSCALE_DRAKE:
-                // If it's the flying drake allow him to move in circles
+                m_waveActors.push_back(guid);
                 if (m_bIsFirstSearScale)
                 {
                     m_bIsFirstSearScale = false;
-
-                    pSummoned->SetLevitate(true);
-                    // ToDo: this guy should fly in circles above the creature
+                    actor->SetLevitate(true);
                 }
-                m_lSearscaleGuidList.push_back(pSummoned->GetObjectGuid());
+                m_lSearscaleGuidList.push_back(guid);
                 break;
-
             default:
-                // The hostile mobs should attack the player only
-                if (Player* pPlayer = GetPlayerForEscort())
-                    pSummoned->AI()->AttackStart(pPlayer);
+                m_waveActors.push_back(guid);
+                if (Player* player = GetPlayerForEscort()) actor->AI()->AttackStart(player);
                 break;
         }
     }
 
-    void SummonedCreatureJustDied(Creature* /*pSummoned*/) override
+    void SummonedCreatureJustDied(Creature* actor) override
     {
+        if (!m_eventActive || m_finished || !IsOwned(actor) || !IsMember(m_ownedActors, actor->GetObjectGuid())) return;
+        if (!IsMember(m_waveActors, actor->GetObjectGuid()))
+        {
+            if (actor->GetObjectGuid() == m_nuzarkGuid || actor->GetObjectGuid() == m_lexlortGuid) m_abortPending = true;
+            return;
+        }
+        m_waveActors.remove(actor->GetObjectGuid());
+        ++m_waveDeaths;
         ++m_uiKilledCreatures;
-
-        switch (m_uiKilledCreatures)
-        {
-            case 4:
-                DoScriptText(SAY_FIRST_AMBUSH_END, m_creature);
-                SetEscortPaused(false);
-                break;
-            case 8:
-                DoScriptText(SAY_SEC_AMBUSH_END, m_creature);
-                SetEscortPaused(false);
-                break;
-            case 11:
-                DoScriptText(SAY_THIRD_AMBUSH_END, m_creature);
-                SetEscortPaused(false);
-                break;
-        }
+        FinishWaveIfReady();
     }
 
-    Creature* GetSpeakerByEntry(uint32 uiEntry) override
+    void SummonedCreatureDespawn(Creature* actor) override
     {
-        switch (uiEntry)
-        {
-            case NPC_GRARK_LORKRUB:           return m_creature;
-            case NPC_HIGH_EXECUTIONER_NUZARK: return m_creature->GetMap()->GetCreature(m_nuzarkGuid);
-            case NPC_SHADOW_OF_LEXLORT:       return m_creature->GetMap()->GetCreature(m_lexlortGuid);
+        if (!IsOwned(actor) || !IsMember(m_ownedActors, actor->GetObjectGuid())) return;
+        ObjectGuid guid = actor->GetObjectGuid();
+        m_ownedActors.remove(guid);
+        m_lSearscaleGuidList.remove(guid);
+        // Death already removed legitimate kills from m_waveActors. An uncounted
+        // departure must fail safely, never manufacture kill progress.
+        if (m_eventActive && !m_finished && (IsMember(m_waveActors, guid) || guid == m_nuzarkGuid || guid == m_lexlortGuid)) m_abortPending = true;
+        m_waveActors.remove(guid);
+        if (m_nuzarkGuid == guid) m_nuzarkGuid.Clear();
+        if (m_lexlortGuid == guid) m_lexlortGuid.Clear();
+    }
 
-            default:
-                return nullptr;
-        }
+    Creature* GetSpeakerByEntry(uint32 entry) override
+    {
+        if (!m_eventActive || !m_outroStarted || m_finished || (m_updatingDialogue && m_dialogueRound != m_round)) return nullptr;
+        if (entry == NPC_GRARK_LORKRUB) return m_creature;
+        ObjectGuid guid = entry == NPC_HIGH_EXECUTIONER_NUZARK ? m_nuzarkGuid : entry == NPC_SHADOW_OF_LEXLORT ? m_lexlortGuid : ObjectGuid();
+        Creature* actor = m_creature->GetMap()->GetCreature(guid);
+        return IsOwned(actor) && actor->GetEntry() == entry && actor->IsAlive() && IsMember(m_ownedActors, guid) ? actor : nullptr;
     }
 
     void UpdateEscortAI(const uint32 diff) override
     {
-        DialogueUpdate(diff);
+        if (m_updatingDialogue) return;
+        const uint32 round = m_round;
+        if (m_eventActive)
+        {
+            if (m_dialoguePending) StartOutroDialogue();
+            else
+            {
+                m_updatingDialogue = true;
+                m_dialogueRound = m_round;
+                DialogueUpdate(diff);
+                m_updatingDialogue = false;
+            }
+            if (round != m_round || !m_eventActive) return;
+            if (m_abortPending) { AbortEvent(); return; }
+            if (m_creditPending)
+            {
+                m_creditPending = false;
+                if (Player* player = GetPlayerForEscort()) player->RewardPlayerAndGroupAtEventExplored(QUEST_ID_PRECARIOUS_PREDICAMENT, m_creature);
+                if (round == m_round && m_eventActive && m_finished) m_creature->Suicide();
+                return;
+            }
+            if (m_finished) return;
+        }
         CreatureAI::UpdateAI(diff);
-        if (m_shackled && m_creature->GetHealthPercent() <= 25.f)
-            HandleLowHp();
+        if (m_shackled && !HasEscortState(STATE_ESCORT_ESCORTING) && m_creature->GetHealthPercent() <= 25.f) HandleLowHp();
     }
 };
 
@@ -425,13 +600,28 @@ struct npc_klinfranAI : public ScriptedAI
         Reset();
     }
 
-    void BeginEvent(ObjectGuid playerGuid)
+    bool CanBeginEvent(Player* player) const
     {
-        m_hunterGuid = playerGuid;
+        return player && player->IsAlive() && player->IsInWorld() &&
+            player->GetMap() == m_creature->GetMap() &&
+            player->getClass() == CLASS_HUNTER &&
+            player->GetQuestStatus(QUEST_STAVE_OF_THE_ANCIENTS) == QUEST_STATUS_INCOMPLETE &&
+            m_creature->AI() == this && m_creature->IsAlive() && m_creature->IsInWorld() &&
+            m_creature->GetEntry() == NPC_NELSON_THE_NICE && !m_creature->IsInCombat() &&
+            !m_bTransform && m_creature->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
+    }
+
+    bool BeginEvent(Player* player)
+    {
+        if (!CanBeginEvent(player))
+            return false;
+
+        m_hunterGuid = player->GetObjectGuid();
         m_creature->GetMotionMaster()->Clear(false);
         m_creature->GetMotionMaster()->MoveIdle();
         m_creature->SetUInt32Value(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_NONE);
         m_bTransform = true;
+        return true;
     }
 
     /** Klinfran the Crazed */
@@ -442,7 +632,10 @@ struct npc_klinfranAI : public ScriptedAI
             m_hunterGuid = pWho->GetObjectGuid();
         }
         else
+        {
             DemonDespawn();
+            return;
+        }
     }
 
     void JustDied(Unit* /*pKiller*/) override
@@ -520,7 +713,10 @@ struct npc_klinfranAI : public ScriptedAI
             if (m_uiDespawn_Timer <= uiDiff)
             {
                 if (m_creature->IsAlive() && !m_creature->IsInCombat())
+                {
                     DemonDespawn(false);
+                    return;
+                }
             }
             else
                 m_uiDespawn_Timer -= uiDiff;
@@ -530,7 +726,10 @@ struct npc_klinfranAI : public ScriptedAI
             return;
 
         if (m_creature->getThreatManager().getThreatList().size() > 1 /*|| pHunter->IsDead()*/)
+        {
             DemonDespawn();
+            return;
+        }
 
         if (m_uiDemonic_Frenzy_Timer < uiDiff)
         {
@@ -549,17 +748,22 @@ struct npc_klinfranAI : public ScriptedAI
 
 bool GossipHello_npc_klinfran(Player* pPlayer, Creature* pCreature)
 {
-    if (pPlayer->GetQuestStatus(QUEST_STAVE_OF_THE_ANCIENTS) == QUEST_STATUS_INCOMPLETE)
-        pPlayer->ADD_GOSSIP_ITEM(0, GOSSIP_ITEM, GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF);
+    if (npc_klinfranAI* ai = dynamic_cast<npc_klinfranAI*>(pCreature->AI()))
+        if (ai->CanBeginEvent(pPlayer))
+            pPlayer->ADD_GOSSIP_ITEM(0, GOSSIP_ITEM, GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF);
 
     pPlayer->SEND_GOSSIP_MENU(pPlayer->GetGossipTextId(pCreature), pCreature->GetObjectGuid());
     return true;
 }
 
-bool GossipSelect_npc_klinfran(Player* pPlayer, Creature* pCreature, uint32 /*uiSender*/, uint32 /*uiAction*/)
+bool GossipSelect_npc_klinfran(Player* pPlayer, Creature* pCreature, uint32 sender, uint32 action)
 {
     pPlayer->CLOSE_GOSSIP_MENU();
-    ((npc_klinfranAI*)pCreature->AI())->BeginEvent(pPlayer->GetObjectGuid());
+    if (sender != GOSSIP_SENDER_MAIN || action != GOSSIP_ACTION_INFO_DEF)
+        return true;
+
+    if (npc_klinfranAI* ai = dynamic_cast<npc_klinfranAI*>(pCreature->AI()))
+        ai->BeginEvent(pPlayer);
     return true;
 }
 
