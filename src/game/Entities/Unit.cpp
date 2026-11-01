@@ -6056,6 +6056,11 @@ void Unit::CasterHitTargetWithSpell(Unit* realCaster, Unit* target, SpellEntry c
             target->SetInCombatWithAggressor(realCaster);
             realCaster->SetInCombatWithVictim(target);
             realCaster->GetCombatManager().TriggerCombatTimer(target);
+
+            // Match melee leash refresh for a stationary NPC actively attacking its victim.
+            if (!triggered && !realCaster->IsPlayerControlled() && realCaster->GetVictim() == target &&
+                realCaster->m_lastMoveTime + 3s < realCaster->GetMap()->GetCurrentClockTime() && !target->IsMoving())
+                realCaster->GetCombatManager().TriggerCombatTimer(false);
         }
 
         if (attack && spellInfo->HasAttribute(SPELL_ATTR_EX3_PVP_ENABLING))
