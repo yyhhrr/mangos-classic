@@ -154,7 +154,6 @@ typedef struct AUTH_LOGON_PROOF_S_BUILD_6005
 
 typedef struct AUTH_RECONNECT_PROOF_C
 {
-    uint8   cmd;
     uint8   R1[16];
     uint8   R2[20];
     uint8   R3[20];
@@ -341,6 +340,13 @@ bool AuthSocket::_HandleLogonChallenge()
         if ((remaining < sizeof(sAuthLogonChallengeBody) - AUTH_LOGON_MAX_NAME))
             return;
 
+        if (remaining > sizeof(sAuthLogonChallengeBody))
+        {
+            sLog.outError("[AuthChallenge] Oversized logon challenge body (%u bytes) from %s, closing connection.", remaining, self->GetRemoteAddress().c_str());
+            self->Close();
+            return;
+        }
+
         DEBUG_LOG("[AuthChallenge] got header, body is %#04x bytes", remaining);
 
         ///- Session is closed unless overriden
@@ -489,7 +495,7 @@ bool AuthSocket::_HandleLogonChallenge()
                             pkt->append(self->srp.GetGeneratorModulo().AsByteArray());
                             *pkt << uint8(32);
                             pkt->append(self->srp.GetPrime().AsByteArray(32));
-                            pkt->append(s.AsByteArray());// 32 bytes
+                            pkt->append(s.AsByteArray(32));// 32 bytes
                             pkt->append(VersionChallenge.data(), VersionChallenge.size());
                             uint8 securityFlags = 0;
 
@@ -719,8 +725,15 @@ bool AuthSocket::_HandleReconnectChallenge()
         uint16 remaining = header->size;
         DEBUG_LOG("[ReconnectChallenge] got header, body is %#04x bytes", remaining);
 
-        if ((remaining < sizeof(sAuthLogonChallengeBody) - 10))
+        if ((remaining < sizeof(sAuthLogonChallengeBody) - AUTH_LOGON_MAX_NAME))
             return;
+
+        if (remaining > sizeof(sAuthLogonChallengeBody))
+        {
+            sLog.outError("[ReconnectChallenge] Oversized reconnect challenge body (%u bytes) from %s, closing connection.", remaining, self->GetRemoteAddress().c_str());
+            self->Close();
+            return;
+        }
 
         ///- Session is closed unless overriden
         self->_status = STATUS_CLOSED;
@@ -735,7 +748,7 @@ bool AuthSocket::_HandleReconnectChallenge()
                 return;
             }
 
-            if (body->userName_len > 10)
+            if (body->userName_len > AUTH_LOGON_MAX_NAME)
                 return;
 
             body->userName[body->userName_len] = '\0';
@@ -830,6 +843,8 @@ bool AuthSocket::_HandleReconnectProof()
 
             // Set _status to authed!
             self->_status = STATUS_AUTHED;
+
+            self->ProcessIncomingData();
 
             return;
         }
