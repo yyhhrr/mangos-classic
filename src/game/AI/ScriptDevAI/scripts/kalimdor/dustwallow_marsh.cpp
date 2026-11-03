@@ -1498,7 +1498,7 @@ struct npc_theramore_spar_controller : public CombatAI
             if (actor->IsAlive() && !actor->IsInCombat())
             {
                 Position home = actor->GetRespawnPosition();
-                actor->GetMotionMaster()->Clear(true, true);
+                actor->GetMotionMaster()->Clear();
                 actor->GetMotionMaster()->MovePoint(0, home, FORCED_MOVEMENT_RUN);
             }
             it = m_savedStates.erase(it);
@@ -1799,7 +1799,7 @@ struct npc_theramore_spar_controller : public CombatAI
         }
         Position home = loser->GetRespawnPosition();
         loser->AI()->SetReactState(REACT_PASSIVE);
-        loser->GetMotionMaster()->Clear(true, true);
+        loser->GetMotionMaster()->Clear();
         loser->GetMotionMaster()->MovePoint(0, home, FORCED_MOVEMENT_RUN);
         winner->GetMotionMaster()->MovePoint(1, startingPositions.at(winningTeam), FORCED_MOVEMENT_WALK);
         auto next = teams.find(losingTeam);
@@ -1831,10 +1831,10 @@ struct npc_theramore_spar_controller : public CombatAI
 
         if (redMember && blueMember)
         {
-            redMember->GetMotionMaster()->Clear(true, true);
+            redMember->GetMotionMaster()->Clear();
             redMember->GetMotionMaster()->MovePoint(1, startingPositions.at(RED_TEAM), FORCED_MOVEMENT_RUN);
             redMember->AI()->SetReactState(REACT_PASSIVE);
-            blueMember->GetMotionMaster()->Clear(true, true);
+            blueMember->GetMotionMaster()->Clear();
             blueMember->GetMotionMaster()->MovePoint(1, startingPositions.at(BLUE_TEAM), FORCED_MOVEMENT_RUN);
             blueMember->AI()->SetReactState(REACT_PASSIVE);
         }
@@ -1913,7 +1913,7 @@ struct npc_theramore_spar_controller : public CombatAI
                 return;
             }
             actor->AI()->SetReactState(REACT_PASSIVE);
-            actor->GetMotionMaster()->Clear(true, true);
+            actor->GetMotionMaster()->Clear();
             actor->GetMotionMaster()->MovePoint(1, startingPositions.at(team), FORCED_MOVEMENT_WALK);
         }
         m_readyWait = 0;
