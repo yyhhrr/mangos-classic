@@ -32,6 +32,11 @@ GuardianAI::GuardianAI(Creature* creature) : CreatureEventAI(creature)
 
     switch (creature->GetUInt32Value(UNIT_CREATED_BY_SPELL))
     {
+        case 9515: // Dog Whistle - Tracking Hound
+            // Preserve owner-follow as the base movement when combat ends.
+            if (creature->GetEntry() == 6867 && owner->IsPlayer())
+                creature->SetDefaultMovementType(FOLLOW_MOTION_TYPE);
+            break;
         case 11939: // Thule Ravenclaw - Imp
             m_followDist = 3.f;
             break;
