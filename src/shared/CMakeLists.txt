@@ -21,6 +21,7 @@ set(LIBRARY_NAME shared)
 set(SRC_GRP_AUTH
     Auth/BigNumber.cpp
     Auth/BigNumber.h
+    Auth/SessionKey.h
     Auth/HMACSHA1.cpp
     Auth/HMACSHA1.h
     Auth/SARC4.cpp

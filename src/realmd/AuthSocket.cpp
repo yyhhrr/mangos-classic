@@ -31,6 +31,7 @@
 #include "AuthCodes.h"
 #include "Auth/CryptoHash.h"
 #include "Auth/SRP6.h"
+#include "Auth/SessionKey.h"
 #include "Util/CommonDefines.h"
 
 #include <ctime>
@@ -774,7 +775,15 @@ bool AuthSocket::_HandleReconnectChallenge()
             }
 
             Field* fields = queryResult->Fetch();
-            self->srp.SetStrongSessionKey(fields[0].GetString());
+            std::string sessionKeyStr = fields[0].GetString();
+            BigNumber sessionKey;
+            if (!SessionKey::Parse(sessionKeyStr, sessionKey))
+            {
+                sLog.outError("[ReconnectChallenge] Invalid stored session key, closing connection.");
+                self->Close();
+                return;
+            }
+            self->srp.SetStrongSessionKey(sessionKeyStr.c_str());
 
             ///- All good, await client's proof
             self->_status = STATUS_RECON_PROOF;
@@ -1160,17 +1169,25 @@ void AuthSocket::verifyVersionAndFinalizeAuthentication(std::shared_ptr<sAuthLog
         return;
     }
 
+    // Keep new database records at a canonical width without changing the
+    // numeric key or the existing SRP/world/reconnect proof byte conventions.
+    std::string K_hex = SessionKey::ToHex(srp.GetStrongSessionKey());
+    if (K_hex.empty())
+    {
+        sLog.outError("[AuthChallenge] Invalid generated session key, closing connection.");
+        Close();
+        return;
+    }
+
     BASIC_LOG("User '%s' successfully authenticated", _login.c_str());
 
     ///- Update the sessionkey, current ip and login time and reset number of failed logins in the account table for this account
     // No SQL injection (escaped user input) and IP address as received by socket
-    const char* K_hex = srp.GetStrongSessionKey().AsHexStr();
     // Note: In case of heavy load, this sync query will be a heavy bottleneck
-    LoginDatabase.DirectPExecute("UPDATE account SET sessionkey = '%s', locale = '%s', failed_logins = 0, os = '%s', platform = '%s' WHERE username = '%s'", K_hex, _safelocale.c_str(), m_os.c_str(), m_platform.c_str(), _safelogin.c_str());
+    LoginDatabase.DirectPExecute("UPDATE account SET sessionkey = '%s', locale = '%s', failed_logins = 0, os = '%s', platform = '%s' WHERE username = '%s'", K_hex.c_str(), _safelocale.c_str(), m_os.c_str(), m_platform.c_str(), _safelogin.c_str());
     std::unique_ptr<QueryResult> loginfail(LoginDatabase.PQuery("SELECT id FROM account WHERE username = '%s'", _safelogin.c_str()));
     if (loginfail)
         LoginDatabase.PExecute("INSERT INTO account_logons(accountId,ip,loginTime,loginSource) VALUES('%u','%s'," _NOW_ ",'%u')", loginfail->Fetch()[0].GetUInt32(), GetRemoteAddress().c_str(), LOGIN_TYPE_REALMD);
-    OPENSSL_free((void*)K_hex);
 
     ///- Finish SRP6 and send the final result to the client
     Sha1Hash sha;

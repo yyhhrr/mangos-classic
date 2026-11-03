@@ -28,6 +28,7 @@
 #include "Server/PacketLog.h"
 #include "Database/DatabaseEnv.h"
 #include "Auth/CryptoHash.h"
+#include "Auth/SessionKey.h"
 #include "Server/WorldSession.h"
 #include "Log/Log.h"
 #include "Server/DBCStores.h"
@@ -400,11 +401,10 @@ bool WorldSocket::HandleAuthSession(WorldPacket& recvPacket)
     if (security > SEC_ADMINISTRATOR)                       // prevent invalid security settings in DB
         security = SEC_ADMINISTRATOR;
 
-    // sessionkey must be a full 40 byte (80 hex char) SRP6 session key; anything else
-    // (in particular an empty string, which SetHexStr turns into 0) must not be accepted
-    // as it would let the session proof be computed without knowing the real key.
+    // Older realmd versions store BN_bn2hex without leading zero bytes. Accept
+    // those numeric encodings, but never an empty, zero, malformed or oversized key.
     std::string sessionKeyStr = fields[2].GetString();
-    if (sessionKeyStr.size() != 80)
+    if (!SessionKey::Parse(sessionKeyStr, K))
     {
         WorldPacket packet(SMSG_AUTH_RESPONSE, 1);
         packet << uint8(AUTH_FAILED);
@@ -413,8 +413,6 @@ bool WorldSocket::HandleAuthSession(WorldPacket& recvPacket)
         sLog.outError("WorldSocket::HandleAuthSession: Sent Auth Response (invalid session key for account %s).", safe_account.c_str());
         return false;
     }
-
-    K.SetHexStr(sessionKeyStr.c_str());
 
     time_t mutetime = time_t (fields[7].GetUInt64());
 
