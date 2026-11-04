@@ -34,6 +34,8 @@
 #include "Auth/SessionKey.h"
 #include "Util/CommonDefines.h"
 
+#include <algorithm>
+#include <cctype>
 #include <ctime>
 #include <memory>
 #include <utility>
@@ -185,6 +187,9 @@ typedef struct AuthHandler
 } AuthHandler;
 
 std::array<uint8, 16> VersionChallenge = { { 0xBA, 0xA3, 0x1E, 0x99, 0xA0, 0x0B, 0x21, 0x57, 0xFC, 0x37, 0x3F, 0xB3, 0x69, 0xCD, 0xD2, 0xF1 } };
+
+static const std::vector<uint8>& GetFakeAccountSecret();   // defined with BuildLogonChallengeSuccess, used by _HandleLogonChallenge
+static std::vector<uint8> ExpandFakeSecret(const std::vector<uint8>& secret, const std::string& login, const char* tag, bool matchSaltShape);
 const char logonProofUnknownAccount[4] = { CMD_AUTH_LOGON_PROOF, AUTH_LOGON_FAILED_UNKNOWN_ACCOUNT, 0, 0 };
 const char logonProofUnknownAccountVanilla[2] = { CMD_AUTH_LOGON_PROOF, AUTH_LOGON_FAILED_UNKNOWN_ACCOUNT };
 const char logonProofVersionInvalid[2] = { CMD_AUTH_LOGON_PROOF, AUTH_LOGON_FAILED_VERSION_INVALID };
@@ -196,7 +201,7 @@ AuthSocket::AuthSocket(boost::asio::io_context& context)
 {
 }
 
-bool AuthSocket::OnOpen()
+void AuthSocket::ArmTimeoutTimer()
 {
     m_timeoutTimer.expires_after(std::chrono::seconds(30));
     m_timeoutTimer.async_wait([&] (const boost::system::error_code& error)
@@ -209,6 +214,11 @@ bool AuthSocket::OnOpen()
         if (!IsClosed())
             Close();
     });
+}
+
+bool AuthSocket::OnOpen()
+{
+    ArmTimeoutTimer();
 
     return true;
 }
@@ -274,8 +284,11 @@ bool AuthSocket::ProcessIncomingData()
             return;
         }
 
-        // if we reach here, it means that a valid opcode was found and the handler completed successfully
-        self->m_timeoutTimer.cancel();
+        // if we reach here, it means that a valid opcode was found and the handler completed successfully;
+        // re-arm the timeout instead of just cancelling it, so a client that goes on to send a command out of
+        // order or with an unknown opcode (which are otherwise ignored without closing the socket) still gets
+        // disconnected eventually instead of holding the connection open forever
+        self->ArmTimeoutTimer();
     });
 
     return true;
@@ -412,21 +425,32 @@ bool AuthSocket::_HandleLogonChallenge()
             *pkt << uint8(CMD_AUTH_LOGON_CHALLENGE);
             *pkt << uint8(0x00);
 
-            ///- Verify that this IP is not in the ip_banned table
-            // No SQL injection possible (paste the IP address as passed by the socket)
-            std::unique_ptr<QueryResult> ip_banned_result(LoginDatabase.PQuery("SELECT expires_at FROM ip_banned "
-                "WHERE (expires_at = banned_at OR expires_at > " _UNIXTIME_ ") AND ip = '%s'", self->GetRemoteAddress().c_str()));
+            ///- Get the account details and its ban state in one query (a round trip to the database costs far more than a few extra columns)
+            // No SQL injection (escaped user name, IP address as passed by the socket)
+            auto queryResult = LoginDatabase.PQuery("SELECT a.id,a.locked,a.lockedIp,a.gmlevel,a.v,a.s,a.token,"
+                "(SELECT COUNT(*) FROM ip_banned WHERE (expires_at = banned_at OR expires_at > " _UNIXTIME_ ") AND ip = '%s'),"
+                "(SELECT COUNT(*) FROM account_banned WHERE account_id = a.id AND active = 1 AND expires_at = banned_at),"
+                "(SELECT COUNT(*) FROM account_banned WHERE account_id = a.id AND active = 1 AND expires_at <> banned_at AND expires_at > " _UNIXTIME_ ") "
+                "FROM account a WHERE a.username = '%s'", self->GetRemoteAddress().c_str(), self->_safelogin.c_str());
 
-            if (ip_banned_result)
+            ///- Verify that this IP is not in the ip_banned table
+            bool ipBanned;
+            if (queryResult)
+                ipBanned = (*queryResult)[7].GetUInt32() != 0;
+            else    // unknown account: the IP ban must still be reported first
+            {
+                std::unique_ptr<QueryResult> ip_banned_result(LoginDatabase.PQuery("SELECT expires_at FROM ip_banned "
+                    "WHERE (expires_at = banned_at OR expires_at > " _UNIXTIME_ ") AND ip = '%s'", self->GetRemoteAddress().c_str()));
+                ipBanned = ip_banned_result != nullptr;
+            }
+
+            if (ipBanned)
             {
                 *pkt << uint8(AUTH_LOGON_FAILED_FAIL_NOACCESS);
                 BASIC_LOG("[AuthChallenge] Banned ip %s tries to login!", self->GetRemoteAddress().c_str());
             }
             else
             {
-                ///- Get the account details from the account table
-                // No SQL injection (escaped user name)
-                auto queryResult = LoginDatabase.PQuery("SELECT id,locked,lockedIp,gmlevel,v,s,token FROM account WHERE username = '%s'", self->_safelogin.c_str());
                 if (queryResult)
                 {
                     Field* fields = queryResult->Fetch();
@@ -453,7 +477,8 @@ bool AuthSocket::_HandleLogonChallenge()
                     std::string databaseS = fields[5].GetCppString();
                     bool broken = false;
 
-                    if (!self->srp.SetVerifier(databaseV.c_str()) || !self->srp.SetSalt(databaseS.c_str()))
+                    // A locked account already got its reply above: never write a second result code
+                    if (!locked && (!self->srp.SetVerifier(databaseV.c_str()) || !self->srp.SetSalt(databaseS.c_str())))
                     {
                         *pkt << uint8(AUTH_LOGON_FAILED_FAIL_NOACCESS);
                         DEBUG_LOG("[AuthChallenge] Broken v/s values in database for account %s!", self->_login.c_str());
@@ -463,11 +488,10 @@ bool AuthSocket::_HandleLogonChallenge()
                     if (!locked && !broken)
                     {
                         ///- If the account is banned, reject the logon attempt
-                        auto banresult = LoginDatabase.PQuery("SELECT banned_at,expires_at FROM account_banned WHERE "
-                            "account_id = %u AND active = 1 AND (expires_at > " _UNIXTIME_ " OR expires_at = banned_at)", fields[0].GetUInt32());
-                        if (banresult)
+                        const bool permanentBan = fields[8].GetUInt32() != 0;
+                        if (permanentBan || fields[9].GetUInt32() != 0)
                         {
-                            if ((*banresult)[0].GetUInt64() == (*banresult)[1].GetUInt64())
+                            if (permanentBan)
                             {
                                 *pkt << uint8(AUTH_LOGON_FAILED_BANNED);
                                 BASIC_LOG("[AuthChallenge] Banned account %s tries to login!", self->_login.c_str());
@@ -481,67 +505,39 @@ bool AuthSocket::_HandleLogonChallenge()
                         else
                         {
                             DEBUG_LOG("database authentication values: v='%s' s='%s'", databaseV.c_str(), databaseS.c_str());
-
-                            BigNumber s;
-                            s.SetHexStr(databaseS.c_str());
-
-                            self->srp.CalculateHostPublicEphemeral();
-
-                            ///- Fill the response packet with the result
-                            *pkt << uint8(AUTH_LOGON_SUCCESS);
-
-                            // B may be calculated < 32B so we force minimal length to 32B
-                            pkt->append(self->srp.GetHostPublicEphemeral().AsByteArray(32));      // 32 bytes
-                            *pkt << uint8(1);
-                            pkt->append(self->srp.GetGeneratorModulo().AsByteArray());
-                            *pkt << uint8(32);
-                            pkt->append(self->srp.GetPrime().AsByteArray(32));
-                            pkt->append(s.AsByteArray(32));// 32 bytes
-                            pkt->append(VersionChallenge.data(), VersionChallenge.size());
-                            uint8 securityFlags = 0;
-
-                            self->_token = fields[6].GetCppString();
-                            if (!self->_token.empty() && self->_build >= 8606) // authenticator was added in 2.4.3
-                                securityFlags = SECURITY_FLAG_AUTHENTICATOR;
-
-                            if (!self->_token.empty() && self->_build <= 6141)
-                                securityFlags = SECURITY_FLAG_PIN;
-
-                            *pkt << uint8(securityFlags);                    // security flags (0x0...0x04)
-
-                            if (securityFlags & SECURITY_FLAG_PIN)          // PIN input
-                            {
-                                uint32 gridSeedPkt = self->m_gridSeed = static_cast<uint32>(0);
-                                EndianConvert(gridSeedPkt);
-                                self->m_serverSecuritySalt.SetRand(16 * 8); // 16 bytes random
-                                self->m_promptPin = true;
-
-                                *pkt << gridSeedPkt;
-                                pkt->append(self->m_serverSecuritySalt.AsByteArray(16).data(), 16);
-                            }
-
-                            if (securityFlags & SECURITY_FLAG_UNK)          // Matrix input
-                            {
-                                *pkt << uint8(0);
-                                *pkt << uint8(0);
-                                *pkt << uint8(0);
-                                *pkt << uint8(0);
-                                *pkt << uint64(0);
-                            }
-
-                            if (securityFlags & SECURITY_FLAG_AUTHENTICATOR)    // Authenticator input
-                                *pkt << uint8(1);
-
-                            uint8 secLevel = fields[3].GetUInt8();
-                            self->_accountSecurityLevel = secLevel <= SEC_ADMINISTRATOR ? AccountTypes(secLevel) : SEC_ADMINISTRATOR;
-
-                            ///- All good, await client's proof
-                            self->_status = STATUS_LOGON_PROOF;
+                            self->BuildLogonChallengeSuccess(*pkt, databaseV.c_str(), databaseS.c_str(), fields[3].GetUInt8(), fields[6].GetCppString());
                         }
                     }
                 }
-                else                                                // no account
-                    *pkt << uint8(AUTH_LOGON_FAILED_UNKNOWN_ACCOUNT);
+                else
+                {
+                    // Unknown account: a fake, but stable (same username -> same challenge every time) and
+                    // never-matchable challenge, so the client cannot tell this apart from a real but wrong password.
+                    // Sending AUTH_LOGON_FAILED_UNKNOWN_ACCOUNT here let an attacker enumerate valid account names
+                    // (see BUGS-INTERNES.md C8).
+                    // Case-fold the name first: the account lookup above is case-insensitive (DB default collation), so a
+                    // real account gives the same v/s for any casing of its name. Hashing the raw, unfolded name here
+                    // would make two casings of the same unknown name look like two different accounts, and (since a
+                    // real account's answer does not vary with casing either) that mismatch would itself tell a fake
+                    // challenge apart from a real one.
+                    std::string foldedLogin = self->_login;
+                    std::transform(foldedLogin.begin(), foldedLogin.end(), foldedLogin.begin(),
+                        [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+
+                    std::vector<uint8> vBytes = ExpandFakeSecret(GetFakeAccountSecret(), foldedLogin, "v", false);
+                    BigNumber fakeV;
+                    fakeV.SetBinary(vBytes.data(), vBytes.size());
+
+                    std::vector<uint8> sBytes = ExpandFakeSecret(GetFakeAccountSecret(), foldedLogin, "s", true);
+                    BigNumber fakeS;
+                    fakeS.SetBinary(sBytes.data(), sBytes.size());
+
+                    const char* v_hex = fakeV.AsHexStr();
+                    const char* s_hex = fakeS.AsHexStr();
+                    self->BuildLogonChallengeSuccess(*pkt, v_hex, s_hex, 0, "");
+                    OPENSSL_free((void*)v_hex);
+                    OPENSSL_free((void*)s_hex);
+                }
             }
 
             self->Write((const char*)pkt->contents(), pkt->size(), [self, pkt](const boost::system::error_code& /*error*/, std::size_t /*written*/) {});
@@ -624,6 +620,7 @@ bool AuthSocket::_HandleLogonProof()
                         if (ServerToken != clientToken)
                         {
                             BASIC_LOG("[AuthChallenge] Account %s tried to login with wrong pincode! Given %u Expected %u Pin Count: %u", self->_login.c_str(), clientToken, ServerToken, *pinCount);
+                            self->RegisterFailedLogin();
                             self->Write(logonProofUnknownAccount, sizeof(logonProofUnknownAccount), [self](const boost::system::error_code& /*error*/, std::size_t /*written*/) {});
                             return;
                         }
@@ -634,12 +631,15 @@ bool AuthSocket::_HandleLogonProof()
                 return;
             }
 
-            if ((lp->securityFlags & SECURITY_FLAG_PIN) && !self->_token.empty())
+            // m_promptPin is server-side state set during the challenge (token present, build <= 6141): the client cannot
+            // skip this check by replying with securityFlags = 0, unlike checking lp->securityFlags here instead
+            if (self->m_promptPin)
             {
                 int32 serverToken = self->generateToken(self->_token.c_str());
                 if (!self->VerifyPinData(serverToken, lp->pinData))
                 {
                     BASIC_LOG("[AuthChallenge] Account %s tried to login with wrong pincode!", self->_login.c_str());
+                    self->RegisterFailedLogin();
                     self->Write(logonProofUnknownAccount, sizeof(logonProofUnknownAccount), [self](const boost::system::error_code& /*error*/, std::size_t /*written*/) {});
                     return;
                 }
@@ -660,44 +660,7 @@ bool AuthSocket::_HandleLogonProof()
             }
 
             BASIC_LOG("[AuthChallenge] account %s tried to login with wrong password!", self->_login.c_str());
-
-            uint32 MaxWrongPassCount = sConfig.GetIntDefault("WrongPass.MaxCount", 0);
-            if (MaxWrongPassCount > 0)
-            {
-                // Increment number of failed logins by one and if it reaches the limit temporarily ban that account or IP
-                LoginDatabase.PExecute("UPDATE account SET failed_logins = failed_logins + 1 WHERE username = '%s'", self->_safelogin.c_str());
-
-                if (auto loginfail = LoginDatabase.PQuery("SELECT id, failed_logins FROM account WHERE username = '%s'", self->_safelogin.c_str()))
-                {
-                    Field* fields = loginfail->Fetch();
-                    uint32 failed_logins = fields[1].GetUInt32();
-
-                    if (failed_logins >= MaxWrongPassCount)
-                    {
-                        uint32 WrongPassBanTime = sConfig.GetIntDefault("WrongPass.BanTime", 600);
-                        bool WrongPassBanType = sConfig.GetBoolDefault("WrongPass.BanType", false);
-
-                        if (WrongPassBanType)
-                        {
-                            uint32 acc_id = fields[0].GetUInt32();
-                            LoginDatabase.PExecute("INSERT INTO account_banned(account_id, banned_at, expires_at, banned_by, reason, active)"
-                                "VALUES ('%u'," _UNIXTIME_ "," _UNIXTIME_ "+'%u','MaNGOS realmd','Failed login autoban',1)",
-                                acc_id, WrongPassBanTime);
-                            BASIC_LOG("[AuthChallenge] account %s got banned for '%u' seconds because it failed to authenticate '%u' times",
-                                self->_login.c_str(), WrongPassBanTime, failed_logins);
-                        }
-                        else
-                        {
-                            std::string current_ip = self->GetRemoteAddress();
-                            LoginDatabase.escape_string(current_ip);
-                            LoginDatabase.PExecute("INSERT INTO ip_banned VALUES ('%s'," _UNIXTIME_ "," _UNIXTIME_ "+'%u','MaNGOS realmd','Failed login autoban')",
-                                current_ip.c_str(), WrongPassBanTime);
-                            BASIC_LOG("[AuthChallenge] IP %s got banned for '%u' seconds because account %s failed to authenticate '%u' times",
-                                current_ip.c_str(), WrongPassBanTime, self->_login.c_str(), failed_logins);
-                        }
-                    }
-                }
-            }
+            self->RegisterFailedLogin();
             self->ProcessIncomingData();
         }
     });
@@ -764,7 +727,12 @@ bool AuthSocket::_HandleReconnectChallenge()
             EndianConvert(body->build);
             self->_build = body->build;
 
-            auto queryResult = LoginDatabase.PQuery("SELECT sessionkey FROM account WHERE username = '%s'", self->_safelogin.c_str());
+            // One query for everything: same checks as a full logon challenge (ip ban, account ban, IP lock).
+            // The remote address comes from the socket, the login is escaped: no SQL injection.
+            auto queryResult = LoginDatabase.PQuery("SELECT a.locked,a.lockedIp,a.sessionkey,"
+                "(SELECT COUNT(*) FROM ip_banned WHERE (expires_at = banned_at OR expires_at > " _UNIXTIME_ ") AND ip = '%s'),"
+                "(SELECT COUNT(*) FROM account_banned WHERE account_id = a.id AND active = 1 AND (expires_at > " _UNIXTIME_ " OR expires_at = banned_at)) "
+                "FROM account a WHERE a.username = '%s'", self->GetRemoteAddress().c_str(), self->_safelogin.c_str());
 
             // Stop if the account is not found
             if (!queryResult)
@@ -775,7 +743,25 @@ bool AuthSocket::_HandleReconnectChallenge()
             }
 
             Field* fields = queryResult->Fetch();
-            std::string sessionKeyStr = fields[0].GetString();
+
+            // The client cannot display an error at this step (it drops the link on a non-zero result byte),
+            // so just close: the player then falls back to a full logon, which reports the reason.
+            if (fields[3].GetUInt32() || fields[4].GetUInt32())
+            {
+                BASIC_LOG("[ReconnectChallenge] Banned %s %s tries to reconnect!", fields[3].GetUInt32() ? "ip" : "account",
+                    fields[3].GetUInt32() ? self->GetRemoteAddress().c_str() : self->_login.c_str());
+                self->Close();
+                return;
+            }
+
+            if (fields[0].GetUInt8() == 1 && strcmp(fields[1].GetString(), self->GetRemoteAddress().c_str()))
+            {
+                BASIC_LOG("[ReconnectChallenge] Account %s is locked to another ip, reconnect from %s refused!", self->_login.c_str(), self->GetRemoteAddress().c_str());
+                self->Close();
+                return;
+            }
+
+            std::string sessionKeyStr = fields[2].GetString();
             BigNumber sessionKey;
             if (!SessionKey::Parse(sessionKeyStr, sessionKey))
             {
@@ -831,7 +817,10 @@ bool AuthSocket::_HandleReconnectProof()
         Sha1Hash sha;
         sha.Initialize();
         sha.UpdateData(self->_login);
-        sha.UpdateBigNumbers(&t1, &self->_reconnectProof, &K, nullptr);
+        // Fixed widths, as the client: R1 and the challenge on 16 bytes, K on 40
+        sha.UpdateData(t1.AsByteArray(16));
+        sha.UpdateData(self->_reconnectProof.AsByteArray(16));
+        sha.UpdateData(K.AsByteArray(40));
         sha.Finalize();
 
         if (!memcmp(sha.GetDigest(), lp->R2, Sha1Hash::GetLength()))
@@ -1052,7 +1041,9 @@ uint8 AuthSocket::getEligibleRealmCount(uint8 accountSecurityLevel)
 {
     uint8 size = 0;
     for (const auto& i : sRealmList)
-        if (i.second.allowedSecurityLevel <= accountSecurityLevel)
+        // must match the skip condition of the loops that actually write the realms below:
+        // a higher-security realm is only left out of the list for plain players, not for GMs
+        if (accountSecurityLevel || i.second.allowedSecurityLevel == 0)
             size++;
 
     return size;
@@ -1160,6 +1151,112 @@ bool AuthSocket::VerifyPinData(uint32 pin, const sAuthLogonPinData_C& clientData
     return !memcmp(hash.AsDecStr(), clientHash.AsDecStr(), 20);
 }
 
+// A random secret, generated once per realmd process, used to derive a stable fake salt/verifier pair for an
+// account that does not exist (see BuildLogonChallengeSuccess's caller for unknown accounts).
+static const std::vector<uint8>& GetFakeAccountSecret()
+{
+    static const std::vector<uint8> secret = []
+    {
+        BigNumber r;
+        r.SetRand(20 * 8);
+        return r.AsByteArray();
+    }();
+    return secret;
+}
+
+// Expands a tagged hash of (secret, login) into 32 pseudorandom bytes, with the same high bit always set as
+// BigNumber::SetRand(256) forces on a real salt (BN_rand top=0): a single SHA1 digest is only 20 bytes, so stuffing
+// it into a 32-byte BigNumber left its 12 high-order bytes always zero -- a one-request fingerprint that told an
+// attacker apart a fake challenge from a real one, defeating the whole point of this function.
+static std::vector<uint8> ExpandFakeSecret(const std::vector<uint8>& secret, const std::string& login, const char* tag, bool matchSaltShape)
+{
+    std::vector<uint8> out;
+    for (uint8 counter = 0; out.size() < 32; ++counter)
+    {
+        Sha1Hash h;
+        h.Initialize();
+        h.UpdateData(secret);
+        h.UpdateData(login);
+        h.UpdateData(std::string(tag));
+        h.UpdateData(&counter, 1);
+        h.Finalize();
+        out.insert(out.end(), h.GetDigest(), h.GetDigest() + Sha1Hash::GetLength());
+    }
+    out.resize(32);
+
+    // Only a real SALT goes through BN_rand(.., top=0, bottom=1) (SRP6::CalculateVerifier's SetRand call): a real
+    // VERIFIER is g^x mod N, which has no such guarantee (its own top and bottom bits are close to evenly split).
+    // BigNumber::SetBinary takes little-endian input: byte 31 becomes the number's top byte, byte 0 its bottom one.
+    if (matchSaltShape)
+    {
+        out[31] |= 0x80;        // full 256-bit width, like every real salt
+        out[0]  |= 0x01;        // always odd, like every real salt
+    }
+    return out;
+}
+
+// Fills in a CMD_AUTH_LOGON_CHALLENGE success packet from a salt/verifier pair, real or fake, exactly as a real
+// account would get one: a client cannot tell a fake challenge apart from a real one at this step.
+void AuthSocket::BuildLogonChallengeSuccess(ByteBuffer& pkt, const char* v_hex, const char* s_hex, uint8 secLevel, const std::string& token)
+{
+    srp.SetVerifier(v_hex);
+    srp.SetSalt(s_hex);
+
+    BigNumber s;
+    s.SetHexStr(s_hex);
+
+    srp.CalculateHostPublicEphemeral();
+
+    pkt << uint8(AUTH_LOGON_SUCCESS);
+
+    // B may be calculated < 32B so we force minimal length to 32B
+    pkt.append(srp.GetHostPublicEphemeral().AsByteArray(32));      // 32 bytes
+    pkt << uint8(1);
+    pkt.append(srp.GetGeneratorModulo().AsByteArray());
+    pkt << uint8(32);
+    pkt.append(srp.GetPrime().AsByteArray(32));
+    pkt.append(s.AsByteArray(32));// 32 bytes
+    pkt.append(VersionChallenge.data(), VersionChallenge.size());
+    uint8 securityFlags = 0;
+
+    _token = token;
+    if (!_token.empty() && _build >= 8606) // authenticator was added in 2.4.3
+        securityFlags = SECURITY_FLAG_AUTHENTICATOR;
+
+    if (!_token.empty() && _build <= 6141)
+        securityFlags = SECURITY_FLAG_PIN;
+
+    pkt << uint8(securityFlags);                    // security flags (0x0...0x04)
+
+    if (securityFlags & SECURITY_FLAG_PIN)          // PIN input
+    {
+        uint32 gridSeedPkt = m_gridSeed = static_cast<uint32>(0);
+        EndianConvert(gridSeedPkt);
+        m_serverSecuritySalt.SetRand(16 * 8); // 16 bytes random
+        m_promptPin = true;
+
+        pkt << gridSeedPkt;
+        pkt.append(m_serverSecuritySalt.AsByteArray(16).data(), 16);
+    }
+
+    if (securityFlags & SECURITY_FLAG_UNK)          // Matrix input
+    {
+        pkt << uint8(0);
+        pkt << uint8(0);
+        pkt << uint8(0);
+        pkt << uint8(0);
+        pkt << uint64(0);
+    }
+
+    if (securityFlags & SECURITY_FLAG_AUTHENTICATOR)    // Authenticator input
+        pkt << uint8(1);
+
+    _accountSecurityLevel = secLevel <= SEC_ADMINISTRATOR ? AccountTypes(secLevel) : SEC_ADMINISTRATOR;
+
+    ///- All good, await client's proof
+    _status = STATUS_LOGON_PROOF;
+}
+
 void AuthSocket::verifyVersionAndFinalizeAuthentication(std::shared_ptr<sAuthLogonProof_C> lp)
 {
     if (!VerifyVersion(lp->A, sizeof(lp->A), lp->crc_hash, false))
@@ -1199,6 +1296,49 @@ void AuthSocket::verifyVersionAndFinalizeAuthentication(std::shared_ptr<sAuthLog
     _status = STATUS_AUTHED;
 
     ProcessIncomingData();
+}
+
+// Counts a wrong password, PIN or authenticator code towards WrongPass.MaxCount, and bans the account or the IP
+// once the threshold is reached (shared by all three failure paths of the logon proof).
+void AuthSocket::RegisterFailedLogin()
+{
+    uint32 MaxWrongPassCount = sConfig.GetIntDefault("WrongPass.MaxCount", 0);
+    if (MaxWrongPassCount == 0)
+        return;
+
+    // Increment number of failed logins by one and if it reaches the limit temporarily ban that account or IP
+    LoginDatabase.PExecute("UPDATE account SET failed_logins = failed_logins + 1 WHERE username = '%s'", _safelogin.c_str());
+
+    auto loginfail = LoginDatabase.PQuery("SELECT id, failed_logins FROM account WHERE username = '%s'", _safelogin.c_str());
+    if (!loginfail)
+        return;
+
+    Field* fields = loginfail->Fetch();
+    uint32 failed_logins = fields[1].GetUInt32();
+    if (failed_logins < MaxWrongPassCount)
+        return;
+
+    uint32 WrongPassBanTime = sConfig.GetIntDefault("WrongPass.BanTime", 600);
+    bool WrongPassBanType = sConfig.GetBoolDefault("WrongPass.BanType", false);
+
+    if (WrongPassBanType)
+    {
+        uint32 acc_id = fields[0].GetUInt32();
+        LoginDatabase.PExecute("INSERT INTO account_banned(account_id, banned_at, expires_at, banned_by, reason, active)"
+            "VALUES ('%u'," _UNIXTIME_ "," _UNIXTIME_ "+'%u','MaNGOS realmd','Failed login autoban',1)",
+            acc_id, WrongPassBanTime);
+        BASIC_LOG("[AuthChallenge] account %s got banned for '%u' seconds because it failed to authenticate '%u' times",
+            _login.c_str(), WrongPassBanTime, failed_logins);
+    }
+    else
+    {
+        std::string current_ip = GetRemoteAddress();
+        LoginDatabase.escape_string(current_ip);
+        LoginDatabase.PExecute("INSERT INTO ip_banned VALUES ('%s'," _UNIXTIME_ "," _UNIXTIME_ "+'%u','MaNGOS realmd','Failed login autoban')",
+            current_ip.c_str(), WrongPassBanTime);
+        BASIC_LOG("[AuthChallenge] IP %s got banned for '%u' seconds because account %s failed to authenticate '%u' times",
+            current_ip.c_str(), WrongPassBanTime, _login.c_str(), failed_logins);
+    }
 }
 
 int32 AuthSocket::generateToken(char const* b32key)

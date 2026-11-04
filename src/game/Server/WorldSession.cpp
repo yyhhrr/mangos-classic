@@ -486,7 +486,6 @@ bool WorldSession::Update(uint32 diff)
 
                 m_socket = m_requestSocket;
                 m_requestSocket = nullptr;
-                sLog.outDetail("New Session key %s", m_socket->GetSessionKey().AsHexStr());
             }
             
             if (m_inQueue)

@@ -450,7 +450,7 @@ struct npc_av_supportAI : public CreatureEventAI
         const uint32 entry = alliance ? 178670 : 178465;
         const Position pos = alliance ? Position(-199.993f, -343.217f, 6.77662f, 3.68265f) : Position(-360.139f, -133.403f, 26.4856f, 4.41568f);
         GameObject* go = new GameObject;
-        const uint32 guid = m_creature->GetMap()->GenerateLocalLowGuid(HIGHGUID_GAMEOBJECT);
+        const uint32 guid = m_creature->GetMap()->GenerateLocalLowGuid(HIGHGUID_GAMEOBJECT, entry);
         if (!go->Create(guid, guid, entry, m_creature->GetMap(), pos.x, pos.y, pos.z, pos.o))
         { delete go; Finish(false); return; }
         // NPC ownership disables the core's player-owned ritual branch. Our use
