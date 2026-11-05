@@ -58,6 +58,7 @@ class DungeonPersistentState;
 class Spell;
 class Item;
 struct FactionTemplateEntry;
+struct VendorItem;
 
 #ifdef BUILD_DEPRECATED_PLAYERBOT
 #include "PlayerBot/Base/PlayerbotMgr.h"
@@ -1165,8 +1166,8 @@ class Player : public Unit
 
         uint32 GetMaxKeyringClientSize() const; // number of slots available depending on the Player's level - limited by Client GUI
         void SendEquipError(InventoryResult msg, Item* pItem, Item* pItem2 = nullptr, uint8 slot = 0, uint32 itemid = 0) const;
-        void SendBuyError(BuyResult msg, Creature* pCreature, uint32 item, uint32 param) const;
-        void SendSellError(SellResult msg, Creature* pCreature, ObjectGuid itemGuid, uint32 param) const;
+        void SendBuyError(BuyResult msg, Creature* pCreature, uint32 vendorSlot) const;
+        void SendSellError(SellResult msg, Creature* pCreature, ObjectGuid itemGuid) const;
         void SendOpenContainer(ObjectGuid itemGuid);
         void AddWeaponProficiency(uint32 newflag) { m_WeaponProficiency |= newflag; }
         void AddArmorProficiency(uint32 newflag) { m_ArmorProficiency |= newflag; }
@@ -1178,10 +1179,12 @@ class Player : public Unit
             return mainItem && mainItem->GetProto()->InventoryType == INVTYPE_2HWEAPON;
         }
         void SendNewItem(Item* item, uint32 count, bool received, bool created, bool broadcast = false, bool showInChat = true);
+        bool CanSeeVendorItem(Creature const* vendor, VendorItem const* vendorItem, ItemPrototype const* proto) const;
         bool BuyItemFromVendor(ObjectGuid vendorGuid, uint32 item, uint8 count, uint8 bag, uint8 slot);
 
         float GetReputationPriceDiscount(Creature const* creature) const;
         float GetReputationPriceDiscount(FactionTemplateEntry const* factionTemplate) const;
+        float GetRepairPriceMultiplier(Creature const* vendor) const;
 
         Player* GetTrader() const { return m_trade ? m_trade->GetTrader() : nullptr; }
         TradeData* GetTradeData() const { return m_trade; }
