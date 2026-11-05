@@ -1310,7 +1310,7 @@ class Player : public Unit
         }
         uint32 GetReqKillOrCastCurrentCount(uint32 quest_id, int32 entry) const;
         void AreaExploredOrEventHappens(uint32 questId);
-        void ItemAddedQuestCheck(uint32 entry, uint32 count);
+        void ItemAddedQuestCheck(uint32 entry, uint32 count, bool sendQuestUpdate = true);
         void ItemRemovedQuestCheck(uint32 entry, uint32 count);
         void KilledMonster(CreatureInfo const* cInfo, Creature const* creature);
         void KilledMonsterCredit(uint32 entry, ObjectGuid guid = ObjectGuid());
@@ -1632,7 +1632,7 @@ class Player : public Unit
         WorldSession* GetSession() const { return m_session; }
         void SetSession(WorldSession* s) { m_session = s; }
 
-        void BuildCreateUpdateBlockForPlayer(UpdateData* data, Player* target) const override;
+        void BuildCreateUpdateBlockForPlayer(UpdateData& data, Player* target) const override;
         void DestroyForPlayer(Player* target) const override;
         void SendLogXPGain(uint32 GivenXP, Unit* victim, uint32 RestXP, float groupRate) const;
 
@@ -2077,13 +2077,14 @@ class Player : public Unit
         // currently visible objects at player client
         bool HasAtClient(WorldObject const* u) { return u == this || m_clientGUIDs.find(u->GetObjectGuid()) != m_clientGUIDs.end(); }
         void AddAtClient(WorldObject* target);
-        void RemoveAtClient(WorldObject* target);
+        void RemoveAtClient(WorldObject* target, bool skipRemovalOfAt = false);
+        void DestroyAtClient(WorldObject* target, bool skipRemovalOfAt = false);
         GuidSet& GetClientGuids() { return m_clientGUIDs; }
 
         bool IsVisibleInGridForPlayer(Player* pl) const override;
         bool IsVisibleGloballyFor(Player* u) const;
 
-        void UpdateVisibilityOf(WorldObject const* viewPoint, WorldObject* target);
+        void UpdateVisibilityOf(WorldObject const* viewPoint, WorldObject* target, UpdateData& updateData);
 
         template<class T>
         void UpdateVisibilityOf(WorldObject const* viewPoint, T* target, UpdateData& data, WorldObjectSet& visibleNow);
@@ -2548,8 +2549,6 @@ class Player : public Unit
 
         bool m_needsZoneUpdate;
         uint32 m_newZone;
-
-        uint32 m_DetectInvTimer;
 
         uint32 m_LFGAreaId;
 

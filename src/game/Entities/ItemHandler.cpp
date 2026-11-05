@@ -501,14 +501,14 @@ void WorldSession::HandleSellItemOpcode(WorldPacket& recv_data)
     // prevent sell not owner item
     if (_player->GetObjectGuid() != pItem->GetOwnerGuid())
     {
-        _player->SendSellError(SellResult::CANT_SELL_ITEM, pCreature, itemGuid);
+        _player->SendSellError(SellResult::YOU_DONT_OWN_THAT_ITEM, pCreature, itemGuid);
         return;
     }
 
     // prevent sell non empty bag by drag-and-drop at vendor's item list
     if (pItem->IsBag() && !((Bag*)pItem)->IsEmpty())
     {
-        _player->SendSellError(SellResult::CANT_SELL_ITEM, pCreature, itemGuid);
+        _player->SendSellError(SellResult::ONLY_EMPTY_BAG, pCreature, itemGuid);
         return;
     }
 
@@ -563,13 +563,14 @@ void WorldSession::HandleSellItemOpcode(WorldPacket& recv_data)
         _player->InterruptNonMeleeSpells(false);
         pItem->SetCount(pItem->GetCount() - count);
         _player->ItemRemovedQuestCheck(pItem->GetEntry(), count);
+        UpdateData data;
         if (_player->IsInWorld())
-            pItem->SendCreateUpdateToPlayer(_player);
+            _player->GetMap()->AddUpdateObject(pItem);
         pItem->SetState(ITEM_CHANGED, _player);
 
         _player->AddItemToBuyBackSlot(pNewItem, money);
         if (_player->IsInWorld())
-            pNewItem->SendCreateUpdateToPlayer(_player);
+            _player->GetMap()->AddUpdateCreateObject(pNewItem);
     }
     else
     {
