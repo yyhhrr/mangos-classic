@@ -123,6 +123,8 @@ class MotionMaster : private std::stack<MovementGenerator*>
                 DelayedClean(reset, all);
             else
                 DirectClean(reset, all);
+
+            UpdateObjectUpdateTimer();
         }
         void MovementExpired(bool reset = true)
         {
@@ -130,6 +132,8 @@ class MotionMaster : private std::stack<MovementGenerator*>
                 DelayedExpire(reset);
             else
                 DirectExpire(reset);
+
+            UpdateObjectUpdateTimer();
         }
 
         void MoveIdle();
@@ -181,7 +185,7 @@ class MotionMaster : private std::stack<MovementGenerator*>
 
     private:
         void Mutate(MovementGenerator* m);                  // use Move* functions instead
-        void InitializeObjectUpdateTimer(const MovementGeneratorType type);
+        void UpdateObjectUpdateTimer();
 
         void DirectClean(bool reset, bool all);
         void DelayedClean(bool reset, bool all);

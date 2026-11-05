@@ -8356,6 +8356,21 @@ void Unit::UpdateVisibilityAndView()
         }
     }
 
+    if (GetVisibility() == VISIBILITY_GROUP_NO_DETECT)
+    {
+        // This state is transient when entering stealth: clear old visibility before it changes again.
+        // Keep removal packets queued, and preserve the usual GM, group and tracking exceptions.
+        GuidSet clients = GetClientGuidsIAmAt();
+        UpdateData data;
+        for (ObjectGuid clientGuid : clients)
+        {
+            if (Player* client = GetMap()->GetPlayer(clientGuid))
+                if (client->HasAtClient(this))
+                    client->UpdateVisibilityOf(client->GetCamera().GetBody(), this, data);
+        }
+        GetViewPoint().Event_ViewPointVisibilityChanged();
+    }
+
     GetMap()->AddUpdateMovementObject(this);
     ScheduleAINotify(0);
 }

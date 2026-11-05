@@ -1054,7 +1054,7 @@ void Map::Update(const uint32& t_diff)
     {
         CellPair p = MaNGOS::ComputeCellPair(largeObj->GetPositionX(), largeObj->GetPositionY());
         Cell cell(p);
-        uint32 cell_id = (cell.GridY() * TOTAL_NUMBER_OF_CELLS_PER_MAP) + cell.GridX();
+        uint32 cell_id = (p.y_coord * TOTAL_NUMBER_OF_CELLS_PER_MAP) + p.x_coord;
         if (!isCellMarked(cell_id))
         {
             markCell(cell_id);
@@ -1248,7 +1248,7 @@ void Map::Remove(T* obj, bool remove)
     m_objectsToClientMovementUpdate.erase(obj);
     m_visibilityAdded.erase(obj);
 
-    if constexpr (std::is_same_v<T, Unit>)
+    if constexpr (std::is_base_of_v<Unit, T>)
         m_waypointingNpcs.erase(obj);
 
     if (gridLoaded)

@@ -77,8 +77,6 @@ void MotionMaster::Initialize()
         auto creature = static_cast<Creature*>(m_owner);
         m_currentPathId = m_defaultPathId;
         MovementGenerator* movement = FactorySelector::selectMovementGenerator(creature);
-        // Initialize update timers
-        InitializeObjectUpdateTimer(movement ? movement->GetMovementGeneratorType() : IDLE_MOTION_TYPE);
         push(movement == nullptr ? &si_idleMovement : movement);
         top()->Initialize(*m_owner);
 
@@ -98,6 +96,8 @@ void MotionMaster::Initialize()
     }
     else
         push(&si_idleMovement);
+
+    UpdateObjectUpdateTimer();
 }
 
 MotionMaster::~MotionMaster()
@@ -156,6 +156,8 @@ void MotionMaster::UpdateMotion(uint32 diff)
             top()->Reset(*m_owner);
             m_cleanFlag &= ~MMCF_RESET;
         }
+
+        UpdateObjectUpdateTimer();
     }
 }
 
@@ -276,6 +278,8 @@ void MotionMaster::MoveIdle()
 {
     if (empty() || !isStatic(top()))
         push(&si_idleMovement);
+
+    UpdateObjectUpdateTimer();
 }
 
 void MotionMaster::MoveRandomAroundPoint(float x, float y, float z, float radius, float verticalZ, uint32 timer, bool walk)
@@ -619,6 +623,8 @@ void MotionMaster::Mutate(MovementGenerator* m)
 
     m->Initialize(*m_owner);
     push(m);
+
+    UpdateObjectUpdateTimer();
 }
 
 void MotionMaster::InterruptPanic()
@@ -752,17 +758,22 @@ bool MotionMaster::GetDestination(float& x, float& y, float& z) const
     return true;
 }
 
-void MotionMaster::InitializeObjectUpdateTimer(const MovementGeneratorType type)
+void MotionMaster::UpdateObjectUpdateTimer()
 {
-    if (m_owner->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PLAYER_CONTROLLED))
+    if (m_owner->IsPlayer() || m_owner->IsPlayerControlled() || m_owner->IsInCombat())
     {
-        if (m_owner->GetNextUpdateTime())
-            m_owner->SetNextUpdateTime(0);
-
+        m_owner->SetNextUpdateTime(0);
         return;
     }
 
-    switch (type)
+    // Movement changes must not throttle pending spells or periodic aura ticks.
+    if (!m_owner->m_events.IsEmpty() || m_owner->HasPeriodicAura())
+    {
+        m_owner->SetNextUpdateTime(1);
+        return;
+    }
+
+    switch (GetCurrentMovementGeneratorType())
     {
         case IDLE_MOTION_TYPE:
             m_owner->SetNextUpdateTime(urand(500, 1000));
@@ -771,8 +782,8 @@ void MotionMaster::InitializeObjectUpdateTimer(const MovementGeneratorType type)
             m_owner->SetNextUpdateTime(urand(250, 500));
             return;
         default:
-            if (m_owner->GetNextUpdateTime())
-                m_owner->SetNextUpdateTime(0);
+            // Preserve accumulated idle time for the first moving update.
+            m_owner->SetNextUpdateTime(1);
             return;
     }
 }
