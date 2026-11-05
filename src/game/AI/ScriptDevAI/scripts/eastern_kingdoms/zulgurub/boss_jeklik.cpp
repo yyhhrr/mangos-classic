@@ -17,7 +17,7 @@
 /* ScriptData
 SDName: Boss_Jeklik
 SD%Complete: 85
-SDComment: Some minor improvements are required; Bat rider movement not implemented
+SDComment: Bat riders use creature_movement_template path 1
 SDCategory: Zul'Gurub
 EndScriptData
 
@@ -26,6 +26,7 @@ EndScriptData
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "zulgurub.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
+#include "Spells/Scripts/SpellScript.h"
 
 enum
 {
@@ -50,8 +51,7 @@ enum
     SPELL_MIND_FLAY             = 23953,
     SPELL_GREATER_HEAL          = 23954,
 
-    // SPELL_PSYHIC_SCREAM      = 22884,                   // spell not confirmed - needs research
-    // curse of blood also unconfirmed
+    // Psychic Scream and Curse of Blood are configured in the phase-two spell list.
 
     // Common spells
     SPELL_GREEN_CHANNELING      = 13540,                    // visual for idle mode
@@ -59,7 +59,9 @@ enum
     SPELL_TRANSFORM_VISUAL      = 24085,
 
     // Batriders Spell
-    SPELL_LIQUID_FIRE           = 23968,                    // script effect - triggers 23971,
+    SPELL_LIQUID_FIRE           = 23968,
+    SPELL_THROW_LIQUID_FIRE     = 23970,
+    SPELL_SUMMON_LIQUID_FIRE    = 23971,
     SPELL_UNSTABLE_CONCOCTION   = 24024,
     SPELL_THRASH                = 8876,
     SPELL_DEMORALIZING_SHOUT    = 23511,
@@ -70,9 +72,26 @@ enum
     NPC_FRENZIED_BAT            = 14965,
     NPC_BAT_RIDER               = 14750,
 
+    GO_LIQUID_FIRE              = 180125,
+
     SPELL_LIST_PHASE_1 = 1451701,
     SPELL_LIST_PHASE_2 = 1451702,
 };
+
+// Only the riders summoned for this encounter may select targets or leave fire.
+static Creature* GetActiveJeklikForBatRider(Unit* caster)
+{
+    if (!caster || caster->GetTypeId() != TYPEID_UNIT || caster->GetEntry() != NPC_BAT_RIDER ||
+        !static_cast<Creature*>(caster)->IsTemporarySummon())
+        return nullptr;
+
+    Unit* summoner = caster->GetSpawner();
+    if (!summoner || summoner->GetTypeId() != TYPEID_UNIT || summoner->GetEntry() != NPC_JEKLIK ||
+        !summoner->IsAlive() || !summoner->IsInCombat())
+        return nullptr;
+
+    return static_cast<Creature*>(summoner);
+}
 
 enum JeklikActions
 {
@@ -95,18 +114,22 @@ struct boss_jeklikAI : public CombatAI
                 bat->CastSpell(nullptr, SPELL_LIQUID_FIRE, TRIGGERED_OLD_TRIGGERED);
                 bat->GetMotionMaster()->MovePath(1);
             }
+            m_delayedBat.Clear();
         });
     }
 
     ScriptedInstance* m_instance;
 
     GuidList m_lBombRiderGuidsList;
+    GuidList m_liquidFireGuids;
 
     ObjectGuid m_delayedBat;
+    uint8 m_bombRidersSummoned = 0;
 
     void Reset() override
     {
         CombatAI::Reset();
+        DoDespawnBombRiders();
 
         m_creature->SetSpellList(SPELL_LIST_PHASE_1);
 
@@ -140,6 +163,7 @@ struct boss_jeklikAI : public CombatAI
     void JustReachedHome() override
     {
         DoDespawnBombRiders();
+        DoCastSpellIfCan(m_creature, SPELL_GREEN_CHANNELING, CAST_AURA_NOT_PRESENT);
 
         if (m_instance)
             m_instance->SetData(TYPE_JEKLIK, FAIL);
@@ -162,8 +186,16 @@ struct boss_jeklikAI : public CombatAI
         }
     }
 
+    void JustSummoned(GameObject* summoned) override
+    {
+        if (summoned->GetEntry() == GO_LIQUID_FIRE)
+            m_liquidFireGuids.push_back(summoned->GetObjectGuid());
+    }
+
     void EnterEvadeMode() override
     {
+        DoDespawnBombRiders();
+
         // Override MMaps, and teleport to original position
         float fX, fY, fZ, fO;
         m_creature->GetRespawnCoord(fX, fY, fZ, &fO);
@@ -184,14 +216,41 @@ struct boss_jeklikAI : public CombatAI
     // Wrapper to despawn the bomb riders on evade / death
     void DoDespawnBombRiders()
     {
-        if (m_lBombRiderGuidsList.empty())
-            return;
+        DisableTimer(JEKLIK_DELAYED_BAT);
+        m_delayedBat.Clear();
+        m_bombRidersSummoned = 0;
 
         for (GuidList::const_iterator itr = m_lBombRiderGuidsList.begin(); itr != m_lBombRiderGuidsList.end(); ++itr)
         {
             if (Creature* pRider = m_creature->GetMap()->GetCreature(*itr))
                 pRider->ForcedDespawn();
         }
+        m_lBombRiderGuidsList.clear();
+
+        for (ObjectGuid guid : m_liquidFireGuids)
+            if (GameObject* fire = m_creature->GetMap()->GetGameObject(guid))
+                fire->Delete();
+        m_liquidFireGuids.clear();
+    }
+
+    bool SummonBombRider(Position const& pos, bool delayed)
+    {
+        Creature* bat = m_creature->SummonCreature(NPC_BAT_RIDER, pos.x, pos.y, pos.z, pos.o, TEMPSPAWN_DEAD_DESPAWN, 0);
+        if (!bat)
+            return false;
+
+        if (delayed)
+        {
+            bat->GetMotionMaster()->MoveIdle();
+            m_delayedBat = bat->GetObjectGuid();
+            ResetTimer(JEKLIK_DELAYED_BAT, 15000);
+        }
+        else
+        {
+            bat->CastSpell(nullptr, SPELL_LIQUID_FIRE, TRIGGERED_OLD_TRIGGERED);
+            bat->GetMotionMaster()->MovePath(1);
+        }
+        return true;
     }
 
     void ExecuteAction(uint32 action) override
@@ -216,25 +275,23 @@ struct boss_jeklikAI : public CombatAI
                 if (m_creature->GetHealthPercent() < 35.0f)
                 {
                     // TODO: check if more positions exist
-                    const std::vector<Position> positions =
+                    static Position const positions[] =
                     {
                         {-12298.03f, -1368.506f, 145.3976f, 4.799655f}, // waits 15 sec
                         {-12301.69f, -1371.292f, 145.0924f, 4.747295f},
                     };
 
-                    Position const& pos1 = positions[0];
-                    Creature* bat = m_creature->SummonCreature(NPC_BAT_RIDER, pos1.x, pos1.y, pos1.z, 0, TEMPSPAWN_DEAD_DESPAWN, 0);
-                    bat->GetMotionMaster()->MoveIdle();
-                    m_delayedBat = bat->GetObjectGuid();
-                    ResetTimer(JEKLIK_DELAYED_BAT, 15000);
+                    uint8 previousSummons = m_bombRidersSummoned;
+                    if (!(m_bombRidersSummoned & 1) && SummonBombRider(positions[0], true))
+                        m_bombRidersSummoned |= 1;
+                    if (!(m_bombRidersSummoned & 2) && SummonBombRider(positions[1], false))
+                        m_bombRidersSummoned |= 2;
 
-                    Position const& pos2 = positions[1];
-                    bat = m_creature->SummonCreature(NPC_BAT_RIDER, pos2.x, pos2.y, pos2.z, 0, TEMPSPAWN_DEAD_DESPAWN, 0);
-                    bat->CastSpell(nullptr, SPELL_LIQUID_FIRE, TRIGGERED_OLD_TRIGGERED);
-                    bat->GetMotionMaster()->MovePath(1);
-
-                    DoScriptText(SAY_RAIN_FIRE, m_creature);
-                    DisableCombatAction(action);
+                    if (!previousSummons && m_bombRidersSummoned)
+                        DoScriptText(SAY_RAIN_FIRE, m_creature);
+                    // Retry only failed summons; never duplicate a successfully created rider.
+                    if (m_bombRidersSummoned == 3)
+                        DisableCombatAction(action);
                 }
                 break;
         }
@@ -288,6 +345,14 @@ struct npc_gurubashi_bat_riderAI : public CombatAI
         m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE);
     }
 
+    void JustSummoned(GameObject* summoned) override
+    {
+        if (summoned->GetEntry() == GO_LIQUID_FIRE)
+            if (Creature* jeklik = GetActiveJeklikForBatRider(m_creature))
+                if (jeklik->AI())
+                    jeklik->AI()->JustSummoned(summoned);
+    }
+
     void ExecuteAction(uint32 action) override
     {
         switch (action)
@@ -306,6 +371,47 @@ struct npc_gurubashi_bat_riderAI : public CombatAI
     }
 };
 
+struct JeklikThrowLiquidFire : public SpellScript
+{
+    void OnInit(Spell* spell) const override
+    {
+        spell->SetMaxAffectedTargets(1);
+    }
+
+    bool OnCheckTarget(Spell const* spell, Unit* target, SpellEffectIndex /*effIdx*/) const override
+    {
+        if (!target || !target->IsPlayer() || !target->IsAlive())
+            return false;
+
+        Creature* jeklik = GetActiveJeklikForBatRider(spell->GetCaster());
+        return jeklik && jeklik->getThreatManager().HasThreat(target);
+    }
+
+    void OnEffectExecute(Spell* spell, SpellEffectIndex effIdx) const override
+    {
+        Unit* target = spell->GetUnitTarget();
+        if (effIdx != EFFECT_INDEX_0 || !OnCheckTarget(spell, target, effIdx))
+            return;
+
+        spell->GetCaster()->CastSpell(target, SPELL_THROW_LIQUID_FIRE, TRIGGERED_OLD_TRIGGERED);
+    }
+};
+
+struct JeklikLiquidFireBomb : public SpellScript
+{
+    void OnEffectExecute(Spell* spell, SpellEffectIndex effIdx) const override
+    {
+        Unit* target = spell->GetUnitTarget();
+        if (effIdx != EFFECT_INDEX_1 || !target || !target->IsPlayer() || !GetActiveJeklikForBatRider(spell->GetCaster()))
+            return;
+
+        // The rider remains the caster, so the ground trap damages the raid and
+        // reports its creation to the rider's AI for encounter cleanup.
+        spell->GetCaster()->CastSpell(target->GetPositionX(), target->GetPositionY(), target->GetPositionZ(),
+            SPELL_SUMMON_LIQUID_FIRE, TRIGGERED_OLD_TRIGGERED);
+    }
+};
+
 void AddSC_boss_jeklik()
 {
     Script* pNewScript = new Script;
@@ -317,4 +423,7 @@ void AddSC_boss_jeklik()
     pNewScript->Name = "npc_gurubashi_bat_rider";
     pNewScript->GetAI = &GetNewAIInstance<npc_gurubashi_bat_riderAI>;
     pNewScript->RegisterSelf();
+
+    RegisterSpellScript<JeklikThrowLiquidFire>("spell_jeklik_throw_liquid_fire");
+    RegisterSpellScript<JeklikLiquidFireBomb>("spell_jeklik_liquid_fire_bomb");
 }
