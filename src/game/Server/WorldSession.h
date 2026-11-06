@@ -366,11 +366,11 @@ class WorldSession
 
         // auction
         void SendAuctionHello(Unit* unit) const;
-        void SendAuctionCommandResult(AuctionEntry* auc, AuctionAction Action, AuctionError ErrorCode, InventoryResult invError = EQUIP_ERR_OK) const;
+        void SendAuctionCommandResult(AuctionEntry* auc, AuctionAction Action, AuctionError ErrorCode, InventoryResult invError = EQUIP_ERR_OK, uint32 auctionId = 0) const;
         void SendAuctionBidderNotification(AuctionEntry* auction, bool won) const;
         void SendAuctionOwnerNotification(AuctionEntry* auction, bool sold) const;
         void SendAuctionRemovedNotification(AuctionEntry* auction) const;
-        static void SendAuctionOutbiddedMail(AuctionEntry* auction);
+        static void SendAuctionOutbiddedMail(AuctionEntry* auction, uint32 oldBidderLowGuid, uint32 oldBid);
         static void SendAuctionCancelledToBidderMail(AuctionEntry* auction);
         AuctionHouseEntry const* GetCheckedAuctionHouseForAuctioneer(ObjectGuid guid) const;
 

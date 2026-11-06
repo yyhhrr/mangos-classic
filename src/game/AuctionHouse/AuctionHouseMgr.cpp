@@ -777,10 +777,23 @@ uint32 AuctionEntry::GetAuctionCut() const
     return uint32(auctionHouseEntry->cutPercent * bid * sWorld.getConfig(CONFIG_FLOAT_RATE_AUCTION_CUT) / 100.0f);
 }
 
-/// the sum of outbid is (1% from current bid)*5, if bid is very small, it is 1c
+/// the minimal outbid is 0 without a bid, else 5% of the bid rounded down to a multiple of 5 below 100 and to two significant digits above, and at least 1c
 uint32 AuctionEntry::GetAuctionOutBid() const
 {
-    uint32 outbid = (bid / 100) * 5;
+    if (!bid)
+        return 0;
+
+    uint32 outbid = bid / 20;
+    if (outbid < 100)
+        outbid -= outbid % 5;
+    else
+    {
+        uint32 unit = 1;
+        while (outbid / unit >= 100)
+            unit *= 10;
+        outbid -= outbid % unit;
+    }
+
     if (!outbid)
         outbid = 1;
     return outbid;
@@ -825,6 +838,9 @@ bool AuctionEntry::UpdateBid(uint32 newbid, Player* newbidder /*=nullptr*/)
     if (buyout && newbid > buyout)
         newbid = buyout;
 
+    uint32 oldBidder = 0;
+    uint32 oldBid = 0;
+
     if (newbidder && newbidder->GetGUIDLow() == bidder)
     {
         newbidder->ModifyMoney(-int32(newbid - bid));
@@ -834,12 +850,15 @@ bool AuctionEntry::UpdateBid(uint32 newbid, Player* newbidder /*=nullptr*/)
         if (newbidder)
             newbidder->ModifyMoney(-int32(newbid));
 
-        if (bidder)                                     // return money to old bidder if present
-            WorldSession::SendAuctionOutbiddedMail(this);
+        oldBidder = bidder;
+        oldBid = bid;
     }
 
     bidder = newbidder ? newbidder->GetGUIDLow() : 0;
     bid = newbid;
+
+    if (oldBidder)                                          // return money to old bidder if present, and tell him the new bid
+        WorldSession::SendAuctionOutbiddedMail(this, oldBidder, oldBid);
 
     if ((newbid < buyout) || (buyout == 0))                 // bid
     {

@@ -41,7 +41,8 @@ void WorldSession::SendTradeStatus(TradeStatusInfo const& info) const
             break;
         case TRADE_STATUS_CLOSE_WINDOW:
             data << uint32(info.Result);                    // InventoryResult
-            data << uint8(info.IsTargetResult);             // bool isTargetError; used for: EQUIP_ERR_BAG_FULL, EQUIP_ERR_CANT_CARRY_MORE_OF_THIS, EQUIP_ERR_MISSING_REAGENT, EQUIP_ERR_ITEM_MAX_LIMIT_CATEGORY_COUNT_EXCEEDED
+            // the client reads this flag as "you" for EQUIP_ERR_BAG_FULL, but as "your trade partner" for EQUIP_ERR_CANT_CARRY_MORE_OF_THIS
+            data << uint8(info.Result == EQUIP_ERR_BAG_FULL ? !info.IsTargetResult : info.IsTargetResult);
             data << uint32(info.ItemLimitCategoryId);       // ItemLimitCategory.dbc entry
             break;
         case TRADE_STATUS_WRONG_REALM:
@@ -72,8 +73,8 @@ void WorldSession::SendUpdateTrade(bool trader_state /*= true*/) const
 
     WorldPacket data(SMSG_TRADE_STATUS_EXTENDED, (100));    // guess size
     data << uint8(trader_state ? 1 : 0);                    // send trader or own trade windows state (last need for proper show spell apply to non-trade slot)
-    data << uint32(TRADE_SLOT_COUNT);                       // trade slots count/number?, = next field in most cases
-    data << uint32(TRADE_SLOT_COUNT);                       // trade slots count/number?, = prev field in most cases
+    data << uint32(view_trade->GetClientStateIndex());      // the client ignores an update of its own offer older than its last change
+    data << uint32(view_trade->GetServerStateIndex());      // the trader's client sends it back in CMSG_ACCEPT_TRADE
     data << uint32(view_trade->GetMoney());                 // trader gold
     data << uint32(view_trade->GetSpell());                 // spell casted on lowest slot item
 
@@ -240,7 +241,8 @@ static void clearAcceptTradeMode(Item** myItems, Item** hisItems)
 
 void WorldSession::HandleAcceptTradeOpcode(WorldPacket& recvPacket)
 {
-    recvPacket.read_skip<uint32>();
+    uint32 stateIndex;
+    recvPacket >> stateIndex;                               // the version of the trader's offer that the player accepts
 
     TradeData* my_trade = _player->m_trade;
     if (!my_trade)
@@ -257,6 +259,13 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPacket& recvPacket)
 
     // set before checks to properly undo at problems (it already set in to client)
     my_trade->SetAccepted(true);
+
+    // the trader changed the offer after the player's client last received it
+    if (stateIndex != his_trade->GetServerStateIndex())
+    {
+        my_trade->SetAccepted(false);
+        return;
+    }
 
     TradeStatusInfo info;
     if (!_player->IsWithinDistInMap(trader, TRADE_DISTANCE, false))
@@ -411,9 +420,9 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPacket& recvPacket)
             clearAcceptTradeMode(my_trade, his_trade);
 
             myCanCompleteInfo.Status = TRADE_STATUS_CLOSE_WINDOW;
-            trader->GetSession()->SendTradeStatus(myCanCompleteInfo);
-            myCanCompleteInfo.IsTargetResult = true;
             SendTradeStatus(myCanCompleteInfo);
+            myCanCompleteInfo.IsTargetResult = true;
+            trader->GetSession()->SendTradeStatus(myCanCompleteInfo);
             my_trade->SetAccepted(false);
             his_trade->SetAccepted(false);
             return;
@@ -423,9 +432,9 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPacket& recvPacket)
             clearAcceptTradeMode(my_trade, his_trade);
 
             hisCanCompleteInfo.Status = TRADE_STATUS_CLOSE_WINDOW;
-            SendTradeStatus(hisCanCompleteInfo);
-            hisCanCompleteInfo.IsTargetResult = true;
             trader->GetSession()->SendTradeStatus(hisCanCompleteInfo);
+            hisCanCompleteInfo.IsTargetResult = true;
+            SendTradeStatus(hisCanCompleteInfo);
             my_trade->SetAccepted(false);
             his_trade->SetAccepted(false);
             return;
@@ -523,6 +532,14 @@ void WorldSession::HandleBeginTradeOpcode(WorldPacket& /*recvPacket*/)
     info.Status = TRADE_STATUS_OPEN_WINDOW;
     my_trade->GetTrader()->GetSession()->SendTradeStatus(info);
     SendTradeStatus(info);
+
+    // the clients reset their counters and clear both offers when the window opens
+    my_trade->ResetClientStateIndex();
+    my_trade->GetTraderData()->ResetClientStateIndex();
+    SendUpdateTrade(true);
+    SendUpdateTrade(false);
+    my_trade->GetTrader()->GetSession()->SendUpdateTrade(true);
+    my_trade->GetTrader()->GetSession()->SendUpdateTrade(false);
 }
 
 void WorldSession::SendCancelTrade(TradeStatus status) const
@@ -659,6 +676,8 @@ void WorldSession::HandleSetTradeGoldOpcode(WorldPacket& recvPacket)
     if (!my_trade)
         return;
 
+    my_trade->UpdateClientStateIndex();
+
     // gold can be incorrect, but this is checked at trade finished.
     my_trade->SetMoney(gold);
 }
@@ -677,6 +696,8 @@ void WorldSession::HandleSetTradeItemOpcode(WorldPacket& recvPacket)
     TradeData* my_trade = _player->m_trade;
     if (!my_trade)
         return;
+
+    my_trade->UpdateClientStateIndex();
 
     TradeStatusInfo info;
     // invalid slot number
@@ -716,6 +737,8 @@ void WorldSession::HandleClearTradeItemOpcode(WorldPacket& recvPacket)
     TradeData* my_trade = _player->m_trade;
     if (!my_trade)
         return;
+
+    my_trade->UpdateClientStateIndex();
 
     // invalid slot number
     if (tradeSlot >= TRADE_SLOT_COUNT)

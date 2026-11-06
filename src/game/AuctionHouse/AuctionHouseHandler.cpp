@@ -61,10 +61,10 @@ void WorldSession::SendAuctionHello(Unit* unit) const
 }
 
 // call this method when player bids, creates, or deletes auction
-void WorldSession::SendAuctionCommandResult(AuctionEntry* auc, AuctionAction Action, AuctionError ErrorCode, InventoryResult invError) const
+void WorldSession::SendAuctionCommandResult(AuctionEntry* auc, AuctionAction Action, AuctionError ErrorCode, InventoryResult invError, uint32 auctionId) const
 {
     WorldPacket data(SMSG_AUCTION_COMMAND_RESULT, 16);
-    data << uint32(auc ? auc->Id : 0);
+    data << uint32(auc ? auc->Id : auctionId);
     data << uint32(Action);
     data << uint32(ErrorCode);
 
@@ -72,7 +72,7 @@ void WorldSession::SendAuctionCommandResult(AuctionEntry* auc, AuctionAction Act
     {
         case AUCTION_OK:
             if (Action == AUCTION_BID_PLACED)
-                data << uint32(auc->GetAuctionOutBid());    // new AuctionOutBid?
+                data << uint32(0);                          // minimal outbid: none with a bid result, the next search lists it
             break;
         case AUCTION_ERR_INVENTORY:
             data << uint32(invError);
@@ -99,7 +99,7 @@ void WorldSession::SendAuctionBidderNotification(AuctionEntry* auction, bool won
 
     // if 0, client shows ERR_AUCTION_WON_S, else ERR_AUCTION_OUTBID_S
     data << uint32(won ? 0 : auction->bid);
-    data << uint32(auction->GetAuctionOutBid());            // AuctionOutBid?
+    data << uint32(won ? 0 : auction->GetAuctionOutBid());  // AuctionOutBid?
     data << uint32(auction->itemTemplate);
     data << int32(auction->itemRandomPropertyId);
 
@@ -112,7 +112,7 @@ void WorldSession::SendAuctionOwnerNotification(AuctionEntry* auction, bool sold
     WorldPacket data(SMSG_AUCTION_OWNER_NOTIFICATION, (7 * 4));
     data << uint32(auction->Id);
     data << uint32(auction->bid);                           // if 0, client shows ERR_AUCTION_EXPIRED_S, else ERR_AUCTION_SOLD_S (works only when guid==0)
-    data << uint32(auction->GetAuctionOutBid());            // AuctionOutBid?
+    data << uint32(sold ? 0 : auction->GetAuctionOutBid()); // AuctionOutBid?
 
     ObjectGuid bidder_guid = ObjectGuid();
     if (!sold)                                              // not sold yet
@@ -138,10 +138,10 @@ void WorldSession::SendAuctionRemovedNotification(AuctionEntry* auction) const
     SendPacket(data);
 }
 
-// this function sends mail to old bidder
-void WorldSession::SendAuctionOutbiddedMail(AuctionEntry* auction)
+// this function sends mail to old bidder, with his bid; the auction already holds the new bid
+void WorldSession::SendAuctionOutbiddedMail(AuctionEntry* auction, uint32 oldBidderLowGuid, uint32 oldBid)
 {
-    ObjectGuid oldBidder_guid = ObjectGuid(HIGHGUID_PLAYER, auction->bidder);
+    ObjectGuid oldBidder_guid = ObjectGuid(HIGHGUID_PLAYER, oldBidderLowGuid);
     Player* oldBidder = sObjectMgr.GetPlayer(oldBidder_guid);
 
     uint32 oldBidder_accId = 0;
@@ -158,7 +158,7 @@ void WorldSession::SendAuctionOutbiddedMail(AuctionEntry* auction)
             oldBidder->GetSession()->SendAuctionBidderNotification(auction, false);
 
         MailDraft(msgAuctionOutbiddedSubject.str())
-        .SetMoney(auction->bid)
+        .SetMoney(oldBid)
         .SendMailTo(MailReceiver(oldBidder, oldBidder_guid), auction, MAIL_CHECK_MASK_COPIED);
     }
 }
@@ -394,9 +394,10 @@ void WorldSession::HandleAuctionPlaceBid(WorldPacket& recv_data)
     if (price < auction->startbid)
         return;
 
-    SendAuctionCommandResult(auction, AUCTION_BID_PLACED, AUCTION_OK);
-
     auction->UpdateBid(price, pl);
+
+    // sent after the bid, as a buyout first tells the bidder that he won, and removes the auction
+    SendAuctionCommandResult(nullptr, AUCTION_BID_PLACED, AUCTION_OK, EQUIP_ERR_OK, auctionId);
 }
 
 // this void is called when auction_owner cancels his auction
