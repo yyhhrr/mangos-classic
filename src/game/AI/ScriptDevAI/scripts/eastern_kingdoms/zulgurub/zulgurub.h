@@ -31,6 +31,7 @@ enum
     NPC_PANTHER_TRIGGER     = 15091,
     NPC_BLOODLORD_MANDOKIR  = 11382,
     NPC_MARLI               = 14510,
+    NPC_SPAWN_OF_MARLI      = 15041,
     NPC_JEKLIK              = 14517,
     NPC_VENOXIS             = 14507,
     NPC_ARLOKK              = 14515,
@@ -82,14 +83,13 @@ class instance_zulgurub : public ScriptedInstance
         void RemoveHakkarPowerStack();
         void RestoreEventObject(GameObject* go, uint32 eventId);
         void RestoreEventObjects(uint32 eventId);
-        void RemoveEventSummons(uint32 eventId);
+        void RemoveEventSummons(uint32 eventId, uint32 summonEntry = 0);
 
         uint32 m_auiEncounter[MAX_ENCOUNTER];
         std::string m_strInstData;
 
         GuidList m_lRightPantherTriggerGUIDList;
         GuidList m_lLeftPantherTriggerGUIDList;
-        GuidList m_lSpiderEggGUIDList;
         GuidList m_lProwlerGUIDList;
 
         bool m_bHasIntroYelled;

@@ -17,7 +17,6 @@
 /* ScriptData
 SDName: Boss_Marli
 SD%Complete: 90
-SDComment: Enlarge for small spiders NYI
 SDCategory: Zul'Gurub
 EndScriptData
 
@@ -26,6 +25,10 @@ EndScriptData
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "zulgurub.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
+#include "Entities/Player.h"
+#include "Spells/Scripts/SpellScript.h"
+#include "Spells/Spell.h"
+#include "Spells/SpellMgr.h"
 
 enum
 {
@@ -45,13 +48,11 @@ enum
     SPELL_POISON_VOLLEY         = 24099,
     SPELL_DRAIN_LIFE            = 24300,
     SPELL_ENLARGE               = 24109,                    // cast on friendlies
-    SPELL_SPIDER_EGG            = 24082,                    // removed from DBC - should trigger 24081 which summons 15041
-
     // common spells
     SPELL_SPIDER_FORM           = 24084,
     SPELL_TRANSFORM_BACK        = 24085,
     SPELL_TRASH                 = 3391,
-    SPELL_HATCH_EGGS            = 24083,                    // note this should only target 4 eggs!
+    SPELL_HATCH_EGGS            = 24083,
 
     SPELL_LIST_PHASE_1          = 1451001,
     SPELL_LIST_PHASE_2          = 1451002,
@@ -61,6 +62,7 @@ enum MarliActions
 {
     MARLI_PHASE_CHANGE,
     MARLI_CHARGE,
+    MARLI_HATCH_OPENING,
     MARLI_ACTIONS_MAX,
 };
 
@@ -70,24 +72,27 @@ struct boss_marliAI : public CombatAI
     {
         AddCombatAction(MARLI_PHASE_CHANGE, 60000u);
         AddCombatAction(MARLI_CHARGE, true);
+        AddCombatAction(MARLI_HATCH_OPENING, true);
     }
 
     ScriptedInstance* m_instance;
-
+    GuidSet m_spiders;
     bool m_phaseTwo;
 
     void Reset() override
     {
         CombatAI::Reset();
-
+        m_spiders.clear();
         m_phaseTwo = false;
     }
 
     void Aggro(Unit* /*who*/) override
     {
         DoScriptText(SAY_AGGRO, m_creature);
+        if (m_instance)
+            m_instance->SetData(TYPE_MARLI, IN_PROGRESS);
 
-        DoCastSpellIfCan(nullptr, SPELL_HATCH_EGGS);
+        ResetCombatAction(MARLI_HATCH_OPENING, 1000);
     }
 
     void JustDied(Unit* /*killer*/) override
@@ -98,10 +103,48 @@ struct boss_marliAI : public CombatAI
             m_instance->SetData(TYPE_MARLI, DONE);
     }
 
-    void SpellHitTarget(Unit* /*target*/, const SpellEntry* spellInfo) override
+    void SpellHitTarget(Unit* target, const SpellEntry* spellInfo, SpellMissInfo missInfo) override
     {
-        if (spellInfo->Id == SPELL_ENVELOPING_WEBS)
-            ResetCombatAction(MARLI_CHARGE, 1000);
+        if (!m_phaseTwo || spellInfo->Id != SPELL_ENVELOPING_WEBS || missInfo != SPELL_MISS_NONE ||
+            !target->IsPlayer() || !target->HasAura(SPELL_ENVELOPING_WEBS))
+            return;
+
+        m_creature->getThreatManager().modifyThreatPercent(target, -100);
+        ResetCombatAction(MARLI_CHARGE, 1000);
+    }
+
+    void JustSummoned(Creature* summoned) override
+    {
+        if (summoned->GetEntry() != NPC_SPAWN_OF_MARLI || !summoned->IsAlive() || !summoned->AI() ||
+            summoned->GetSpawnerGuid() != m_creature->GetObjectGuid())
+            return;
+
+        // A wild summon can notify the caster both on creation and after the spell effect.
+        if (!m_spiders.insert(summoned->GetObjectGuid()).second)
+            return;
+
+        std::vector<Unit*> targets;
+        m_creature->SelectAttackingTargets(targets, ATTACKING_TARGET_ALL_SUITABLE, 0, nullptr, SELECT_FLAG_PLAYER);
+        targets.erase(std::remove_if(targets.begin(), targets.end(), [summoned](Unit* player)
+        {
+            return static_cast<Player*>(player)->IsGameMaster() || !summoned->CanAttackNow(player);
+        }), targets.end());
+        if (!targets.empty())
+        {
+            summoned->AI()->AttackStart(targets[urand(0, targets.size() - 1)]);
+            return;
+        }
+
+        // A charmed Speaker can be the only combat target on the pull.
+        if (Unit* victim = m_creature->GetVictim())
+            if (victim->IsAlive() && summoned->CanAttackNow(victim) &&
+                (!victim->IsPlayer() || !static_cast<Player*>(victim)->IsGameMaster()))
+                summoned->AI()->AttackStart(victim);
+    }
+
+    void SummonedCreatureDespawn(Creature* summoned) override
+    {
+        m_spiders.erase(summoned->GetObjectGuid());
     }
 
     void JustReachedHome() override
@@ -123,6 +166,7 @@ struct boss_marliAI : public CombatAI
                     {
                         DoScriptText(SAY_TRANSFORM, m_creature);
                         DoResetThreat();
+                        DisableCombatAction(MARLI_HATCH_OPENING);
                         ResetCombatAction(action, 60000);
                         m_creature->SetSpellList(SPELL_LIST_PHASE_2);
                         m_phaseTwo = true;
@@ -134,6 +178,7 @@ struct boss_marliAI : public CombatAI
                     {
                         DoScriptText(SAY_TRANSFORM_BACK, m_creature);
                         m_creature->RemoveAurasDueToSpell(SPELL_SPIDER_FORM);
+                        DisableCombatAction(MARLI_CHARGE);
                         ResetCombatAction(action, 60000);
                         m_creature->SetSpellList(SPELL_LIST_PHASE_1);
                         m_phaseTwo = false;
@@ -141,11 +186,96 @@ struct boss_marliAI : public CombatAI
                 }
                 break;
             case MARLI_CHARGE:
-                if (Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, SPELL_CHARGE, SELECT_FLAG_PLAYER))
-                    if (DoCastSpellIfCan(target, SPELL_CHARGE) == CAST_OK)
-                        DisableCombatAction(action);
+            {
+                DisableCombatAction(action);
+                if (!m_phaseTwo)
+                    break;
+
+                std::vector<Unit*> targets;
+                m_creature->SelectAttackingTargets(targets, ATTACKING_TARGET_ALL_SUITABLE, 0, SPELL_CHARGE,
+                    SELECT_FLAG_PLAYER | SELECT_FLAG_NOT_IN_MELEE_RANGE | SELECT_FLAG_NOT_IMMUNE);
+                Unit* target = nullptr;
+                float highestThreat = 0.f;
+                auto& threatManager = m_creature->getThreatManager();
+                for (Unit* candidate : targets)
+                {
+                    if (candidate->HasAura(SPELL_ENVELOPING_WEBS) || static_cast<Player*>(candidate)->IsGameMaster() ||
+                        !m_creature->CanAttackNow(candidate))
+                        continue;
+
+                    float threat = threatManager.getThreat(candidate);
+                    if (!target || threat > highestThreat)
+                    {
+                        target = candidate;
+                        highestThreat = threat;
+                    }
+                }
+                if (target && DoCastSpellIfCan(target, SPELL_CHARGE) == CAST_OK)
+                    AttackStart(target);
+                break;
+            }
+            case MARLI_HATCH_OPENING:
+                if (DoCastSpellIfCan(nullptr, SPELL_HATCH_EGGS) == CAST_OK)
+                {
+                    DoScriptText(SAY_SPIDER_SPAWN, m_creature);
+                    DisableCombatAction(action);
+                }
                 break;
         }
+    }
+};
+
+struct MarliHatchEggs : public SpellScript
+{
+    void OnInit(Spell* spell) const override
+    {
+        Unit* caster = spell->GetCaster();
+        if (spell->m_spellInfo->Id != SPELL_HATCH_EGGS || !caster || !caster->IsInWorld())
+            return;
+
+        constexpr std::size_t openingEggCount = 4;
+        float radius = GetSpellRadius(sSpellRadiusStore.LookupEntry(spell->m_spellInfo->EffectRadiusIndex[EFFECT_INDEX_0]));
+        GameObjectList eggs;
+        GetGameObjectListWithEntryInGrid(eggs, caster, GO_SPIDER_EGG, radius);
+        eggs.remove_if([](const GameObject* egg) { return !IsReadyEgg(egg); });
+        if (eggs.size() <= openingEggCount)
+            return;
+
+        // Bound the area selection before the core randomly trims excess targets.
+        eggs.sort([caster](const GameObject* left, const GameObject* right) { return IsCloser(caster, left, right); });
+        const GameObject* last = *std::next(eggs.begin(), openingEggCount - 1);
+        spell->SetScriptValue(last->GetObjectGuid().GetRawValue());
+    }
+
+    bool OnCheckTarget(const Spell* spell, GameObject* target, SpellEffectIndex /*eff*/) const override
+    {
+        if (!IsReadyEgg(target))
+            return false;
+
+        // The single-egg spell already chooses the nearest eligible object.
+        uint64 boundary = spell->GetScriptValue();
+        if (!boundary)
+            return true;
+
+        Unit* caster = spell->GetCaster();
+        const GameObject* last = caster->GetMap()->GetGameObject(ObjectGuid(boundary));
+        return last && !IsCloser(caster, last, target);
+    }
+
+private:
+    static bool IsReadyEgg(const GameObject* egg)
+    {
+        return egg->GetEntry() == GO_SPIDER_EGG && egg->IsSpawned() &&
+            egg->GetGoState() == GO_STATE_READY && egg->GetLootState() == GO_READY;
+    }
+
+    static bool IsCloser(const Unit* caster, const GameObject* left, const GameObject* right)
+    {
+        float leftDistance = caster->GetDistance(left, true, DIST_CALC_NONE);
+        float rightDistance = caster->GetDistance(right, true, DIST_CALC_NONE);
+        if (leftDistance != rightDistance)
+            return leftDistance < rightDistance;
+        return left->GetObjectGuid() < right->GetObjectGuid();
     }
 };
 
@@ -155,4 +285,5 @@ void AddSC_boss_marli()
     pNewScript->Name = "boss_marli";
     pNewScript->GetAI = &GetNewAIInstance<boss_marliAI>;
     pNewScript->RegisterSelf();
+    RegisterSpellScript<MarliHatchEggs>("spell_marli_hatch_eggs");
 }

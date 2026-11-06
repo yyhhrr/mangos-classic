@@ -92,7 +92,6 @@ void instance_zulgurub::OnObjectCreate(GameObject* go)
                 RestoreEventObject(go, TYPE_ARLOKK);
             break;
         case GO_SPIDER_EGG:
-            m_lSpiderEggGUIDList.push_back(go->GetObjectGuid());
             if (m_resetMarliObjects && GetData(TYPE_MARLI) == NOT_STARTED)
                 RestoreEventObject(go, TYPE_MARLI);
             return;
@@ -113,22 +112,18 @@ void instance_zulgurub::SetData(uint32 type, uint32 data)
                 RemoveHakkarPowerStack();
             break;
         case TYPE_MARLI:
+        {
+            bool const reset = data == FAIL && m_auiEncounter[type] != FAIL;
             m_auiEncounter[type] = data;
             if (data == DONE)
                 RemoveHakkarPowerStack();
-            if (data == FAIL)
+            else if (reset)
             {
-                for (GuidList::const_iterator itr = m_lSpiderEggGUIDList.begin(); itr != m_lSpiderEggGUIDList.end(); ++itr)
-                {
-                    if (GameObject* pEgg = instance->GetGameObject(*itr))
-                    {
-                        // Note: this type of Gameobject needs to be respawned manually
-                        pEgg->SetRespawnTime(2 * DAY);
-                        pEgg->Respawn();
-                    }
-                }
+                RemoveEventSummons(TYPE_MARLI, NPC_SPAWN_OF_MARLI);
+                RestoreEventObjects(TYPE_MARLI);
             }
             break;
+        }
         case TYPE_ARLOKK:
             m_auiEncounter[type] = data;
             if (data == DONE || data == FAIL)
@@ -345,7 +340,7 @@ void instance_zulgurub::RestoreEventObjects(uint32 eventId)
     sObjectMgr.DoGOData(restoreSpawn);
 }
 
-void instance_zulgurub::RemoveEventSummons(uint32 eventId)
+void instance_zulgurub::RemoveEventSummons(uint32 eventId, uint32 summonEntry)
 {
     if (eventId >= MAX_PRIESTS)
         return;
@@ -356,7 +351,7 @@ void instance_zulgurub::RemoveEventSummons(uint32 eventId)
     for (auto itr = objects.begin<Creature>(); itr != objects.end<Creature>(); ++itr)
     {
         Creature* creature = itr->second;
-        if (!creature->IsTemporarySummon())
+        if (!creature->IsTemporarySummon() || (summonEntry && creature->GetEntry() != summonEntry))
             continue;
         uint32 ownerEntry = creature->GetSpawnerGuid().GetEntry();
         bool relevant = ownerEntry == bosses[eventId];

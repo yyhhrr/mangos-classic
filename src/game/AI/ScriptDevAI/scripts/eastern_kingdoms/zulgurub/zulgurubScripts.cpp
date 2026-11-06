@@ -22,6 +22,7 @@ SDCategory: Zul'Gurub
 EndScriptData */
 
 #include "AI/ScriptDevAI/include/sc_common.h"
+#include "AI/EventAI/CreatureEventAI.h"
 
 /* ContentData
 EndContentData */
@@ -185,11 +186,71 @@ struct WyvernStingAura : public AuraScript
     }
 };
 
+enum MarliSpawnGrowth
+{
+    SPELL_MARLI_SPAWN_GROWTH = 24086,
+    SPELL_MARLI_SPAWN_FULL_GROWN = 24088,
+    EMOTE_MARLI_SPAWN_FULL_GROWN = 10445,
+    MARLI_SPAWN_GROWTH_INTERVAL = 4000,
+    MARLI_SPAWN_GROWTH_CASTS = 5,
+};
+
+// Keep the spider's poison and standard combat behavior in EventAI.
+struct npc_spawn_of_marliAI : public CreatureEventAI
+{
+    explicit npc_spawn_of_marliAI(Creature* creature) : CreatureEventAI(creature) {}
+
+    void Reset() override
+    {
+        CreatureEventAI::Reset();
+        m_growthStep = 0;
+        m_growthTimer = MARLI_SPAWN_GROWTH_INTERVAL;
+    }
+
+    void UpdateEventTimers(uint32 diff) override
+    {
+        CreatureEventAI::UpdateEventTimers(diff);
+
+        Unit* victim = m_creature->GetVictim();
+        if (m_growthStep > MARLI_SPAWN_GROWTH_CASTS || !m_creature->IsAlive() ||
+            !m_creature->IsInCombat() || !victim || !victim->IsAlive())
+            return;
+
+        if (m_growthTimer > diff)
+        {
+            m_growthTimer -= diff;
+            return;
+        }
+
+        bool fullGrown = m_growthStep == MARLI_SPAWN_GROWTH_CASTS;
+        uint32 spell = fullGrown ? SPELL_MARLI_SPAWN_FULL_GROWN : SPELL_MARLI_SPAWN_GROWTH;
+        if (DoCastSpellIfCan(m_creature, spell, CAST_TRIGGERED) != CAST_OK)
+        {
+            m_growthTimer = 0;
+            return;
+        }
+
+        ++m_growthStep;
+        m_growthTimer = MARLI_SPAWN_GROWTH_INTERVAL;
+        if (fullGrown)
+            DoBroadcastText(EMOTE_MARLI_SPAWN_FULL_GROWN, m_creature, nullptr, CHAT_TYPE_TEXT_EMOTE);
+    }
+
+private:
+    uint32 m_growthTimer = MARLI_SPAWN_GROWTH_INTERVAL;
+    uint32 m_growthStep = 0;
+};
+
 void AddSC_zulgurub()
 {
     Script* pNewScript = new Script;
     pNewScript->Name = "npc_soulflayer";
     pNewScript->GetAI = &GetAI_npc_soulflayer;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_spawn_of_marli";
+    pNewScript->GetAI = &GetNewAIInstance<npc_spawn_of_marliAI>;
     pNewScript->RegisterSelf();
 
     RegisterSpellScript<SummonNightmareIllusion>("spell_summon_nightmare_illusion_hazzarah");
