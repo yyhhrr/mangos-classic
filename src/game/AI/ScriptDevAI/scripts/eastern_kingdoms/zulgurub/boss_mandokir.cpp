@@ -26,6 +26,7 @@ EndScriptData
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "zulgurub.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
+#include "Movement/MoveSpline.h"
 
 enum
 {
@@ -42,12 +43,12 @@ enum
 
     SPELL_CHARGE        = 24408,
     SPELL_CHARGE_GAZE   = 24315,
-    SPELL_INTIMIDATING_SHOUT          = 29321,
+    SPELL_GUILLOTINE    = 24316,
+    SPELL_INTIMIDATING_SHOUT = 19134,
     SPELL_WHIRLWIND     = 13736,
     SPELL_MORTAL_STRIKE = 16856,
     SPELL_ENRAGE        = 23537,
     SPELL_THREATENING_GAZE = 24314,
-    SPELL_SUMMON_PLAYER = 25104,
     SPELL_LEVEL_UP      = 24312,
     SPELL_OVERPOWER     = 24407,
 
@@ -92,6 +93,10 @@ enum MandokirActions
     MANDOKIR_ACTION_MAX,
 };
 
+constexpr float WATCH_MOVEMENT_TOLERANCE = 2.0f;
+constexpr float CHARGE_FEAR_DISTANCE = 4.0f;
+constexpr float CHARGE_THREAT_DISTANCE = 100.0f;
+
 struct boss_mandokirAI : public CombatAI
 {
     boss_mandokirAI(Creature* creature) : CombatAI(creature, MANDOKIR_ACTION_MAX), m_instance(static_cast<ScriptedInstance*>(creature->GetInstanceData()))
@@ -103,15 +108,23 @@ struct boss_mandokirAI : public CombatAI
 
     uint8 m_uiKillCount;
 
-    float m_targetThreat;
+    ObjectGuid m_watchTarget;
+    Position m_watchStart;
+    bool m_watchViolated;
+    ObjectGuid m_chargeTarget;
+    uint32 m_chargeSpellId;
+    uint32 m_chargeSplineId;
 
     void Reset() override
     {
         CombatAI::Reset();
 
-        m_uiKillCount           = 0;
-
-        m_targetThreat         = 0.0f;
+        m_uiKillCount = 0;
+        m_watchTarget.Clear();
+        m_watchViolated = false;
+        m_chargeTarget.Clear();
+        m_chargeSpellId = 0;
+        m_chargeSplineId = 0;
     }
 
     void Aggro(Unit* /*who*/) override
@@ -149,33 +162,114 @@ struct boss_mandokirAI : public CombatAI
         m_creature->CastSpell(nullptr, SPELL_DESPAWN_CHAINED_SPIRITS, TRIGGERED_OLD_TRIGGERED);
     }
 
-    void SpellHitTarget(Unit* /*target*/, const SpellEntry* spellInfo) override
+    void DamageDeal(Unit* target, uint32& /*damage*/, DamageEffectType damageType, SpellEntry const* spellInfo) override
     {
-        if (spellInfo->Id == SPELL_CHARGE)
-            DoResetThreat();
+        // The damage callback excludes delayed misses, even when the spell initially rolled a hit.
+        if (target == m_creature || damageType != SPELL_DIRECT_DAMAGE || !spellInfo ||
+            spellInfo->Id != SPELL_CHARGE || !m_creature->IsInCombat())
+            return;
+
+        ThreatManager& threatManager = m_creature->getThreatManager();
+        HostileReference const* highestThreat = nullptr;
+        for (HostileReference const* ref : threatManager.getThreatList())
+        {
+            Unit* candidate = ref->getTarget();
+            if (candidate && candidate->IsAlive() && m_creature->IsWithinDistInMap(candidate, CHARGE_THREAT_DISTANCE) &&
+                (!highestThreat || ref->getThreat() > highestThreat->getThreat()))
+                highestThreat = ref;
+        }
+
+        if (highestThreat)
+            threatManager.modifyThreatPercent(highestThreat->getTarget(), -100);
     }
 
-    void ReceiveAIEvent(AIEventType eventType, Unit* /*sender*/, Unit* invoker, uint32 /*miscValue*/) override
+    void TrackCharge(uint32 spellId, Unit* target)
     {
-        if (eventType == AI_EVENT_CUSTOM_A)
-        {
-            DoScriptText(SAY_WATCH, m_creature, invoker);
-            DoScriptText(SAY_WATCH_WHISPER, m_creature, invoker);
-            m_targetThreat = m_creature->getThreatManager().getThreat(invoker);
-        }
-        else if (eventType == AI_EVENT_CUSTOM_B)
-        {
-            Player* watchTarget = dynamic_cast<Player*>(invoker);
+        auto const& spline = *m_creature->movespline;
+        if (!target || !m_creature->hasUnitState(UNIT_STAT_PROPELLED) || !spline.Initialized() ||
+            spline.Finalized() || !spline.isFacingTarget() ||
+            spline.GetFacing().target != target->GetObjectGuid().GetRawValue())
+            return;
 
-            // If threat is higher that previously saved, mandokir will act
-            if (watchTarget && watchTarget->IsAlive() && m_creature->getThreatManager().getThreat(watchTarget) > m_targetThreat)
-            {
-                if (!m_creature->IsWithinLOSInMap(watchTarget))
-                    m_creature->CastSpell(watchTarget, SPELL_SUMMON_PLAYER, TRIGGERED_OLD_TRIGGERED);
+        m_chargeTarget = target->GetObjectGuid();
+        m_chargeSpellId = spellId;
+        m_chargeSplineId = spline.GetId();
+    }
 
-                m_creature->CastSpell(watchTarget, SPELL_CHARGE_GAZE, TRIGGERED_OLD_TRIGGERED);
-            }
+    void OnSpellCast(SpellEntry const* spellInfo, Unit* target) override
+    {
+        if (spellInfo->Id == SPELL_CHARGE)
+            TrackCharge(SPELL_CHARGE, target);
+    }
+
+    void FinishCharge(uint32 spellId)
+    {
+        if (spellId != m_chargeSpellId || m_chargeTarget.IsEmpty())
+            return;
+
+        ObjectGuid targetGuid = m_chargeTarget;
+        m_chargeTarget.Clear();
+        auto const& spline = *m_creature->movespline;
+        // An interrupted spline can also send MovementInform.
+        if (!m_creature->IsAlive() || !m_creature->IsInCombat() || !spline.Initialized() ||
+            spline.GetId() != m_chargeSplineId || !spline.Finalized() || spline.GetElapsedValue() < 1.0f)
+            return;
+
+        Player* target = m_creature->GetMap()->GetPlayer(targetGuid);
+        if (!target || !target->IsAlive() || !m_creature->CanAttackInCombat(target, false, false) ||
+            !m_creature->IsWithinLOSInMap(target))
+            return;
+
+        if (spellId == SPELL_CHARGE)
+        {
+            if (m_creature->GetDistance(target) < CHARGE_FEAR_DISTANCE)
+                m_creature->CastSpell(target, SPELL_INTIMIDATING_SHOUT, TRIGGERED_OLD_TRIGGERED);
         }
+        else if (m_creature->CanReachWithMeleeAttack(target))
+            m_creature->CastSpell(target, SPELL_GUILLOTINE, TRIGGERED_OLD_TRIGGERED);
+    }
+
+    void BeginWatch(Player* target)
+    {
+        DoScriptText(SAY_WATCH, m_creature, target);
+        DoScriptText(SAY_WATCH_WHISPER, m_creature, target);
+        m_watchTarget = target->GetObjectGuid();
+        m_watchStart = target->GetPosition();
+        m_watchViolated = false;
+    }
+
+    void RecordWatchAction(Unit* target, AuraOwnerAction action)
+    {
+        if (m_watchTarget != target->GetObjectGuid() || m_watchViolated)
+            return;
+
+        if (action == AuraOwnerAction::ForcedMove)
+        {
+            m_watchStart = target->GetPosition();
+            return;
+        }
+
+        float allowedMove = WATCH_MOVEMENT_TOLERANCE + target->GetObjectBoundingRadius();
+        if (action == AuraOwnerAction::Action ||
+            target->GetDistance2d(m_watchStart.x, m_watchStart.y, DIST_CALC_NONE) >= allowedMove * allowedMove)
+            m_watchViolated = true;
+    }
+
+    void FinishWatch(Player* target, bool expired)
+    {
+        if (m_watchTarget != target->GetObjectGuid())
+            return;
+
+        m_watchTarget.Clear();
+        if (!expired || !m_watchViolated || !target->IsAlive() || !m_creature->IsAlive() ||
+            !m_creature->IsInCombat() || !target->IsInMap(m_creature) || !m_creature->IsWithinLOSInMap(target))
+            return;
+
+        m_creature->RemoveAurasDueToSpell(SPELL_WHIRLWIND);
+        uint32 previousSpline = m_creature->movespline->GetId();
+        if (m_creature->CastSpell(target, SPELL_CHARGE_GAZE, TRIGGERED_OLD_TRIGGERED) == SPELL_CAST_OK &&
+            m_creature->movespline->GetId() != previousSpline)
+            TrackCharge(SPELL_CHARGE_GAZE, target);
     }
 
     void KilledUnit(Unit* victim) override
@@ -229,6 +323,12 @@ struct boss_mandokirAI : public CombatAI
 
     void MovementInform(uint32 moveType, uint32 pointId) override
     {
+        if (moveType == EFFECT_MOTION_TYPE)
+        {
+            FinishCharge(pointId);
+            return;
+        }
+
         if (moveType != POINT_MOTION_TYPE || !m_instance)
             return;
 
@@ -274,9 +374,35 @@ struct ThreateningGaze : public AuraScript
 {
     void OnApply(Aura* aura, bool apply) const override
     {
+        Unit* caster = aura->GetCaster();
+        auto* target = dynamic_cast<Player*>(aura->GetTarget());
+        if (!caster || !target)
+            return;
+
+        if (auto* ai = dynamic_cast<boss_mandokirAI*>(caster->AI()))
+        {
+            if (apply)
+                ai->BeginWatch(target);
+            else
+                ai->FinishWatch(target, aura->GetRemoveMode() == AURA_REMOVE_BY_EXPIRE);
+        }
+    }
+
+    void OnOwnerAction(Aura* aura, AuraOwnerAction action) const override
+    {
         if (Unit* caster = aura->GetCaster())
-            if (caster->AI())
-                caster->AI()->ReceiveAIEvent((apply ? AI_EVENT_CUSTOM_A : AI_EVENT_CUSTOM_B), aura->GetTarget(), aura->GetTarget(), 0);
+            if (auto* ai = dynamic_cast<boss_mandokirAI*>(caster->AI()))
+                ai->RecordWatchAction(aura->GetTarget(), action);
+    }
+};
+
+struct MandokirGazeCharge : public SpellScript
+{
+    void OnInit(Spell* spell) const override
+    {
+        if (Unit* caster = spell->GetCaster())
+            if (caster->GetEntry() == NPC_BLOODLORD_MANDOKIR)
+                spell->SetEffectSkipMask(1u << EFFECT_INDEX_1);
     }
 };
 
@@ -304,5 +430,6 @@ void AddSC_boss_mandokir()
     pNewScript->RegisterSelf();
 
     RegisterSpellScript<ThreateningGaze>("spell_threatening_gaze");
+    RegisterSpellScript<MandokirGazeCharge>("spell_mandokir_gaze_charge");
     RegisterSpellScript<DespawnChainedSpirits>("spell_despawn_chained_spirits");
 }

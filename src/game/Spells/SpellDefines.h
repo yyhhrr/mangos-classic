@@ -357,6 +357,13 @@ enum SpellInterruptFlags
     SPELL_INTERRUPT_FLAG_DAMAGE_CANCELS     = 0x10, // Player only
 };
 
+enum class AuraOwnerAction
+{
+    Action,
+    Move,
+    ForcedMove
+};
+
 enum SpellAuraInterruptFlags // also used for ChannelInterruptFlags
 {
     AURA_INTERRUPT_FLAG_HOSTILE_ACTION              = 0x00000001,   // 0    removed when getting hit by a negative spell

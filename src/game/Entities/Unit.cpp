@@ -2619,6 +2619,9 @@ void Unit::AttackerStateUpdate(Unit* pVictim, WeaponAttackType attType, bool ext
     if (attType == RANGED_ATTACK)
         return;                                             // ignore ranged case
 
+    if (!extra)
+        NotifyAuraOwnerAction(AuraOwnerAction::Action);
+
     auto resetLeashFunc = [&]()
     {
         if (!IsPlayerControlled() && m_lastMoveTime + 3s < GetMap()->GetCurrentClockTime() && GetVictim() && !GetVictim()->IsMoving())
@@ -5224,6 +5227,16 @@ void Unit::RemoveAurasDueToItemSpell(Item* castItem, uint32 spellId)
         else
             ++iter;
     }
+}
+
+void Unit::NotifyAuraOwnerAction(AuraOwnerAction action)
+{
+    if (!IsPlayer())
+        return;
+
+    for (Aura* aura : GetAurasByType(SPELL_AURA_DUMMY))
+        if (AuraScript* script = aura->GetAuraScript())
+            script->OnOwnerAction(aura, action);
 }
 
 void Unit::RemoveAurasWithInterruptFlags(uint32 flags)

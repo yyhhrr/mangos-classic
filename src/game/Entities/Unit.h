@@ -1936,6 +1936,7 @@ class Unit : public WorldObject
         void RemoveSpellsCausingAura(AuraType auraType, ObjectGuid casterGuid);
         void RemoveRankAurasDueToSpell(uint32 spellId);
         bool RemoveNoStackAurasDueToAuraHolder(SpellAuraHolder* holder);
+        void NotifyAuraOwnerAction(AuraOwnerAction action);
         void RemoveAurasWithInterruptFlags(uint32 flags);
         void RemoveAurasWithInterruptFlags(uint32 flags, SpellAuraHolder* except);
         void RemoveAurasWithAttribute(uint32 flags);

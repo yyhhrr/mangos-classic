@@ -3043,7 +3043,11 @@ void Spell::Prepare()
             m_caster->RemoveAurasOnCast(AURA_INTERRUPT_FLAG_ITEM_USE, m_spellInfo);
 
         if (!m_spellInfo->HasAttribute(SPELL_ATTR_EX2_NOT_AN_ACTION))
+        {
+            if (!m_triggeredByAuraSpell)
+                m_caster->NotifyAuraOwnerAction(AuraOwnerAction::Action);
             m_caster->RemoveAurasOnCast(AURA_INTERRUPT_FLAG_ACTION, m_spellInfo);
+        }
 
         // Orientation changes inside
         if (m_notifyAI && m_caster->AI())
@@ -3281,6 +3285,11 @@ SpellCastResult Spell::cast(bool skipCheck)
     SendSpellGo();                                          // we must send smsg_spell_go packet before m_castItem delete in TakeCastItem()...
 
     InitializeDamageMultipliers();
+
+    // A cast started before an aura was applied can complete while it is active.
+    if (m_caster && !m_triggeredByAuraSpell && (!m_IsTriggeredSpell || m_triggerAutorepeat) &&
+        !m_spellInfo->HasAttribute(SPELL_ATTR_EX2_NOT_AN_ACTION))
+        m_caster->NotifyAuraOwnerAction(AuraOwnerAction::Action);
 
     OnCast();
 

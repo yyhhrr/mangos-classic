@@ -99,6 +99,8 @@ struct AuraScript
     // if an aura is applied before, its removed after, and if some aura needs to do something after aura effect is applied, need to revert that change before its removed
     // called before aura apply and after aura unapply
     virtual void OnApply(Aura* /*aura*/, bool /*apply*/) const {}
+    // Observe a player action without removing the aura.
+    virtual void OnOwnerAction(Aura* /*aura*/, AuraOwnerAction /*action*/) const {}
     // the following two hooks are done in an alternative fashion due to how they are usually used
     // if an aura is applied before, its removed after, and if some aura needs to do something after aura effect is applied, need to revert that change before its removed
     // called after aura apply and before aura unapply

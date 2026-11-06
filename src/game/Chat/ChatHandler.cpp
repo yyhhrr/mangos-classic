@@ -211,6 +211,7 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recv_data)
             }
             else if (type == CHAT_MSG_EMOTE)
             {
+                GetPlayer()->NotifyAuraOwnerAction(AuraOwnerAction::Action);
                 GetPlayer()->TextEmote(msg);
 
                 if (lang != LANG_ADDON && !m_anticheat->IsSilenced())
@@ -710,6 +711,9 @@ void WorldSession::HandleEmoteOpcode(WorldPacket& recv_data)
     if (emote != EMOTE_ONESHOT_NONE && emote != EMOTE_ONESHOT_WAVE)
         return;
 
+    if (emote == EMOTE_ONESHOT_WAVE)
+        GetPlayer()->NotifyAuraOwnerAction(AuraOwnerAction::Action);
+
     GetPlayer()->InterruptSpellsAndAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_ANIM_CANCELS);
     GetPlayer()->HandleEmoteCommand(emote);
 }
@@ -769,6 +773,7 @@ void WorldSession::HandleTextEmoteOpcode(WorldPacket& recv_data)
     if (!em)
         return;
 
+    GetPlayer()->NotifyAuraOwnerAction(AuraOwnerAction::Action);
     uint32 emoteId = em->textid;
 
     switch (emoteId)

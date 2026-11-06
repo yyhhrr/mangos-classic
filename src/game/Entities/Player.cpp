@@ -6312,6 +6312,12 @@ bool Player::SetPosition(float x, float y, float z, float orientation, bool tele
         y = GetPositionY();
         z = GetPositionZ();
 
+        if (old_x != x || old_y != y || old_z != z)
+        {
+            const bool forcedMove = teleport || IsLaunched() || !IsClientControlled(this);
+            NotifyAuraOwnerAction(forcedMove ? AuraOwnerAction::ForcedMove : AuraOwnerAction::Move);
+        }
+
         // group update
         if (GetGroup() && (old_x != x || old_y != y))
             SetGroupUpdateFlag(GROUP_UPDATE_FLAG_POSITION);

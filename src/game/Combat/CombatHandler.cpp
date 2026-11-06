@@ -53,7 +53,8 @@ void WorldSession::HandleAttackSwingOpcode(WorldPacket& recv_data)
         return;
     }
 
-    mover->Attack(enemy, true);
+    if (mover->Attack(enemy, true))
+        mover->NotifyAuraOwnerAction(AuraOwnerAction::Action);
 
     // each new attack shows its swing error again, even the one last sent
     _player->SwingErrorMsg(SWING_ERROR_NONE);
