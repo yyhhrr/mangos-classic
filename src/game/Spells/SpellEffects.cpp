@@ -4690,6 +4690,13 @@ void Spell::EffectInebriate(SpellEffectIndex /*eff_idx*/)
     else
         currentDrunk += drunkMod;
     player->SetDrunkValue(currentDrunk, m_CastItem ? m_CastItem->GetEntry() : 0);
+
+    // Egg Nog can transform the drinker into a reindeer or a snowman.
+    if (m_spellInfo->Id == 21149 && roll_chance_i(40))
+    {
+        const uint32 transformSpell = roll_chance_i(50) ? 21936 : 21980;
+        m_caster->CastSpell(player, transformSpell, TRIGGERED_OLD_TRIGGERED);
+    }
 }
 
 void Spell::EffectFeedPet(SpellEffectIndex eff_idx)
