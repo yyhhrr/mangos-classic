@@ -2157,10 +2157,13 @@ SpellEntry const* Creature::ReachWithSpellCure(Unit* pVictim)
 
 bool Creature::IsVisibleInGridForPlayer(Player* pl) const
 {
-    // Inactive Arathi Basin spirit guides remain loaded until their event is reactivated.
-    if (IsDespawned() && (GetCreatureInfo()->NpcFlags & UNIT_NPC_FLAG_SPIRITGUIDE) &&
-            GetBattleGroundTypeIdByMapId(GetMapId()) == BATTLEGROUND_AB)
-        return false;
+    // Inactive spirit guides remain loaded when a capturable graveyard changes hands.
+    if (IsDespawned() && (GetCreatureInfo()->NpcFlags & UNIT_NPC_FLAG_SPIRITGUIDE))
+    {
+        const BattleGroundTypeId bgType = GetBattleGroundTypeIdByMapId(GetMapId());
+        if (bgType == BATTLEGROUND_AB || bgType == BATTLEGROUND_AV)
+            return false;
+    }
 
     // gamemaster in GM mode see all, including ghosts
     if (pl->IsGameMaster())
