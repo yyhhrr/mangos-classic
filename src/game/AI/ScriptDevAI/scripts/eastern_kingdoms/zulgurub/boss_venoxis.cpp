@@ -26,6 +26,7 @@ EndScriptData
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "zulgurub.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
+#include "Entities/Player.h"
 
 enum
 {
@@ -53,6 +54,8 @@ enum
     SPELL_LIST_PHASE_1 = 1450701,
     SPELL_LIST_PHASE_2 = 1450702,
     SPELL_LIST_PHASE_3 = 1450703,
+
+    NPC_PARASITIC_SERPENT = 14884,
 };
 
 enum VenoxisActions
@@ -68,11 +71,26 @@ struct boss_venoxisAI : public CombatAI
     boss_venoxisAI(Creature* creature) : CombatAI(creature, VENOXIS_ACTION_MAX), m_instance(static_cast<ScriptedInstance*>(creature->GetInstanceData()))
     {
         AddTimerlessCombatAction(VENOXIS_PHASE_2, true);
-        AddTimerlessCombatAction(VENOXIS_PHASE_3, true);
-        AddTimerlessCombatAction(VENOXIS_FRENZY, true);
+        AddTimerlessCombatAction(VENOXIS_PHASE_3, false);
+        AddTimerlessCombatAction(VENOXIS_FRENZY, false);
     }
 
     ScriptedInstance* m_instance;
+    GuidSet m_parasiticSerpents;
+
+    void EnterEvadeMode() override
+    {
+        m_creature->RemoveDynObject(SPELL_POISON_CLOUD);
+
+        GuidSet serpents;
+        serpents.swap(m_parasiticSerpents);
+        for (ObjectGuid guid : serpents)
+            if (Creature* serpent = m_creature->GetMap()->GetCreature(guid))
+                if (serpent->IsAlive())
+                    serpent->ForcedDespawn();
+
+        CombatAI::EnterEvadeMode();
+    }
 
     void JustReachedHome() override
     {
@@ -88,6 +106,43 @@ struct boss_venoxisAI : public CombatAI
 
         if (m_instance)
             m_instance->SetData(TYPE_VENOXIS, DONE);
+    }
+
+    void JustSummoned(Creature* summoned) override
+    {
+        if (summoned->GetEntry() != NPC_PARASITIC_SERPENT || !summoned->IsAlive() ||
+            summoned->GetSpawnerGuid() != m_creature->GetObjectGuid())
+            return;
+
+        // Wild summon spells notify the caster both on creation and after the effect.
+        if (!m_parasiticSerpents.insert(summoned->GetObjectGuid()).second)
+            return;
+
+        std::vector<Unit*> targets;
+        m_creature->SelectAttackingTargets(targets, ATTACKING_TARGET_ALL_SUITABLE, 0, nullptr, SELECT_FLAG_PLAYER);
+        targets.erase(std::remove_if(targets.begin(), targets.end(), [summoned](Unit* player)
+        {
+            return static_cast<Player*>(player)->IsGameMaster() || !summoned->CanAttackNow(player);
+        }), targets.end());
+
+        if (targets.empty() || !summoned->AI())
+        {
+            summoned->ForcedDespawn();
+            return;
+        }
+
+        Unit* target = targets[urand(0, targets.size() - 1)];
+        summoned->CastSpell(summoned, SPELL_PARASITIC_SERPENT, TRIGGERED_OLD_TRIGGERED);
+        summoned->AI()->AttackStart(target);
+        if (summoned->GetVictim() == target)
+            summoned->FixateTarget(target);
+        else
+            summoned->ForcedDespawn();
+    }
+
+    void SummonedCreatureDespawn(Creature* summoned) override
+    {
+        m_parasiticSerpents.erase(summoned->GetObjectGuid());
     }
 
     void ExecuteAction(uint32 action) override
@@ -106,6 +161,8 @@ struct boss_venoxisAI : public CombatAI
                     DoResetThreat();
                     m_creature->SetSpellList(SPELL_LIST_PHASE_2);
                     DisableCombatAction(action);
+                    SetActionReadyStatus(VENOXIS_PHASE_3, true);
+                    SetActionReadyStatus(VENOXIS_FRENZY, true);
                 }
                 break;
             case VENOXIS_PHASE_3:

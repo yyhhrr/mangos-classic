@@ -53,8 +53,8 @@ enum
     SPELL_TRASH                 = 3391,
     SPELL_HATCH_EGGS            = 24083,                    // note this should only target 4 eggs!
 
-    SPELL_LIST_PHASE_1          = 1450701,
-    SPELL_LIST_PHASE_2          = 1450702,
+    SPELL_LIST_PHASE_1          = 1451001,
+    SPELL_LIST_PHASE_2          = 1451002,
 };
 
 enum MarliActions
