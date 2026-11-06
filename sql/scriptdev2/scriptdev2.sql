@@ -688,6 +688,7 @@ UPDATE instance_template SET ScriptName='instance_zulgurub' WHERE map=309;
 UPDATE creature_template SET ScriptName='boss_jeklik' WHERE entry=14517;
 UPDATE creature_template SET ScriptName='boss_venoxis' WHERE entry=14507;
 UPDATE creature_template SET ScriptName='boss_marli' WHERE entry=14510;
+UPDATE creature_template SET ScriptName='npc_spawn_of_marli' WHERE entry=15041;
 UPDATE creature_template SET ScriptName='boss_mandokir' WHERE entry=11382;
 UPDATE creature_template SET ScriptName='mob_ohgan' WHERE entry=14988;
 UPDATE creature_template SET ScriptName='boss_hakkar' WHERE entry=14834;

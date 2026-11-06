@@ -96,6 +96,8 @@ INSERT INTO spell_scripts(Id, ScriptName) VALUES
 (23253,'spell_terrordale_haunting_spirit3'),
 (23441,'spell_gadgetzan_transporter'),
 (23442,'spell_everlook_transporter'),
+(24082,'spell_marli_hatch_eggs'),
+(24083,'spell_marli_hatch_eggs'),
 (24228,'spell_arlokk_vanish'),
 (24314,'spell_threatening_gaze'),
 (24335,'spell_wyvern_sting_aura'),
