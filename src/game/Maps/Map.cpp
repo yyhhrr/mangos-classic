@@ -243,6 +243,10 @@ void Map::Initialize(std::mutex* mmapMutex, bool loadInstanceData /*= true*/)
             mmapMutex->unlock();
     }
 
+    // Grid loading checks which battleground events are active.
+    if (BattleGround* bg = GetBG())
+        bg->Reset();
+
     sObjectMgr.LoadActiveEntities(this);
     sObjectMgr.LoadLargeEntities(this);
 

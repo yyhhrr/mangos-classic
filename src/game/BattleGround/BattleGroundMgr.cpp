@@ -353,13 +353,10 @@ BattleGround* BattleGroundMgr::CreateNewBattleGround(BattleGroundTypeId bgTypeId
             return nullptr;
     }
 
-    // will also set m_bgMap, instanceid
-    sMapMgr.CreateBgMap(bg->GetMapId(), instanceId, bg);
-
     bg->SetClientInstanceId(clientInstanceId);
 
-    // reset the new bg (set status to status_wait_queue from status_none)
-    bg->Reset();
+    // Binds the map and initializes battleground events before loading its grids.
+    sMapMgr.CreateBgMap(bg->GetMapId(), instanceId, bg);
 
     // start the joining of the bg
     bg->SetStatus(STATUS_WAIT_JOIN);
