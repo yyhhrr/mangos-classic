@@ -543,13 +543,30 @@ void WorldSession::HandleBeginTradeOpcode(WorldPacket& /*recvPacket*/)
     if (!my_trade || my_trade->IsWindowOpen())
         return;
 
+    TradeData* his_trade = my_trade->GetTraderData();
+    WorldSession* traderSession = my_trade->GetTrader()->GetSession();
+
     my_trade->SetWindowOpen();
-    my_trade->GetTraderData()->SetWindowOpen();
+    his_trade->SetWindowOpen();
 
     TradeStatusInfo info;
     info.Status = TRADE_STATUS_OPEN_WINDOW;
-    my_trade->GetTrader()->GetSession()->SendTradeStatus(info);
+    traderSession->SendTradeStatus(info);
     SendTradeStatus(info);
+
+    // Opening the window clears both offers and resets their versions to 1 on the client.
+    // Resend any offer changed before opening, even if it was subsequently cleared.
+    if (my_trade->GetServerStateIndex() != 1)
+    {
+        traderSession->SendUpdateTrade(true);
+        SendUpdateTrade(false);
+    }
+
+    if (his_trade->GetServerStateIndex() != 1)
+    {
+        SendUpdateTrade(true);
+        traderSession->SendUpdateTrade(false);
+    }
 }
 
 void WorldSession::SendCancelTrade(TradeStatus status) const

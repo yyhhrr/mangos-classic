@@ -12502,11 +12502,22 @@ void Unit::SetCanFly(bool enable)
 {
     // Creatures fly on flying splines. A client flies by swimming through the air: without gravity and with
     // a swimming state it keeps out of water, it moves where it looks, at swim speed.
-    if (!IsClientControlled())
+    Player* player = IsPlayer() ? static_cast<Player*>(this) : nullptr;
+
+    // An active player fly mode can be revoked even while the client has lost control.
+    if (!IsClientControlled() && (enable || !player || !player->IsInFlyMode()))
         return;
 
-    if (IsPlayer())
-        static_cast<Player*>(this)->SetFlyMode(enable);
+    if (enable)
+    {
+        Player const* controller = GetClientControlling();
+        if (!controller || controller->GetSession()->GetSecurity() == SEC_PLAYER ||
+            (player && player->GetSession()->GetSecurity() == SEC_PLAYER))
+            return;
+    }
+
+    if (player)
+        player->SetFlyMode(enable);
 
     MovementFlags const flyFlags = MovementFlags(MOVEFLAG_SWIMMING | MOVEFLAG_KEEP_SWIM_STATE | MOVEFLAG_LEVITATING);
 
@@ -12519,8 +12530,8 @@ void Unit::SetCanFly(bool enable)
     m_movementInfo.fallTime = 0;
 
     // start fall from current height
-    if (IsPlayer())
-        static_cast<Player*>(this)->SetFallInformation(0, GetPositionZ());
+    if (player)
+        player->SetFallInformation(0, GetPositionZ());
 
     if (!IsInWorld())
         return;

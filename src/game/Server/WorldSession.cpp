@@ -148,6 +148,13 @@ void WorldSession::SetOffline()
     m_sessionState = WORLD_SESSION_STATE_OFFLINE;
 }
 
+void WorldSession::SetSecurity(AccountTypes security)
+{
+    _security = security;
+    if (security == SEC_PLAYER && _player && _player->IsInFlyMode())
+        _player->SetCanFly(false);
+}
+
 void WorldSession::SetOnline()
 {
     if (_player && m_socket && !m_socket->IsClosed())
