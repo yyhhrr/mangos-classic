@@ -390,6 +390,13 @@ void Transport::Update(const uint32 /*diff*/)
             return;
         }
 
+        // Clients can discard some transports during a long trip.
+        if (m_currentFrame->IsUpdateFrame())
+        {
+            UpdateForMap(GetMap(), false);
+            UpdateForMap(GetMap(), true);
+        }
+
         if (m_currentFrame == GetKeyFrames().begin())
             DETAIL_FILTER_LOG(LOG_FILTER_TRANSPORT_MOVES, " ************ BEGIN ************** %s", GetName());
 
