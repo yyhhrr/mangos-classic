@@ -502,6 +502,7 @@ Player::Player(WorldSession* session): Unit(), m_taxiTracker(*this), m_mover(thi
     m_session = session;
 
     m_ExtraFlags = 0;
+    m_flyMode = false;
     if (GetSession()->GetSecurity() >= SEC_GAMEMASTER)
         SetAcceptTicket(true);
 
@@ -1733,7 +1734,12 @@ bool Player::BuildEnumData(QueryResult* result, WorldPacket& p_data)
     uint32 playerBytes2 = fields[6].GetUInt32();
     p_data << uint8(playerBytes2 & 0xFF);                  // facial hair
 
-    p_data << uint8(fields[7].GetUInt8());                 // level
+    uint32 atLoginFlags = fields[15].GetUInt32();
+
+    // a character that has never entered the world is sent at level 0, which shows as level 1;
+    // one created above level 1 keeps its level
+    uint8 level = fields[7].GetUInt8();
+    p_data << uint8((atLoginFlags & AT_LOGIN_FIRST) && level == 1 ? 0 : level); // level
     p_data << uint32(fields[8].GetUInt32());               // zone
     p_data << uint32(fields[9].GetUInt32());               // map
 
@@ -1745,7 +1751,6 @@ bool Player::BuildEnumData(QueryResult* result, WorldPacket& p_data)
 
     uint32 char_flags = 0;
     uint32 playerFlags = fields[14].GetUInt32();
-    uint32 atLoginFlags = fields[15].GetUInt32();
     if (playerFlags & PLAYER_FLAGS_HIDE_HELM)
         char_flags |= CHARACTER_FLAG_HIDE_HELM;
     if (playerFlags & PLAYER_FLAGS_HIDE_CLOAK)
@@ -6322,8 +6327,8 @@ bool Player::SetPosition(float x, float y, float z, float orientation, bool tele
         if (GetGroup() && (old_x != x || old_y != y))
             SetGroupUpdateFlag(GROUP_UPDATE_FLAG_POSITION);
 
-        if (GetTrader() && !IsWithinDistInMap(GetTrader(), INTERACTION_DISTANCE))
-            TradeCancel(true, TRADE_STATUS_TARGET_TO_FAR);
+        if (GetTrader() && !IsWithinDistInMap(GetTrader(), TRADE_DISTANCE, false))
+            TradeCancel(true);
 
         if (m_needsZoneUpdate)
         {
@@ -7097,7 +7102,7 @@ bool Player::CanUseCapturePoint() const
            !HasStealthAura() &&                             // not stealthed
            !HasInvisibilityAura() &&                        // visible
            (IsPvP() || sWorld.IsPvPRealm()) &&
-           !HasMovementFlag(MOVEFLAG_FLYING) &&
+           !HasMovementFlag(MOVEFLAG_LEVITATING) &&
            !IsTaxiFlying() &&
            !IsGameMaster();
 }
@@ -17479,7 +17484,7 @@ bool Player::ActivateTaxiPathTo(std::vector<uint32> const& nodes, Creature* npc 
     // stop trade (client cancel trade at taxi map open but cheating tools can be used for reopen it)
     TradeCancel(true);
 
-    if (!m_taxiTracker.AddRoutes(nodes, (npc ? GetReputationPriceDiscount(npc) : 0.0f), !spellid))
+    if (!m_taxiTracker.AddRoutes(nodes, (npc ? GetRepairPriceMultiplier(npc) : 0.0f), !spellid))
     {
         GetSession()->SendActivateTaxiReply(ERR_TAXIUNSPECIFIEDSERVERERROR);
         return false;

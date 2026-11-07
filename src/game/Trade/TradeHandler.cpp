@@ -423,8 +423,15 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPacket& recvPacket)
             SendTradeStatus(myCanCompleteInfo);
             myCanCompleteInfo.IsTargetResult = true;
             trader->GetSession()->SendTradeStatus(myCanCompleteInfo);
-            my_trade->SetAccepted(false);
-            his_trade->SetAccepted(false);
+
+            delete my_spell;
+            delete his_spell;
+
+            // the client closes both windows on this status, so the trade ends here
+            delete _player->m_trade;
+            _player->m_trade = nullptr;
+            delete trader->m_trade;
+            trader->m_trade = nullptr;
             return;
         }
         if (hisCanCompleteInfo.Result != EQUIP_ERR_OK)
@@ -435,8 +442,15 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPacket& recvPacket)
             trader->GetSession()->SendTradeStatus(hisCanCompleteInfo);
             hisCanCompleteInfo.IsTargetResult = true;
             SendTradeStatus(hisCanCompleteInfo);
-            my_trade->SetAccepted(false);
-            his_trade->SetAccepted(false);
+
+            delete my_spell;
+            delete his_spell;
+
+            // the client closes both windows on this status, so the trade ends here
+            delete _player->m_trade;
+            _player->m_trade = nullptr;
+            delete trader->m_trade;
+            trader->m_trade = nullptr;
             return;
         }
 
@@ -525,8 +539,12 @@ void WorldSession::HandleUnacceptTradeOpcode(WorldPacket& /*recvPacket*/)
 void WorldSession::HandleBeginTradeOpcode(WorldPacket& /*recvPacket*/)
 {
     TradeData* my_trade = _player->m_trade;
-    if (!my_trade)
+    // opening an already open trade window makes the client close it and clear its offer, which leaves the offered items locked
+    if (!my_trade || my_trade->IsWindowOpen())
         return;
+
+    my_trade->SetWindowOpen();
+    my_trade->GetTraderData()->SetWindowOpen();
 
     TradeStatusInfo info;
     info.Status = TRADE_STATUS_OPEN_WINDOW;

@@ -714,8 +714,9 @@ enum MovementFlags
     MOVEFLAG_PITCH_DOWN         = 0x00000080,
     MOVEFLAG_WALK_MODE          = 0x00000100,               // Walking
 
-    MOVEFLAG_LEVITATING         = 0x00000400,
-    MOVEFLAG_FLYING             = 0x00000800,               // [-ZERO] is it really need and correct value
+    MOVEFLAG_KEEP_SWIM_STATE    = 0x00000400,               // the client neither starts nor stops swimming by itself
+    MOVEFLAG_LEVITATING         = 0x00000800,
+    MOVEFLAG_ROOT               = 0x00001000,
     MOVEFLAG_JUMPING            = 0x00002000,
     MOVEFLAG_FALLINGFAR         = 0x00004000,
     MOVEFLAG_SWIMMING           = 0x00200000,               // appears with fly flag also
@@ -725,7 +726,6 @@ enum MovementFlags
 
     MOVEFLAG_ONTRANSPORT        = 0x02000000,               // Used for flying on some creatures
     MOVEFLAG_SPLINE_ELEVATION   = 0x04000000,               // used for flight paths
-    MOVEFLAG_ROOT               = 0x08000000,               // used for flight paths
     MOVEFLAG_WATERWALKING       = 0x10000000,               // prevent unit from falling through water
     MOVEFLAG_SAFE_FALL          = 0x20000000,               // active rogue safe fall spell (passive)
     MOVEFLAG_HOVER              = 0x40000000,

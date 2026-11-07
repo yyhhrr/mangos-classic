@@ -12500,7 +12500,36 @@ void Unit::SetSwim(bool enable)
 
 void Unit::SetCanFly(bool enable)
 {
-    // TBC+
+    // Creatures fly on flying splines. A client flies by swimming through the air: without gravity and with
+    // a swimming state it keeps out of water, it moves where it looks, at swim speed.
+    if (!IsClientControlled())
+        return;
+
+    if (IsPlayer())
+        static_cast<Player*>(this)->SetFlyMode(enable);
+
+    MovementFlags const flyFlags = MovementFlags(MOVEFLAG_SWIMMING | MOVEFLAG_KEEP_SWIM_STATE | MOVEFLAG_LEVITATING);
+
+    // The client does not answer: the flags it is given become the server copy of its movement right away
+    m_movementInfo.RemoveMovementFlag(MovementFlags(MOVEFLAG_JUMPING | MOVEFLAG_FALLINGFAR));
+    if (enable)
+        m_movementInfo.AddMovementFlag(flyFlags);
+    else
+        m_movementInfo.RemoveMovementFlag(MovementFlags(flyFlags | MOVEFLAG_PITCH_UP | MOVEFLAG_PITCH_DOWN));
+    m_movementInfo.fallTime = 0;
+
+    // start fall from current height
+    if (IsPlayer())
+        static_cast<Player*>(this)->SetFallInformation(0, GetPositionZ());
+
+    if (!IsInWorld())
+        return;
+
+    // The client replaces its movement flags and position with those of this packet, then applies gravity or not
+    WorldPacket data(MSG_MOVE_TOGGLE_GRAVITY_CHEAT, 64);
+    data << GetPackGUID();
+    data << m_movementInfo;
+    SendMessageToSet(data, true);
 }
 
 void Unit::SetFeatherFall(bool enable)
@@ -12644,7 +12673,7 @@ void Unit::CharmCooldownInitialize(WorldPacket& data) const
             continue;
 
         if (cdData->IsPermanent())
-            catCDDuration |= 0x8000000;
+            catCDDuration |= 0x80000000;
 
         data << uint16(cdData->GetSpellId());
         data << uint16(cdData->GetCategory());              // spellInfo category

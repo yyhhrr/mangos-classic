@@ -259,6 +259,10 @@ void WorldSession::HandleMoveWorldportAckOpcode()
         // lets process all delayed operations on successful teleport
         GetPlayer()->ProcessDelayedOperations();
 
+        // a teleport takes the client out of the fly mode
+        if (_player->IsInFlyMode())
+            _player->SetCanFly(true);
+
         // notify group after successful teleport
         if (_player->GetGroup())
             _player->SetGroupUpdateFlag(GROUP_UPDATE_FULL);
@@ -368,6 +372,10 @@ void WorldSession::HandleMoveTeleportAckOpcode(WorldPacket& recv_data)
 
     // lets process all delayed operations on successful teleport
     GetPlayer()->ProcessDelayedOperations();
+
+    // a teleport takes the client out of the fly mode
+    if (plMover->IsInFlyMode())
+        plMover->SetCanFly(true);
 }
 
 void WorldSession::HandleMovementOpcodes(WorldPacket& recv_data)
@@ -400,13 +408,17 @@ void WorldSession::HandleMovementOpcodes(WorldPacket& recv_data)
     // CMSG opcode has no handler in client, should not be sent to others.
     // It is sent by client when you jump and hit something on the way up,
     // thus stopping upward movement and causing you to descend sooner.
-    if (opcode == CMSG_MOVE_FALL_RESET)
-        return;
+    if (opcode != CMSG_MOVE_FALL_RESET)
+    {
+        WorldPacket data(opcode, recv_data.size());
+        data << mover->GetPackGUID();         // write guid
+        movementInfo.Write(data);                           // write data
+        mover->SendMessageToAllWhoSeeMeMove(data, _player->GetObjectGuid());
+    }
 
-    WorldPacket data(opcode, recv_data.size());
-    data << mover->GetPackGUID();             // write guid
-    movementInfo.Write(data);                               // write data
-    mover->SendMessageToAllWhoSeeMeMove(data, _player->GetObjectGuid());
+    // a jump takes the client out of the fly mode
+    if (plMover && plMover->IsInFlyMode() && !movementInfo.HasMovementFlag(MOVEFLAG_SWIMMING))
+        plMover->SetCanFly(true);
 }
 
 void WorldSession::HandleForceSpeedChangeAckOpcodes(WorldPacket& recv_data)
@@ -717,8 +729,7 @@ bool WorldSession::VerifyMovementInfo(MovementInfo const& movementInfo, Unit* mo
     if (movementInfo.HasMovementFlag(MOVEFLAG_ONTRANSPORT))
     {
         // transports size limited
-        // (also received at zeppelin/lift leave by some reason with t_* as absolute in continent coordinates, can be safely skipped)
-        if (movementInfo.GetTransportPos().x > 50 || movementInfo.GetTransportPos().y > 50 || movementInfo.GetTransportPos().z > 100)
+        if (std::fabs(movementInfo.GetTransportPos().x) > 100.0f || std::fabs(movementInfo.GetTransportPos().y) > 100.0f || std::fabs(movementInfo.GetTransportPos().z) > 100.0f)
             return false;
 
         if (!MaNGOS::IsValidMapCoord(movementInfo.GetPos().x + movementInfo.GetTransportPos().x, movementInfo.GetPos().y + movementInfo.GetTransportPos().y,
