@@ -1583,10 +1583,10 @@ std::pair<bool, bool> ScriptAction::GetScriptProcessTargets(WorldObject* origina
                         buddies.push_back(creatureBuddy);
 
                     // TODO: Remove this extra check output after a while - it might have false effects
-                    if (!creatureBuddy && origin->GetEntry() == m_script->buddyEntry)
+                    else if (origin->IsCreature() && origin->GetEntry() == m_script->buddyEntry)
                     {
                         sLog.outErrorDb(" DB-SCRIPTS: WARNING: Process table `%s` id %u, command %u has no OTHER buddy %u found - maybe you need to update the script?", m_table, m_script->id, m_script->command, m_script->buddyEntry);
-                        buddies.push_back(creatureBuddy);
+                        buddies.push_back(origin);
                     }
                 }
             }
