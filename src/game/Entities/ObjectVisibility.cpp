@@ -177,13 +177,18 @@ float VisibilityData::GetStealthVisibilityDistance(Unit const* target, bool aler
     // not in the DBCs of the client.
     detectionValue += int32(target->GetLevelForTarget(dynamic_cast<Unit*>(m_owner)) - 1) * 5;
 
-    // Apply modifiers
-    detectionValue += target->GetVisibilityData().GetStealthDetectionStrength(STEALTH_UNIT);
-    if (m_owner->GetTypeId() == TYPEID_GAMEOBJECT) // trap case
+    StealthType const stealthType = m_owner->GetTypeId() == TYPEID_GAMEOBJECT ? STEALTH_TRAP : STEALTH_UNIT;
+    VisibilityData const& detector = target->GetVisibilityData();
+    detectionValue += detector.GetStealthDetectionStrength(STEALTH_UNIT);
+    if (stealthType == STEALTH_TRAP)
+    {
+        // Traps can also be found with ordinary stealth detection.
+        detectionValue += detector.GetStealthDetectionStrength(STEALTH_TRAP);
         if (Unit* owner = static_cast<GameObject*>(m_owner)->GetOwner())
             detectionValue -= int32(owner->GetLevelForTarget(dynamic_cast<Unit*>(m_owner)) - 1) * 5;
+    }
 
-    detectionValue -= GetStealthStrength(STEALTH_UNIT);
+    detectionValue -= GetStealthStrength(stealthType);
 
     // Calculate max distance
     float visibilityRange = float(detectionValue) * 0.3f;
