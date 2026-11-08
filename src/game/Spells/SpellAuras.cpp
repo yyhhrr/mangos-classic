@@ -3540,7 +3540,12 @@ void Aura::HandleModHealingDone(bool /*apply*/, bool /*Real*/)
     //((Player*)GetTarget())->UpdateSpellHealingBonus(); //Not implemented on classic
 }
 
-void Aura::HandleModTotalPercentStat(bool apply, bool /*Real*/)
+static bool IsHeartOfTheWildRank(uint32 spellId)
+{
+    return (spellId >= 17003 && spellId <= 17006) || spellId == 24894;
+}
+
+void Aura::HandleModTotalPercentStat(bool apply, bool Real)
 {
     if (m_modifier.m_miscvalue < -1 || m_modifier.m_miscvalue > 4)
     {
@@ -3567,10 +3572,17 @@ void Aura::HandleModTotalPercentStat(bool apply, bool /*Real*/)
     // recalculate current HP/MP after applying aura modifications (only for spells with 0x10 flag)
     if (m_modifier.m_miscvalue == STAT_STAMINA && maxHPValue > 0 && GetSpellProto()->HasAttribute(SPELL_ATTR_IS_ABILITY) && target->GetHealth() > 0)
     {
-        // newHP = (curHP / maxHP) * newMaxHP = (newMaxHP * curHP) / maxHP -> which is better because no int -> double -> int conversion is needed
-        uint32 newHPValue = std::max(1u, (target->GetMaxHealth() * curHPValue) / maxHPValue);
-        target->SetHealth(newHPValue);
+        if (Real && GetId() == 24899 && target->IsPlayer())
+            static_cast<Player*>(target)->RestoreHealthAfterFormChange(curHPValue, maxHPValue);
+        else
+        {
+            uint32 newHPValue = std::max(1u, (target->GetMaxHealth() * curHPValue) / maxHPValue);
+            target->SetHealth(newHPValue);
+        }
     }
+
+    if (Real && target->IsPlayer() && IsHeartOfTheWildRank(GetId()))
+        HandleHeartOfTheWildFormBonus(apply);
 }
 
 void Aura::HandleAuraModResistenceOfStatPercent(bool /*apply*/, bool /*Real*/)
@@ -3706,9 +3718,13 @@ void Aura::HandleAuraModIncreaseHealth(bool apply, bool Real)
         {
             if (Real)
             {
-                float pct = target->GetHealthPercent();
+                uint32 const previousHealth = target->GetHealth();
+                uint32 const previousMaxHealth = target->GetMaxHealth();
                 target->HandleStatModifier(UNIT_MOD_HEALTH, TOTAL_VALUE, float(m_modifier.m_amount), apply);
-                target->SetHealthPercent(pct);
+                if (target->IsPlayer())
+                    static_cast<Player*>(target)->RestoreHealthAfterFormChange(previousHealth, previousMaxHealth);
+                else
+                    target->SetHealthPercent(previousHealth * 100.0f / previousMaxHealth);
             }
             return;
         }
@@ -4226,11 +4242,40 @@ void Aura::HandleModPowerCost(bool apply, bool Real)
 /***                    OTHERS                         ***/
 /*********************************************************/
 
+void Aura::HandleHeartOfTheWildFormBonus(bool apply)
+{
+    Unit* target = GetTarget();
+    if (GetCasterGuid() != target->GetObjectGuid())
+        return;
+
+    if (!apply)
+    {
+        target->RemoveAurasTriggeredBySpell(GetId(), GetCasterGuid());
+        return;
+    }
+
+    uint32 spellId;
+    switch (target->GetShapeshiftForm())
+    {
+        case FORM_CAT:
+            spellId = 24900;
+            break;
+        case FORM_BEAR:
+        case FORM_DIREBEAR:
+            spellId = 24899;
+            break;
+        default:
+            return;
+    }
+
+    int32 amount = m_modifier.m_amount;
+    target->CastCustomSpell(nullptr, spellId, &amount, nullptr, nullptr, TRIGGERED_OLD_TRIGGERED, nullptr, this);
+}
+
 void Aura::HandleShapeshiftBoosts(bool apply)
 {
     uint32 spellId1 = 0;
     uint32 spellId2 = 0;
-    uint32 HotWSpellId = 0;
 
     ShapeshiftForm form = ShapeshiftForm(GetModifier()->m_miscvalue);
 
@@ -4240,7 +4285,6 @@ void Aura::HandleShapeshiftBoosts(bool apply)
     {
         case FORM_CAT:
             spellId1 = 3025;
-            HotWSpellId = 24900;
             break;
         case FORM_TREE:
             spellId1 = 5420;
@@ -4254,12 +4298,10 @@ void Aura::HandleShapeshiftBoosts(bool apply)
         case FORM_BEAR:
             spellId1 = 1178;
             spellId2 = 21178;
-            HotWSpellId = 24899;
             break;
         case FORM_DIREBEAR:
             spellId1 = 9635;
             spellId2 = 21178;
-            HotWSpellId = 24899;
             break;
         case FORM_BATTLESTANCE:
             spellId1 = 21156;
@@ -4318,15 +4360,13 @@ void Aura::HandleShapeshiftBoosts(bool apply)
             }
 
             // Heart of the Wild
-            if (HotWSpellId)
+            if (form == FORM_CAT || form == FORM_BEAR || form == FORM_DIREBEAR)
             {
-                Unit::AuraList const& mModTotalStatPct = target->GetAurasByType(SPELL_AURA_MOD_TOTAL_STAT_PERCENTAGE);
-                for (auto i : mModTotalStatPct)
+                for (Aura* aura : target->GetAurasByType(SPELL_AURA_MOD_TOTAL_STAT_PERCENTAGE))
                 {
-                    if (i->GetSpellProto()->SpellIconID == 240 && i->GetModifier()->m_miscvalue == 3)
+                    if (IsHeartOfTheWildRank(aura->GetId()))
                     {
-                        int32 HotWMod = i->GetModifier()->m_amount;
-                        target->CastCustomSpell(nullptr, HotWSpellId, &HotWMod, nullptr, nullptr, TRIGGERED_OLD_TRIGGERED, nullptr, this);
+                        aura->HandleHeartOfTheWildFormBonus(true);
                         break;
                     }
                 }

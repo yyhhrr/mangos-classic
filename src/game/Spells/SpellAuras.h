@@ -465,6 +465,7 @@ class Aura
 
         // add/remove SPELL_AURA_MOD_SHAPESHIFT (36) linked auras
         void HandleShapeshiftBoosts(bool apply);
+        void HandleHeartOfTheWildFormBonus(bool apply);
 
         void TriggerSpell();
 

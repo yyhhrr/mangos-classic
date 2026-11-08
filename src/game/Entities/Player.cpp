@@ -1684,6 +1684,8 @@ void Player::SetDeathState(DeathState s)
     }
 
     Unit::SetDeathState(s);
+    if (s == JUST_DIED)
+        m_formHealth = {};
 
     // restore resurrection spell id for player after aura remove
     if (s == JUST_DIED && cur && ressSpellId)
@@ -14960,6 +14962,11 @@ void Player::_LoadActions(std::unique_ptr<QueryResult> queryResult)
     }
 }
 
+static bool IsHeartOfTheWildFormAura(uint32 spellId)
+{
+    return spellId == 24899 || spellId == 24900;
+}
+
 void Player::_LoadAuras(std::unique_ptr<QueryResult> queryResult, uint32 timediff)
 {
     // RemoveAllAuras(); -- some spells casted before aura load, for example in LoadSkills, aura list explicitly cleaned early
@@ -14974,6 +14981,10 @@ void Player::_LoadAuras(std::unique_ptr<QueryResult> queryResult, uint32 timedif
             ObjectGuid caster_guid = ObjectGuid(fields[0].GetUInt64());
             uint32 item_lowguid = fields[1].GetUInt32();
             uint32 spellid = fields[2].GetUInt32();
+            // The restored form rebuilds this aura using the current talent rank.
+            if (IsHeartOfTheWildFormAura(spellid))
+                continue;
+
             uint32 stackcount = fields[3].GetUInt32();
             uint32 remaincharges = fields[4].GetUInt32();
             int32  damage[MAX_EFFECT_INDEX];
@@ -16175,7 +16186,7 @@ void Player::_SaveAuras()
         SpellAuraHolder* holder = auraHolder.second;
         // skip all holders from spells that are passive or channeled
         // save singleTarget auras if self cast.
-        if (holder->IsSaveToDbHolder())
+        if (holder->IsSaveToDbHolder() && !IsHeartOfTheWildFormAura(holder->GetId()))
         {
             int32  damage[MAX_EFFECT_INDEX];
             uint32 periodicTime[MAX_EFFECT_INDEX];

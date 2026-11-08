@@ -1877,6 +1877,7 @@ class Player : public Unit
         void _ApplyItemBonuses(ItemPrototype const* proto, uint8 slot, bool apply);
         void _ApplyAmmoBonuses();
         void InitDataForForm(bool reapplyMods = false);
+        void RestoreHealthAfterFormChange(uint32 previousHealth, uint32 previousMaxHealth);
 
         void ApplyItemEquipSpell(Item* item, bool apply, bool form_change = false);
         void ApplyEquipSpell(SpellEntry const* spellInfo, Item* item, bool apply, bool form_change = false);
@@ -2567,6 +2568,14 @@ class Player : public Unit
         uint32 m_newZone;
 
         uint32 m_LFGAreaId;
+
+        struct FormHealthSnapshot
+        {
+            uint32 referenceHealth = 0;
+            uint32 referenceMaxHealth = 0;
+            uint32 lastHealth = 0;
+            uint32 lastMaxHealth = 0;
+        } m_formHealth;
 
         // Temporary removed pet cache
         uint32 m_temporaryUnsummonedPetNumber;

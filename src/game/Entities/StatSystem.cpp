@@ -183,6 +183,33 @@ void Unit::UpdateMaxHealth()
     SetMaxHealth(uint32(std::round(std::max(value, 1.f))));
 }
 
+void Player::RestoreHealthAfterFormChange(uint32 previousHealth, uint32 previousMaxHealth)
+{
+    if (!previousHealth || !previousMaxHealth || !IsAlive())
+    {
+        m_formHealth = {};
+        return;
+    }
+
+    uint32 const maxHealth = GetMaxHealth();
+    if (maxHealth == previousMaxHealth || !maxHealth)
+        return;
+
+    // Keep the original ratio until health or its maximum changes between
+    // conversions, then use the new values as the reference.
+    if (previousHealth != m_formHealth.lastHealth || previousMaxHealth != m_formHealth.lastMaxHealth)
+    {
+        m_formHealth.referenceHealth = previousHealth;
+        m_formHealth.referenceMaxHealth = previousMaxHealth;
+    }
+
+    uint64 const numerator = uint64(m_formHealth.referenceHealth) * maxHealth;
+    uint32 const health = uint32((numerator + m_formHealth.referenceMaxHealth / 2) / m_formHealth.referenceMaxHealth);
+    SetHealth(std::max(1u, health));
+    m_formHealth.lastHealth = GetHealth();
+    m_formHealth.lastMaxHealth = maxHealth;
+}
+
 void Unit::UpdateMaxPower(Powers power)
 {
     UnitMods unitMod = UnitMods(static_cast<uint32>(UNIT_MOD_POWER_START) + static_cast<uint32>(power));
