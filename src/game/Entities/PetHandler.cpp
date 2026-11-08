@@ -353,7 +353,9 @@ void WorldSession::HandlePetAction(WorldPacket& recv_data)
                 unit_target = nullptr;
             else if (!unit_target && IsSpellAimedAtEnemy(spellInfo))
             {
-                petUnit->SendPetActionFeedback(FEEDBACK_NOTHING_TO_ATT);
+                WorldPacket data(SMSG_PET_ACTION_FEEDBACK, 1);
+                data << uint8(FEEDBACK_NOTHING_TO_ATT);
+                SendPacket(data);
                 return;
             }
 

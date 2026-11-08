@@ -2825,7 +2825,10 @@ void Unit::SendMeleeAttackStop(Unit const* victim) const
     else
         data << PackedGuid();
     data << uint32(IsDead() ? 1 : 0);
-    SendMessageToSet(data, true);
+    if (victim)
+        SendMessageToSet(data, true);
+    else if (IsPlayer())
+        static_cast<Player const*>(this)->GetSession()->SendPacket(data);
     DETAIL_FILTER_LOG(LOG_FILTER_COMBAT, "%s stopped attacking %s", GetGuidStr().c_str(), victim ? victim->GetGuidStr().c_str() : "nothing");
 }
 
