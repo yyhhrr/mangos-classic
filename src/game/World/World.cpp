@@ -82,6 +82,7 @@
 #include "ahbot/AhBot.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/RandomPlayerbotMgr.h"
+#include "playerbot/strategy/values/TrainerValues.h"
 #endif
 
 #include <algorithm>
@@ -1446,6 +1447,8 @@ void World::SetInitialWorldSettings()
 #endif
 
 #ifdef ENABLE_PLAYERBOTS
+    sLog.outString("Loading trainable spells.");
+    ai::TrainableSpellMapValue::Reload();
     sPlayerbotAIConfig.Initialize();
 #ifndef BUILD_AHBOT
     auctionbot.Init();

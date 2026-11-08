@@ -65,6 +65,10 @@
 
 #include "MotionGenerators/MoveMap.h"
 
+#ifdef ENABLE_PLAYERBOTS
+#include "playerbot/strategy/values/TrainerValues.h"
+#endif
+
 #ifdef BUILD_AHBOT
 #include "AuctionHouseBot/AuctionHouseBot.h"
 
@@ -575,6 +579,9 @@ bool ChatHandler::HandleReloadNpcTrainerCommand(char* /*args*/)
 
     sLog.outString("Re-Loading `npc_trainer` Table!");
     sObjectMgr.LoadTrainers();
+#ifdef ENABLE_PLAYERBOTS
+    ai::TrainableSpellMapValue::Reload();
+#endif
     SendGlobalSysMessage("DB table `npc_trainer` reloaded.");
     return true;
 }
