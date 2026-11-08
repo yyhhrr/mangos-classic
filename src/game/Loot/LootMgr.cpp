@@ -28,6 +28,7 @@
 #include "Server/SQLStorages.h"
 #include "Entities/ItemEnchantmentMgr.h"
 #include "Entities/Corpse.h"
+#include "Entities/Pet.h"
 #include "Tools/Language.h"
 #include "BattleGround/BattleGroundMgr.h"
 #include "Maps/InstanceData.h"
@@ -1765,6 +1766,7 @@ void Loot::Release(Player* player)
             updateClients = false;
             break;
         }
+        case HIGHGUID_PET:
         case HIGHGUID_UNIT:
         {
             switch (m_lootType)
@@ -2071,7 +2073,9 @@ Loot::Loot(Player* player, Creature* creature, LootType type, std::vector<uint32
     {
         case LOOT_CORPSE:
         {
-            if (creature->GetSettings().HasFlag(CreatureStaticFlags3::CAN_BE_MULTITAPPED))
+            if (player && creature->IsPet() && static_cast<Pet*>(creature)->HasOwnerOnlyCorpseLoot())
+                m_ownerSet.insert(player->GetObjectGuid());
+            else if (creature->GetSettings().HasFlag(CreatureStaticFlags3::CAN_BE_MULTITAPPED))
             {
                 for (auto& threatEntry : creature->getThreatManager().getThreatList())
                     if (threatEntry->getTarget()->IsPlayer())
@@ -3509,6 +3513,19 @@ Loot* LootMgr::GetLoot(Player* player, ObjectGuid const& targetGuid) const
             Item* item = player->GetItemByGuid(lguid);
             if (item && item->HasGeneratedLoot())
                 loot = item->m_loot;
+            break;
+        }
+        case HIGHGUID_PET:
+        {
+            // Item and money packets require an opened pet corpse, not just a selected one.
+            if (targetGuid.IsEmpty() && player->GetLootGuid() != lguid)
+                break;
+
+            Pet* pet = player->GetMap()->GetPet(lguid);
+            if (pet && pet->GetDeathState() == CORPSE && pet->HasOwnerOnlyCorpseLoot() &&
+                pet->GetOwnerGuid() == player->GetObjectGuid())
+                loot = pet->m_loot;
+
             break;
         }
         case HIGHGUID_UNIT:

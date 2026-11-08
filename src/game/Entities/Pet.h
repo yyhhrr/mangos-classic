@@ -166,6 +166,8 @@ class Pet : public Creature
         bool isControlled() const { return getPetType() == SUMMON_PET || getPetType() == HUNTER_PET; }
         bool isTemporarySummoned() const { return m_duration > 0; }
         bool IsGuardian() const { return getPetType() == GUARDIAN_PET; }
+        bool HasOwnerOnlyCorpseLoot() const { return m_ownerOnlyCorpseLoot; }
+        void EnableOwnerOnlyCorpseLoot() { m_ownerOnlyCorpseLoot = true; }
         bool HasActionsDisabled() const { return GetModeFlags() & PET_MODE_DISABLE_ACTIONS; }
 
         bool Create(uint32 guidlow, CreatureCreatePos& cPos, CreatureInfo const* cinfo, uint32 pet_number);
@@ -319,6 +321,7 @@ class Pet : public Creature
         PetModeFlags m_petModeFlags;
         CharmInfo*   m_originalCharminfo;
         bool m_scaleWithCls;
+        bool m_ownerOnlyCorpseLoot = false;
 
         void SaveToDB(uint32) override                      // overwrited of Creature::SaveToDB     - don't must be called
         {

@@ -26,6 +26,7 @@
 #include "Spells/SpellAuras.h"
 #include "Entities/Unit.h"
 #include "Entities/Transports.h"
+#include "Loot/LootMgr.h"
 
 // numbers represent minutes * 100 while happy (you get 100 loyalty points per min while happy)
 uint32 const LevelUpLoyalty[6] =
@@ -608,12 +609,20 @@ Player* Pet::GetSpellModOwner() const
 
 void Pet::SetDeathState(DeathState s)                       // overwrite virtual Creature::SetDeathState and Unit::SetDeathState
 {
+    // JustKilledCreature marks real deaths as DEAD before this transition.
+    bool const leaveOwnerLoot = s == JUST_DIED && GetDeathState() == DEAD && HasOwnerOnlyCorpseLoot();
     Creature::SetDeathState(s);
     if (GetDeathState() == CORPSE) // will despawn at corpse despawning (Pet::Update code)
     {
-        // pet corpse non lootable and non skinnable
+        // Ordinary pet corpses do not leave loot.
         SetUInt32Value(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_NONE);
         RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SKINNABLE);
+
+        if (leaveOwnerLoot && !m_loot && !IsNoLoot())
+        {
+            if (Player* owner = dynamic_cast<Player*>(GetOwner()))
+                m_loot = new Loot(owner, this, LOOT_CORPSE);
+        }
 
         if (getPetType() != SUMMON_PET)
         {
