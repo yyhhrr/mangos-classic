@@ -120,6 +120,7 @@ extern void AddSC_boss_ouro();
 extern void AddSC_boss_renataki();
 extern void AddSC_boss_thekal();
 extern void AddSC_boss_venoxis();
+extern void AddSC_boss_wushoolay();
 extern void AddSC_edge_of_madness();
 extern void AddSC_instance_zulgurub();
 extern void AddSC_zulgurub();
@@ -332,6 +333,7 @@ void AddScripts()
     AddSC_boss_renataki();
     AddSC_boss_thekal();
     AddSC_boss_venoxis();
+    AddSC_boss_wushoolay();
     AddSC_edge_of_madness();
     AddSC_instance_zulgurub();
     AddSC_zulgurub();
