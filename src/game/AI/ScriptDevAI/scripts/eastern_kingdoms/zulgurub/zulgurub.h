@@ -93,7 +93,7 @@ class instance_zulgurub : public ScriptedInstance
         bool StartGahzrankaSummon(Player& player, uint32 travelTime);
 
     protected:
-        void RemoveHakkarPowerStack();
+        void UpdateHakkarPowerStacks();
         void RestoreEventObject(GameObject* go, uint32 eventId);
         void RestoreEventObjects(uint32 eventId);
         void RemoveEventSummons(uint32 eventId, uint32 summonEntry = 0);

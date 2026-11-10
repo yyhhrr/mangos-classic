@@ -11526,7 +11526,9 @@ bool Unit::TakeCharmOf(Unit* charmed, uint32 spellId, bool advertised /*= true*/
     if (charmInfo->GetUnit() != charmed)
         sLog.outCustomLog("Unit didnt equal in Unit::TakeCharmOf after flag changes.");
 
-    if (spellId != 24178) // Will of Hakkar - Preserves threat
+    // Zul'Gurub Hakkar handles only his own threat while Cause Insanity is active.
+    bool const hakkarInsanity = spellId == 24327 && GetEntry() == 14834 && GetMapId() == 309;
+    if (spellId != 24178 && !hakkarInsanity) // Will of Hakkar also preserves threat
         charmInfo->ProcessUnattackableTargets(charmed->m_combatData);
 
     if (charmInfo->GetUnit() != charmed)

@@ -317,14 +317,14 @@ void instance_zulgurub::SetData(uint32 type, uint32 data)
         case TYPE_THEKAL:
             m_auiEncounter[type] = data;
             if (data == DONE)
-                RemoveHakkarPowerStack();
+                UpdateHakkarPowerStacks();
             break;
         case TYPE_MARLI:
         {
             bool const reset = data == FAIL && m_auiEncounter[type] != FAIL;
             m_auiEncounter[type] = data;
             if (data == DONE)
-                RemoveHakkarPowerStack();
+                UpdateHakkarPowerStacks();
             else if (reset)
             {
                 RemoveEventSummons(TYPE_MARLI, NPC_SPAWN_OF_MARLI);
@@ -341,7 +341,7 @@ void instance_zulgurub::SetData(uint32 type, uint32 data)
             {
                 StopArlokkProwlers();
                 ReleaseArlokkProwlers();
-                RemoveHakkarPowerStack();
+                UpdateHakkarPowerStacks();
             }
             if (data == FAIL)
                 RemoveEventSummons(TYPE_ARLOKK, NPC_ZULIAN_PROWLER);
@@ -390,15 +390,14 @@ void instance_zulgurub::SetData(uint32 type, uint32 data)
     }
 }
 
-// Each time one of the High Priests dies, remove one stack of Hakkar's Power (lowering Hakkar's HP)
-void instance_zulgurub::RemoveHakkarPowerStack()
+void instance_zulgurub::UpdateHakkarPowerStacks()
 {
     if (Creature* hakkar = GetSingleCreatureFromStorage(NPC_HAKKAR))
     {
         if (!hakkar->IsAlive())
             return;
 
-        hakkar->CastSpell(hakkar, SPELL_HAKKAR_POWER_DOWN, TRIGGERED_NONE);
+        hakkar->CastSpell(hakkar, SPELL_HAKKAR_POWER_DOWN, TRIGGERED_OLD_TRIGGERED);
     }
 }
 
