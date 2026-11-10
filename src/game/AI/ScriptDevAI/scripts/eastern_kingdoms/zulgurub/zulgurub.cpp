@@ -25,6 +25,8 @@ EndScriptData
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "zulgurub.h"
+#include "Database/DatabaseEnv.h"
+#include "GameEvents/GameEventMgr.h"
 #include "Globals/ObjectMgr.h"
 #include "Maps/MapPersistentStateMgr.h"
 #include "Maps/SpawnManager.h"
@@ -43,7 +45,32 @@ constexpr float GahzrankaSpawnY = -1728.91f;
 constexpr float GahzrankaSpawnZ = -7.08374f;
 constexpr float GahzrankaSpawnOrientation = 4.20624f;
 
-std::string MakeSaveData(uint32 const (&states)[MAX_ENCOUNTER], uint32 gahzrankaState)
+constexpr uint32 EdgeOfMadnessSummonDelay = 5 * IN_MILLISECONDS;
+constexpr float EdgeOfMadnessSpawnX = -11901.3f;
+constexpr float EdgeOfMadnessSpawnY = -1906.52f;
+constexpr float EdgeOfMadnessSpawnZ = 65.36f;
+constexpr float EdgeOfMadnessSpawnOrientation = 0.87f;
+constexpr float EdgeOfMadnessRestoreRange = 60.0f;
+
+struct EdgeOfMadnessRotation
+{
+    uint16 eventId;
+    uint32 bossEntry;
+    uint32 tabletEntry;
+    uint32 inactiveText;
+    uint32 activeText;
+};
+
+constexpr EdgeOfMadnessRotation EdgeOfMadnessBosses[] =
+{
+    {29, NPC_GRILEK, 180358, 7643, 7669},
+    {30, NPC_HAZZARAH, 180364, 7670, 7671},
+    {31, NPC_RENATAKI, 180365, 7672, 7673},
+    {32, NPC_WUSHOOLAY, 180393, 7674, 7675},
+};
+
+std::string MakeSaveData(uint32 const (&states)[MAX_ENCOUNTER], uint32 gahzrankaState,
+    EdgeOfMadnessProgress const& madness)
 {
     std::ostringstream stream;
     for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
@@ -52,23 +79,46 @@ std::string MakeSaveData(uint32 const (&states)[MAX_ENCOUNTER], uint32 gahzranka
             stream << ' ';
         stream << states[i];
     }
-    if (gahzrankaState != NOT_STARTED)
+    if (gahzrankaState != NOT_STARTED || madness.state != NOT_STARTED)
         stream << ' ' << gahzrankaState;
+    if (madness.state != NOT_STARTED)
+        stream << ' ' << madness.state << ' ' << madness.bossEntry << ' ' << madness.summoner.GetCounter();
     return stream.str();
 }
 
-bool ReadGahzrankaState(std::istream& stream, uint32& state)
+bool ReadOptionalEncounters(std::istream& stream, uint32& gahzrankaState, EdgeOfMadnessProgress& madness)
 {
     // Older saves end after the eight encounter states.
     stream >> std::ws;
     if (stream.eof())
     {
-        state = NOT_STARTED;
+        gahzrankaState = NOT_STARTED;
         return true;
     }
 
-    if (!(stream >> state) || (state != NOT_STARTED && state != IN_PROGRESS && state != DONE))
+    if (!(stream >> gahzrankaState) ||
+        (gahzrankaState != NOT_STARTED && gahzrankaState != IN_PROGRESS && gahzrankaState != DONE))
         return false;
+
+    stream >> std::ws;
+    if (stream.eof())
+        return true;                                        // Gahz'ranka-only saves end after the ninth state.
+
+    uint32 summonerCounter;
+    if (!(stream >> madness.state >> madness.bossEntry >> summonerCounter) ||
+        (madness.state != SPECIAL && madness.state != IN_PROGRESS && madness.state != DONE) ||
+        (madness.state == SPECIAL) != (summonerCounter != 0))
+        return false;
+
+    bool knownBoss = false;
+    for (EdgeOfMadnessRotation const& boss : EdgeOfMadnessBosses)
+        if (boss.bossEntry == madness.bossEntry)
+            knownBoss = true;
+    if (!knownBoss)
+        return false;
+
+    if (summonerCounter)
+        madness.summoner = ObjectGuid(HIGHGUID_PLAYER, summonerCounter);
     stream >> std::ws;
     return stream.eof();
 }
@@ -108,6 +158,7 @@ void instance_zulgurub::StartArlokkEncounter(GameObject& gong)
 void instance_zulgurub::Update(uint32 diff)
 {
     UpdateGahzranka(diff);
+    UpdateEdgeOfMadness(diff);
 
     if (GetData(TYPE_ARLOKK) != IN_PROGRESS)
         return;
@@ -202,8 +253,7 @@ void instance_zulgurub::UpdateGahzranka(uint32 diff)
     }
 
     m_gahzrankaState = IN_PROGRESS;
-    m_strInstData = MakeSaveData(m_auiEncounter, m_gahzrankaState);
-    SaveToDB();
+    SaveEncounterProgress();
     trigger->ForcedDespawn();
 }
 
@@ -211,6 +261,153 @@ Creature* instance_zulgurub::SummonGahzranka()
 {
     return WorldObject::SummonCreature(TempSpawnSettings(nullptr, NPC_GAHZRANKA, GahzrankaSpawnX, GahzrankaSpawnY, GahzrankaSpawnZ,
         GahzrankaSpawnOrientation, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, GahzrankaLifetime, false, false, 1), instance);
+}
+
+uint32 instance_zulgurub::GetEdgeOfMadnessBossEntry() const
+{
+    if (m_edgeOfMadness.state != NOT_STARTED)
+        return m_edgeOfMadness.bossEntry;
+
+    uint32 selected = 0;
+    for (EdgeOfMadnessRotation const& boss : EdgeOfMadnessBosses)
+    {
+        if (!sGameEventMgr.IsActiveEvent(boss.eventId))
+            continue;
+        if (selected)
+            return 0;                                       // Ambiguous schedules cannot consume a flask.
+        selected = boss.bossEntry;
+    }
+    return selected;
+}
+
+uint32 instance_zulgurub::GetEdgeOfMadnessTabletText(uint32 tabletEntry) const
+{
+    uint32 const selected = GetEdgeOfMadnessBossEntry();
+    for (EdgeOfMadnessRotation const& boss : EdgeOfMadnessBosses)
+        if (boss.tabletEntry == tabletEntry)
+            return boss.bossEntry == selected ? boss.activeText : boss.inactiveText;
+    return 0;
+}
+
+uint32 instance_zulgurub::GetAvailableEdgeOfMadnessBoss(Player const& player, GameObject const& brazier) const
+{
+    if (m_edgeOfMadness.state != NOT_STARTED || !player.IsAlive() || player.GetMap() != instance ||
+        brazier.GetEntry() != GO_BRAZIER_OF_MADNESS || !brazier.IsSpawned() ||
+        &brazier != GetSingleGameObjectFromStorage(GO_BRAZIER_OF_MADNESS, true))
+        return 0;
+
+    for (EdgeOfMadnessRotation const& boss : EdgeOfMadnessBosses)
+        if (Creature* creature = GetSingleCreatureFromStorage(boss.bossEntry, true))
+            if (creature->IsAlive())
+                return 0;
+
+    return GetEdgeOfMadnessBossEntry();
+}
+
+bool instance_zulgurub::CanSummonEdgeOfMadness(Player const& player, GameObject const& brazier) const
+{
+    return GetAvailableEdgeOfMadnessBoss(player, brazier) != 0;
+}
+
+bool instance_zulgurub::StartEdgeOfMadnessSummon(Player& player, GameObject& brazier)
+{
+    uint32 const boss = GetAvailableEdgeOfMadnessBoss(player, brazier);
+    if (!boss)
+        return false;
+
+    m_edgeOfMadness = {SPECIAL, boss, player.GetObjectGuid()};
+    m_edgeOfMadnessSummonTimer = EdgeOfMadnessSummonDelay;
+    RestoreEdgeOfMadnessBrazier(brazier);
+
+    // Persist the consumed bottle and its paid reservation together.
+    CharacterDatabase.BeginTransaction();
+    player.SaveInventoryAndGoldToDB();
+    SaveEncounterProgress();
+    CharacterDatabase.CommitTransaction();
+    return true;
+}
+
+void instance_zulgurub::RestoreEdgeOfMadnessBrazier(GameObject& brazier) const
+{
+    if (brazier.GetEntry() != GO_BRAZIER_OF_MADNESS)
+        return;
+
+    brazier.SetFlag(GAMEOBJECT_FLAGS, GO_FLAG_LOCKED);
+    if (m_edgeOfMadness.state == NOT_STARTED)
+    {
+        brazier.RemoveFlag(GAMEOBJECT_FLAGS, GO_FLAG_IN_USE | GO_FLAG_NO_INTERACT);
+        brazier.SetLootState(GO_READY);
+        brazier.SetGoState(GO_STATE_READY);
+    }
+    else
+    {
+        brazier.SetFlag(GAMEOBJECT_FLAGS, GO_FLAG_IN_USE | GO_FLAG_NO_INTERACT);
+        brazier.SetLootState(GO_ACTIVATED);
+        brazier.SetGoState(GO_STATE_ACTIVE);
+    }
+}
+
+void instance_zulgurub::UpdateEdgeOfMadness(uint32 diff)
+{
+    bool const pending = m_edgeOfMadness.state == SPECIAL;
+    if (!pending && (m_edgeOfMadness.state != IN_PROGRESS ||
+        (!m_edgeOfMadnessBossGuid.IsEmpty() && instance->GetCreature(m_edgeOfMadnessBossGuid))))
+        return;
+
+    if (diff < m_edgeOfMadnessSummonTimer)
+    {
+        m_edgeOfMadnessSummonTimer -= diff;
+        return;
+    }
+    m_edgeOfMadnessSummonTimer = EdgeOfMadnessSummonDelay;
+
+    if (!pending)
+    {
+        // A paid encounter survives grid unloads and restarts. Restore it when the room is visited.
+        bool someoneNearby = false;
+        for (auto const& reference : instance->GetPlayers())
+        {
+            Player const* player = reference.getSource();
+            if (player && player->IsAlive() &&
+                player->IsWithinDist3d(EdgeOfMadnessSpawnX, EdgeOfMadnessSpawnY, EdgeOfMadnessSpawnZ, EdgeOfMadnessRestoreRange))
+            {
+                someoneNearby = true;
+                break;
+            }
+        }
+        if (!someoneNearby)
+            return;
+    }
+
+    if (Creature* boss = WorldObject::SummonCreature(TempSpawnSettings(nullptr, m_edgeOfMadness.bossEntry,
+        EdgeOfMadnessSpawnX, EdgeOfMadnessSpawnY, EdgeOfMadnessSpawnZ, EdgeOfMadnessSpawnOrientation,
+        TEMPSPAWN_DEAD_DESPAWN, 0), instance))
+    {
+        m_edgeOfMadnessBossGuid = boss->GetObjectGuid();
+        if (pending)
+        {
+            m_edgeOfMadness.state = IN_PROGRESS;
+            m_edgeOfMadness.summoner.Clear();
+            SaveEncounterProgress();
+        }
+        return;
+    }
+
+    if (pending)
+    {
+        ObjectGuid const summoner = m_edgeOfMadness.summoner;
+        m_edgeOfMadness = {};
+        if (GameObject* brazier = GetSingleGameObjectFromStorage(GO_BRAZIER_OF_MADNESS, true))
+            RestoreEdgeOfMadnessBrazier(*brazier);
+        SaveEncounterProgress();
+        RefundEdgeOfMadnessSummon(summoner, instance);
+    }
+}
+
+void instance_zulgurub::SaveEncounterProgress()
+{
+    m_strInstData = MakeSaveData(m_auiEncounter, m_gahzrankaState, m_edgeOfMadness);
+    SaveToDB();
 }
 
 void instance_zulgurub::SyncArlokkObject(GameObject& go)
@@ -257,6 +454,10 @@ void instance_zulgurub::OnCreatureCreate(Creature* creature)
         case NPC_ARLOKK:
         case NPC_GAHZRANKA:
         case NPC_GAHZRANKA_TRIGGER:
+        case NPC_GRILEK:
+        case NPC_HAZZARAH:
+        case NPC_RENATAKI:
+        case NPC_WUSHOOLAY:
             m_npcEntryGuidStore[creature->GetEntry()] = creature->GetObjectGuid();
             break;
         case NPC_PANTHER_TRIGGER:
@@ -276,8 +477,13 @@ void instance_zulgurub::OnCreatureDeath(Creature* creature)
         GetSingleCreatureFromStorage(NPC_GAHZRANKA, true) == creature)
     {
         m_gahzrankaState = DONE;
-        m_strInstData = MakeSaveData(m_auiEncounter, m_gahzrankaState);
-        SaveToDB();
+        SaveEncounterProgress();
+    }
+    else if (m_edgeOfMadness.state == IN_PROGRESS && creature->GetObjectGuid() == m_edgeOfMadnessBossGuid)
+    {
+        m_edgeOfMadness.state = DONE;
+        m_edgeOfMadnessBossGuid.Clear();
+        SaveEncounterProgress();
     }
 }
 
@@ -287,6 +493,8 @@ void instance_zulgurub::OnCreatureDespawn(Creature* creature)
         m_lProwlerGUIDList.remove(creature->GetObjectGuid());
     if (GetData(TYPE_ARLOKK) == IN_PROGRESS && creature->GetObjectGuid() == m_arlokkBossGuid)
         SetData(TYPE_ARLOKK, FAIL);
+    if (creature->GetObjectGuid() == m_edgeOfMadnessBossGuid)
+        m_edgeOfMadnessBossGuid.Clear();
 }
 
 void instance_zulgurub::OnObjectCreate(GameObject* go)
@@ -303,6 +511,9 @@ void instance_zulgurub::OnObjectCreate(GameObject* go)
             if (m_resetMarliObjects && GetData(TYPE_MARLI) == NOT_STARTED)
                 RestoreEventObject(go, TYPE_MARLI);
             return;
+        case GO_BRAZIER_OF_MADNESS:
+            RestoreEdgeOfMadnessBrazier(*go);
+            break;
     }
 
     m_goEntryGuidStore[go->GetEntry()] = go->GetObjectGuid();
@@ -383,9 +594,7 @@ void instance_zulgurub::SetData(uint32 type, uint32 data)
     {
         OUT_SAVE_INST_DATA;
 
-        m_strInstData = MakeSaveData(m_auiEncounter, m_gahzrankaState);
-
-        SaveToDB();
+        SaveEncounterProgress();
         OUT_SAVE_INST_DATA_COMPLETE;
     }
 }
@@ -422,7 +631,8 @@ void instance_zulgurub::Load(const char* chrIn)
         }
     }
     uint32 gahzrankaState;
-    if (!ReadGahzrankaState(loadStream, gahzrankaState))
+    EdgeOfMadnessProgress madness;
+    if (!ReadOptionalEncounters(loadStream, gahzrankaState, madness))
     {
         OUT_LOAD_INST_DATA_FAIL;
         return;
@@ -436,7 +646,10 @@ void instance_zulgurub::Load(const char* chrIn)
     m_auiEncounter[TYPE_LORKHAN] = NOT_STARTED;
     m_auiEncounter[TYPE_ZATH] = NOT_STARTED;
     m_gahzrankaState = gahzrankaState;
-    m_strInstData = MakeSaveData(m_auiEncounter, m_gahzrankaState);
+    m_edgeOfMadness = madness;
+    m_edgeOfMadnessBossGuid.Clear();
+    m_edgeOfMadnessSummonTimer = madness.state == SPECIAL ? EdgeOfMadnessSummonDelay : 0;
+    m_strInstData = MakeSaveData(m_auiEncounter, m_gahzrankaState, m_edgeOfMadness);
 
     OUT_LOAD_INST_DATA_COMPLETE;
 }
@@ -509,7 +722,7 @@ bool instance_zulgurub::GetEventResetData(uint32 eventId, std::string& data) con
     if (eventId == TYPE_THEKAL)
         states[TYPE_LORKHAN] = states[TYPE_ZATH] = NOT_STARTED;
 
-    data = MakeSaveData(states, m_gahzrankaState);
+    data = MakeSaveData(states, m_gahzrankaState, m_edgeOfMadness);
     return true;
 }
 
@@ -643,13 +856,15 @@ void instance_zulgurub::ApplyEventReset(uint32 eventId, std::string const& data)
         if (!(stream >> state))
             return;
     uint32 gahzrankaState;
-    if (!ReadGahzrankaState(stream, gahzrankaState))
+    EdgeOfMadnessProgress madness;
+    if (!ReadOptionalEncounters(stream, gahzrankaState, madness))
         return;
 
     for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
         m_auiEncounter[i] = states[i];
     m_gahzrankaState = std::max(m_gahzrankaState, gahzrankaState);
-    m_strInstData = MakeSaveData(m_auiEncounter, m_gahzrankaState);
+    // Priest/Hakkar reset data must not revive a previously refunded reservation.
+    m_strInstData = MakeSaveData(m_auiEncounter, m_gahzrankaState, m_edgeOfMadness);
     if (eventId == TYPE_MARLI)
         m_resetMarliObjects = true;
     if (eventId == TYPE_ARLOKK)

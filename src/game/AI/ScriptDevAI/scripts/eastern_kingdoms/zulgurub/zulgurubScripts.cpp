@@ -23,6 +23,7 @@ EndScriptData */
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "AI/EventAI/CreatureEventAI.h"
+#include "zulgurub.h"
 
 /* ContentData
 EndContentData */
@@ -264,6 +265,21 @@ private:
     uint32 m_growthStep = 0;
 };
 
+bool GossipHello_go_edge_of_madness_tablet(Player* player, GameObject* tablet)
+{
+    auto* instance = dynamic_cast<instance_zulgurub*>(tablet->GetInstanceData());
+    if (!instance)
+        return false;
+
+    uint32 const text = instance->GetEdgeOfMadnessTabletText(tablet->GetEntry());
+    if (!text)
+        return false;
+
+    player->GetPlayerMenu()->ClearMenus();
+    player->GetPlayerMenu()->SendGossipMenu(text, tablet->GetObjectGuid());
+    return true;
+}
+
 void AddSC_zulgurub()
 {
     Script* pNewScript = new Script;
@@ -279,6 +295,11 @@ void AddSC_zulgurub()
     pNewScript = new Script;
     pNewScript->Name = "npc_shade_of_jindo";
     pNewScript->GetAI = &GetNewAIInstance<npc_shade_of_jindoAI>;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "go_edge_of_madness_tablet";
+    pNewScript->pGossipHelloGO = &GossipHello_go_edge_of_madness_tablet;
     pNewScript->RegisterSelf();
 
     RegisterSpellScript<SummonNightmareIllusion>("spell_summon_nightmare_illusion_hazzarah");

@@ -38,10 +38,15 @@ enum
     NPC_ZULIAN_PROWLER      = 15101,
     NPC_GAHZRANKA           = 15114,
     NPC_GAHZRANKA_TRIGGER   = 15140,
+    NPC_GRILEK              = 15082,
+    NPC_HAZZARAH            = 15083,
+    NPC_RENATAKI            = 15084,
+    NPC_WUSHOOLAY           = 15085,
 
     GO_SPIDER_EGG           = 179985,
     GO_GONG_OF_BETHEKK      = 180526,
     GO_FORCEFIELD           = 180497,
+    GO_BRAZIER_OF_MADNESS   = 180327,
 
     SAY_MINION_DESTROY      = -1309022,
     SAY_HAKKAR_PROTECT      = -1309023,
@@ -57,6 +62,14 @@ static const float aMandokirDownstairsPos[3] = { -12196.30f, -1948.37f, 130.31f}
 static const float aArlokkWallShieldPos[3] = { -11494.76f, -1627.56f, 41.30f};
 
 void RefundGahzrankaSummon(ObjectGuid playerGuid, Map* map);
+void RefundEdgeOfMadnessSummon(ObjectGuid playerGuid, Map* map);
+
+struct EdgeOfMadnessProgress
+{
+    uint32 state = NOT_STARTED;
+    uint32 bossEntry = 0;
+    ObjectGuid summoner;
+};
 
 class instance_zulgurub : public ScriptedInstance
 {
@@ -91,6 +104,11 @@ class instance_zulgurub : public ScriptedInstance
         bool IsArlokkProwler(Creature const& prowler) const;
         bool CanSummonGahzranka(Player const& player) const;
         bool StartGahzrankaSummon(Player& player, uint32 travelTime);
+        bool CanSummonEdgeOfMadness(Player const& player, GameObject const& brazier) const;
+        bool StartEdgeOfMadnessSummon(Player& player, GameObject& brazier);
+        uint32 GetEdgeOfMadnessBossEntry() const;
+        uint32 GetEdgeOfMadnessTabletText(uint32 tabletEntry) const;
+        void RestoreEdgeOfMadnessBrazier(GameObject& brazier) const;
 
     protected:
         void UpdateHakkarPowerStacks();
@@ -102,6 +120,9 @@ class instance_zulgurub : public ScriptedInstance
         void ReleaseArlokkProwlers();
         void UpdateGahzranka(uint32 diff);
         Creature* SummonGahzranka();
+        void UpdateEdgeOfMadness(uint32 diff);
+        uint32 GetAvailableEdgeOfMadnessBoss(Player const& player, GameObject const& brazier) const;
+        void SaveEncounterProgress();
 
         uint32 m_auiEncounter[MAX_ENCOUNTER];
         std::string m_strInstData;
@@ -115,6 +136,10 @@ class instance_zulgurub : public ScriptedInstance
         ObjectGuid m_gahzrankaSummoner;
         uint32 m_gahzrankaSummonTimer = 0;
         uint32 m_gahzrankaState = NOT_STARTED;
+
+        EdgeOfMadnessProgress m_edgeOfMadness;
+        ObjectGuid m_edgeOfMadnessBossGuid;
+        uint32 m_edgeOfMadnessSummonTimer = 0;
 
         bool m_bHasIntroYelled;
         bool m_bHasAltarYelled;

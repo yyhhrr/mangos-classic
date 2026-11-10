@@ -496,9 +496,11 @@ void ThreatManager::modifyThreatPercent(Unit* victim, int32 threatPercent)
     iThreatContainer.modifyThreatPercent(victim, threatPercent);
 }
 
-void ThreatManager::modifyAllThreatPercent(int32 threatPercent)
+void ThreatManager::modifyAllThreatPercent(int32 threatPercent, bool includeOffline)
 {
     iThreatContainer.modifyAllThreatPercent(threatPercent);
+    if (includeOffline)
+        iThreatOfflineContainer.modifyAllThreatPercent(threatPercent);
 }
 
 //============================================================

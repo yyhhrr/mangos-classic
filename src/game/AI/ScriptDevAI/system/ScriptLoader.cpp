@@ -109,6 +109,7 @@ extern void AddSC_instance_uldaman();
 extern void AddSC_uldaman();
 extern void AddSC_boss_arlokk();                            // zulgurub
 extern void AddSC_boss_gahzranka();
+extern void AddSC_boss_grilek();
 extern void AddSC_boss_hakkar();
 extern void AddSC_boss_jeklik();
 extern void AddSC_boss_jindo();
@@ -118,6 +119,7 @@ extern void AddSC_boss_ouro();
 extern void AddSC_boss_renataki();
 extern void AddSC_boss_thekal();
 extern void AddSC_boss_venoxis();
+extern void AddSC_edge_of_madness();
 extern void AddSC_instance_zulgurub();
 extern void AddSC_zulgurub();
 
@@ -318,6 +320,7 @@ void AddScripts()
     AddSC_uldaman();
     AddSC_boss_arlokk();                                    // zulgurub
     AddSC_boss_gahzranka();
+    AddSC_boss_grilek();
     AddSC_boss_hakkar();
     AddSC_boss_jeklik();
     AddSC_boss_jindo();
@@ -327,6 +330,7 @@ void AddScripts()
     AddSC_boss_renataki();
     AddSC_boss_thekal();
     AddSC_boss_venoxis();
+    AddSC_edge_of_madness();
     AddSC_instance_zulgurub();
     AddSC_zulgurub();
 
