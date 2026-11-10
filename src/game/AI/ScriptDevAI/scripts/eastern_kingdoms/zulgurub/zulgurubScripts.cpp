@@ -157,24 +157,47 @@ struct SummonNightmareIllusion : public SpellScript
     }
 };
 
-struct DelusionsOfJindo : public SpellScript
+enum JindoShadeSpells
 {
-    void OnHit(Spell* spell, SpellMissInfo /*missInfo*/) const
+    SPELL_JINDO_DELUSIONS = 24306,
+    SPELL_JINDO_SHADE_PASSIVE = 24307,
+    SPELL_JINDO_SHADE_VISUAL = 24313,
+};
+
+struct npc_shade_of_jindoAI : public CreatureEventAI
+{
+    explicit npc_shade_of_jindoAI(Creature* creature) : CreatureEventAI(creature)
     {
-        Unit* caster = spell->GetCaster();
-        caster->CastSpell(nullptr, 24308, TRIGGERED_OLD_TRIGGERED);
+        creature->SetAOEImmune(true);
+        creature->SetChainImmune(true);
+    }
+
+    void DamageTaken(Unit* dealer, uint32& damage, DamageEffectType damageType, SpellEntry const* spellInfo) override
+    {
+        // Periodic effects already applied by eligible players keep ticking.
+        if (dealer && dealer != m_creature && damageType != DOT)
+        {
+            Player const* player = dealer->GetBeneficiaryPlayer();
+            if (!player || !player->HasAura(SPELL_JINDO_DELUSIONS))
+            {
+                damage = 0;
+                return;
+            }
+        }
+        CreatureEventAI::DamageTaken(dealer, damage, damageType, spellInfo);
     }
 };
 
-struct SummonShadeOfJindo : public SpellScript
+void InitializeJindoShade(Creature* jindo, Creature* shade)
 {
-    void OnSummon(Spell* /*spell*/, Creature* summon) const
-    {
-        summon->CastSpell(nullptr, 24307, TRIGGERED_NONE);
-        summon->CastSpell(nullptr, 23878, TRIGGERED_NONE);
-        summon->CastSpell(nullptr, 24313, TRIGGERED_NONE);
-    }
-};
+    shade->CastSpell(nullptr, SPELL_JINDO_SHADE_PASSIVE, TRIGGERED_OLD_TRIGGERED);
+    shade->CastSpell(nullptr, SPELL_JINDO_SHADE_VISUAL, TRIGGERED_OLD_TRIGGERED);
+
+    // A Shade can attack any player in the encounter, including players without Delusions.
+    if (Unit* target = jindo->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, nullptr, SELECT_FLAG_PLAYER))
+        if (shade->AI() && shade->CanAttack(target))
+            shade->AI()->AttackStart(target);
+}
 
 // 24335 - Wyvern Sting
 struct WyvernStingAura : public AuraScript
@@ -253,8 +276,11 @@ void AddSC_zulgurub()
     pNewScript->GetAI = &GetNewAIInstance<npc_spawn_of_marliAI>;
     pNewScript->RegisterSelf();
 
+    pNewScript = new Script;
+    pNewScript->Name = "npc_shade_of_jindo";
+    pNewScript->GetAI = &GetNewAIInstance<npc_shade_of_jindoAI>;
+    pNewScript->RegisterSelf();
+
     RegisterSpellScript<SummonNightmareIllusion>("spell_summon_nightmare_illusion_hazzarah");
-    RegisterSpellScript<DelusionsOfJindo>("spell_delusions_of_jindo");
-    RegisterSpellScript<SummonShadeOfJindo>("spell_summon_shade_of_jindo");
     RegisterSpellScript<WyvernStingAura>("spell_wyvern_sting_aura");
 }
