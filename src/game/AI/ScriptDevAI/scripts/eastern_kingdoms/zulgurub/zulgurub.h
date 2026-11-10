@@ -35,6 +35,7 @@ enum
     NPC_JEKLIK              = 14517,
     NPC_VENOXIS             = 14507,
     NPC_ARLOKK              = 14515,
+    NPC_ZULIAN_PROWLER      = 15101,
 
     GO_SPIDER_EGG           = 179985,
     GO_GONG_OF_BETHEKK      = 180526,
@@ -60,9 +61,12 @@ class instance_zulgurub : public ScriptedInstance
         ~instance_zulgurub() {}
 
         void Initialize() override;
+        void Update(uint32 diff) override;
         // IsEncounterInProgress() const override { return false; }  // not active in Zul'Gurub
 
         void OnCreatureCreate(Creature* creature) override;
+        void OnCreatureDeath(Creature* creature) override;
+        void OnCreatureDespawn(Creature* creature) override;
         void OnObjectCreate(GameObject* go) override;
 
         void SetData(uint32 type, uint32 data) override;
@@ -78,12 +82,18 @@ class instance_zulgurub : public ScriptedInstance
         void DoYellAtTriggerIfCan(uint32 triggerId);
 
         Creature* SelectRandomPantherTrigger(bool bIsLeft);
+        void StartArlokkEncounter(GameObject& gong);
+        bool RegisterArlokkProwler(Creature const& prowler);
+        bool IsArlokkProwler(Creature const& prowler) const;
 
     protected:
         void RemoveHakkarPowerStack();
         void RestoreEventObject(GameObject* go, uint32 eventId);
         void RestoreEventObjects(uint32 eventId);
         void RemoveEventSummons(uint32 eventId, uint32 summonEntry = 0);
+        void SyncArlokkObject(GameObject& go);
+        void StopArlokkProwlers();
+        void ReleaseArlokkProwlers();
 
         uint32 m_auiEncounter[MAX_ENCOUNTER];
         std::string m_strInstData;
@@ -91,6 +101,8 @@ class instance_zulgurub : public ScriptedInstance
         GuidList m_lRightPantherTriggerGUIDList;
         GuidList m_lLeftPantherTriggerGUIDList;
         GuidList m_lProwlerGUIDList;
+        ObjectGuid m_arlokkBossGuid;
+        uint32 m_arlokkSummonTimer = 0;
 
         bool m_bHasIntroYelled;
         bool m_bHasAltarYelled;

@@ -29,6 +29,14 @@ EndScriptData
 #include "Maps/MapPersistentStateMgr.h"
 #include "Maps/SpawnManager.h"
 
+namespace
+{
+constexpr uint32 ArlokkSummonDelay = 10000;
+constexpr uint32 ArlokkLifetime = 15 * MINUTE * IN_MILLISECONDS;
+constexpr size_t ArlokkProwlerLimit = 40;
+constexpr uint32 SummonZulianProwlers = 24247;
+}
+
 instance_zulgurub::instance_zulgurub(Map* map) : ScriptedInstance(map),
     m_bHasIntroYelled(false),
     m_bHasAltarYelled(false),
@@ -41,6 +49,65 @@ instance_zulgurub::instance_zulgurub(Map* map) : ScriptedInstance(map),
 void instance_zulgurub::Initialize()
 {
     memset(&m_auiEncounter, 0, sizeof(m_auiEncounter));
+}
+
+void instance_zulgurub::StartArlokkEncounter(GameObject& gong)
+{
+    uint32 const state = GetData(TYPE_ARLOKK);
+    if (state == IN_PROGRESS || state == DONE)
+        return;
+
+    m_arlokkSummonTimer = ArlokkSummonDelay;
+    SetData(TYPE_ARLOKK, IN_PROGRESS);
+    SyncArlokkObject(gong);
+}
+
+void instance_zulgurub::Update(uint32 diff)
+{
+    if (GetData(TYPE_ARLOKK) != IN_PROGRESS)
+        return;
+
+    if (!m_arlokkSummonTimer)
+    {
+        Creature* arlokk = instance->GetCreature(m_arlokkBossGuid);
+        if (!arlokk || !arlokk->IsAlive())
+            SetData(TYPE_ARLOKK, FAIL);
+        return;
+    }
+
+    if (diff < m_arlokkSummonTimer)
+    {
+        m_arlokkSummonTimer -= diff;
+        return;
+    }
+
+    m_arlokkSummonTimer = 0;
+    GameObject* gong = GetSingleGameObjectFromStorage(GO_GONG_OF_BETHEKK, true);
+    Creature* arlokk = gong ? gong->SummonCreature(NPC_ARLOKK, -11540.7f, -1627.71f, 41.27f, 0.1f,
+        TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, ArlokkLifetime) : nullptr;
+    if (!arlokk)
+    {
+        SetData(TYPE_ARLOKK, FAIL);
+        return;
+    }
+
+    m_arlokkBossGuid = arlokk->GetObjectGuid();
+    if (GameObject* field = GetSingleGameObjectFromStorage(GO_FORCEFIELD, true))
+        SyncArlokkObject(*field);
+}
+
+void instance_zulgurub::SyncArlokkObject(GameObject& go)
+{
+    uint32 const state = GetData(TYPE_ARLOKK);
+    if (go.GetEntry() == GO_GONG_OF_BETHEKK)
+    {
+        if (state == IN_PROGRESS || state == DONE)
+            go.SetFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
+        else
+            go.RemoveFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
+    }
+    else if (go.GetEntry() == GO_FORCEFIELD)
+        go.SetGoState(state == IN_PROGRESS && !m_arlokkBossGuid.IsEmpty() ? GO_STATE_READY : GO_STATE_ACTIVE);
 }
 
 void instance_zulgurub::DoYellAtTriggerIfCan(uint32 triggerId)
@@ -82,6 +149,19 @@ void instance_zulgurub::OnCreatureCreate(Creature* creature)
     }
 }
 
+void instance_zulgurub::OnCreatureDeath(Creature* creature)
+{
+    if (creature->GetEntry() == NPC_ZULIAN_PROWLER)
+        m_lProwlerGUIDList.remove(creature->GetObjectGuid());
+}
+
+void instance_zulgurub::OnCreatureDespawn(Creature* creature)
+{
+    OnCreatureDeath(creature);
+    if (GetData(TYPE_ARLOKK) == IN_PROGRESS && creature->GetObjectGuid() == m_arlokkBossGuid)
+        SetData(TYPE_ARLOKK, FAIL);
+}
+
 void instance_zulgurub::OnObjectCreate(GameObject* go)
 {
     switch (go->GetEntry())
@@ -90,6 +170,7 @@ void instance_zulgurub::OnObjectCreate(GameObject* go)
         case GO_FORCEFIELD:
             if (m_resetArlokkObjects && GetData(TYPE_ARLOKK) == NOT_STARTED)
                 RestoreEventObject(go, TYPE_ARLOKK);
+            SyncArlokkObject(*go);
             break;
         case GO_SPIDER_EGG:
             if (m_resetMarliObjects && GetData(TYPE_MARLI) == NOT_STARTED)
@@ -125,24 +206,34 @@ void instance_zulgurub::SetData(uint32 type, uint32 data)
             break;
         }
         case TYPE_ARLOKK:
+        {
+            if (m_auiEncounter[type] == data || m_auiEncounter[type] == DONE)
+                return;
             m_auiEncounter[type] = data;
-            if (data == DONE || data == FAIL)
-                DoUseOpenableObject(GO_FORCEFIELD, true);
-            else if (data == IN_PROGRESS)
-                DoUseOpenableObject(GO_FORCEFIELD, false);
-
             if (data == DONE)
-                RemoveHakkarPowerStack();
-            if (data == FAIL)
             {
-                // Note: this gameobject should change flags - currently it despawns which isn't correct
-                if (GameObject* pGong = GetSingleGameObjectFromStorage(GO_GONG_OF_BETHEKK))
-                {
-                    pGong->SetRespawnTime(2 * DAY);
-                    pGong->Respawn();
-                }
+                StopArlokkProwlers();
+                ReleaseArlokkProwlers();
+                RemoveHakkarPowerStack();
             }
+            if (data == FAIL)
+                RemoveEventSummons(TYPE_ARLOKK, NPC_ZULIAN_PROWLER);
+            if (data != IN_PROGRESS)
+            {
+                m_arlokkSummonTimer = 0;
+                m_arlokkBossGuid.Clear();
+            }
+
+            if (GameObject* gong = GetSingleGameObjectFromStorage(GO_GONG_OF_BETHEKK, true))
+            {
+                if (data == FAIL)
+                    RestoreEventObject(gong, TYPE_ARLOKK);
+                SyncArlokkObject(*gong);
+            }
+            if (GameObject* field = GetSingleGameObjectFromStorage(GO_FORCEFIELD, true))
+                SyncArlokkObject(*field);
             break;
+        }
         case TYPE_OHGAN:
             // Note: SPECIAL instance data is set via ACID!
             if (data == SPECIAL)
@@ -350,6 +441,12 @@ void instance_zulgurub::RemoveEventSummons(uint32 eventId, uint32 summonEntry)
     if (eventId >= MAX_PRIESTS)
         return;
 
+    if (eventId == TYPE_ARLOKK)
+    {
+        StopArlokkProwlers();
+        m_lProwlerGUIDList.clear();
+    }
+
     uint32 const bosses[MAX_PRIESTS] = {NPC_JEKLIK, NPC_VENOXIS, NPC_MARLI, NPC_THEKAL, NPC_ARLOKK};
     std::vector<ObjectGuid> summons;
     auto& objects = instance->GetObjectsStore();
@@ -371,13 +468,42 @@ void instance_zulgurub::RemoveEventSummons(uint32 eventId, uint32 summonEntry)
     for (ObjectGuid guid : summons)
         if (Creature* creature = instance->GetCreature(guid))
             creature->ForcedDespawn();
+}
 
-    if (eventId == TYPE_ARLOKK)
+void instance_zulgurub::StopArlokkProwlers()
+{
+    for (GuidList const* triggers : {&m_lLeftPantherTriggerGUIDList, &m_lRightPantherTriggerGUIDList})
+        for (ObjectGuid guid : *triggers)
+            if (Creature* trigger = instance->GetCreature(guid))
+                trigger->RemoveAurasDueToSpell(SummonZulianProwlers);
+}
+
+void instance_zulgurub::ReleaseArlokkProwlers()
+{
+    std::vector<Player*> targets;
+    if (Creature* arlokk = instance->GetCreature(m_arlokkBossGuid))
+        for (HostileReference const* reference : arlokk->getThreatManager().getThreatList())
+            if (Player* player = instance->GetPlayer(reference->getUnitGuid()))
+                if (player->IsAlive() && !player->IsGameMaster())
+                    targets.push_back(player);
+
+    for (ObjectGuid guid : m_lProwlerGUIDList)
     {
-        for (GuidList const* triggers : {&m_lLeftPantherTriggerGUIDList, &m_lRightPantherTriggerGUIDList})
-            for (ObjectGuid guid : *triggers)
-                if (Creature* trigger = instance->GetCreature(guid))
-                    trigger->RemoveAurasDueToSpell(24247);
+        Creature* prowler = instance->GetCreature(guid);
+        if (!prowler || !prowler->IsAlive())
+            continue;
+
+        prowler->RemoveSpellsCausingAura(SPELL_AURA_MOD_STEALTH);
+        if (prowler->GetVictim() || !prowler->AI())
+            continue;
+
+        for (Player* target : targets)
+        {
+            if (!prowler->CanAttack(target))
+                continue;
+            prowler->AI()->AttackStart(target);
+            break;
+        }
     }
 }
 
@@ -400,7 +526,11 @@ void instance_zulgurub::ApplyEventReset(uint32 eventId, std::string const& data)
     if (eventId == TYPE_MARLI)
         m_resetMarliObjects = true;
     if (eventId == TYPE_ARLOKK)
+    {
         m_resetArlokkObjects = true;
+        m_arlokkSummonTimer = 0;
+        m_arlokkBossGuid.Clear();
+    }
     RemoveEventSummons(eventId);
     RestoreEventObjects(eventId);
 
@@ -426,6 +556,32 @@ Creature* instance_zulgurub::SelectRandomPantherTrigger(bool isLeft)
         return nullptr;
 
     return vTriggers[urand(0, vTriggers.size() - 1)];
+}
+
+bool instance_zulgurub::RegisterArlokkProwler(Creature const& prowler)
+{
+    if (GetData(TYPE_ARLOKK) != IN_PROGRESS || prowler.GetEntry() != NPC_ZULIAN_PROWLER ||
+        !prowler.IsTemporarySummon() || prowler.GetSpawnerGuid().GetEntry() != NPC_PANTHER_TRIGGER)
+        return false;
+
+    m_lProwlerGUIDList.remove_if([this](ObjectGuid guid)
+    {
+        Creature* summon = instance->GetCreature(guid);
+        return !summon || !summon->IsAlive();
+    });
+
+    if (IsArlokkProwler(prowler))
+        return true;
+    if (m_lProwlerGUIDList.size() >= ArlokkProwlerLimit)
+        return false;
+
+    m_lProwlerGUIDList.push_back(prowler.GetObjectGuid());
+    return true;
+}
+
+bool instance_zulgurub::IsArlokkProwler(Creature const& prowler) const
+{
+    return std::find(m_lProwlerGUIDList.begin(), m_lProwlerGUIDList.end(), prowler.GetObjectGuid()) != m_lProwlerGUIDList.end();
 }
 
 bool AreaTrigger_at_zulgurub(Player* pPlayer, AreaTriggerEntry const* pAt)
