@@ -25,49 +25,67 @@ EndScriptData
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
+#include "Spells/SpellMgr.h"
+
+#include <algorithm>
 
 enum
 {
+    NPC_RENATAKI            = 15084,
     SPELL_THOUSAND_BLADES   = 24649,
     SPELL_VANISH            = 24699,
-    SPELL_GOUGE             = 24698,
-    SPELL_TRASH             = 3391,
-
     SPELL_VANISH_TELEPORT   = 24700,
+    SPELL_AMBUSH            = 24337,
+    SPELL_ENRAGE            = 8269,
 
     SPELL_SPIRIT_PARTICLES      = 18951,
     SPELL_SPAWN_RED_LIGHTNING   = 24240,
 };
 
+constexpr uint32 VanishDelay = 2000;
+constexpr float VanishTargetRange = 100.0f;
+constexpr uint32 MaxAdditionalBladesTargets = 9;
+
 enum RenatakiActions
 {
+    RENATAKI_ENRAGE,
     RENATAKI_ACTION_MAX,
-    RENATAKI_VANISH_DELAY,
+    RENATAKI_VANISH_DELAY = RENATAKI_ACTION_MAX,
 };
 
 struct boss_renatakiAI : public CombatAI
 {
-    boss_renatakiAI(Creature* creature) : CombatAI(creature, RENATAKI_ACTION_MAX)
+    explicit boss_renatakiAI(Creature* creature) : CombatAI(creature, RENATAKI_ACTION_MAX)
     {
-        AddCustomAction(RENATAKI_VANISH_DELAY, true, [&]()
-        {
-            if (Unit* target = m_creature->GetMap()->GetUnit(m_vanishTarget))
-                target->CastSpell(m_creature, SPELL_VANISH_TELEPORT, TRIGGERED_OLD_TRIGGERED);
-            SetCombatScriptStatus(false);
-            SetMeleeEnabled(true);
-            SetCombatMovement(true);
-        });
+        AddTimerlessCombatAction(RENATAKI_ENRAGE, true);
+        AddCustomAction(RENATAKI_VANISH_DELAY, true, [this]() { TeleportForAmbush(); }, TIMER_COMBAT_COMBAT);
     }
-
-    ObjectGuid m_vanishTarget;
 
     void Reset() override
     {
+        CancelVanish();
         CombatAI::Reset();
+    }
 
-        SetCombatScriptStatus(false);
-        SetMeleeEnabled(true);
-        SetCombatMovement(true);
+    void EnterEvadeMode() override
+    {
+        CancelVanish();
+        CombatAI::EnterEvadeMode();
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        CancelVanish();
+        CombatAI::JustDied(killer);
+    }
+
+    void UpdateAI(uint32 diff) override
+    {
+        if (m_vanished && (!m_creature->IsInCombat() || m_creature->getThreatManager().isThreatListEmpty() ||
+            (m_vanishTarget && !GetVanishTarget())))
+            CancelVanish();
+
+        CombatAI::UpdateAI(diff);
     }
 
     void JustRespawned() override
@@ -78,16 +96,100 @@ struct boss_renatakiAI : public CombatAI
         DoCastSpellIfCan(nullptr, SPELL_SPAWN_RED_LIGHTNING);
     }
 
-    void ReceiveAIEvent(AIEventType eventType, Unit* /*sender*/, Unit* invoker, uint32 /*miscValue*/) override
+    void ExecuteAction(uint32 action) override
     {
-        if (eventType == AI_EVENT_CUSTOM_A)
-        {
-            m_vanishTarget = invoker->GetObjectGuid();
-            SetCombatScriptStatus(true);
-            SetMeleeEnabled(false);
-            SetCombatMovement(false);
-        }
+        if (action == RENATAKI_ENRAGE && m_creature->GetHealthPercent() < 30.0f)
+            DoCastSpellIfCan(nullptr, SPELL_ENRAGE, CAST_AURA_NOT_PRESENT);
     }
+
+    void DamageTaken(Unit* dealer, uint32& damage, DamageEffectType type, SpellEntry const* spellInfo) override
+    {
+        CombatAI::DamageTaken(dealer, damage, type, spellInfo);
+        if (m_vanished && damage && spellInfo && (IsAreaOfEffectSpell(spellInfo) || HasPersistentAuraEffect(spellInfo)))
+            m_creature->RemoveAurasDueToSpell(SPELL_VANISH);
+    }
+
+    void BeginVanish()
+    {
+        if (m_vanished || !m_creature->IsInCombat())
+            return;
+
+        m_vanished = true;
+        SetCombatScriptStatus(true);
+        SetMeleeEnabled(false);
+        SetCombatMovement(false, true);
+        ResetTimer(RENATAKI_VANISH_DELAY, VanishDelay);
+    }
+
+    void CancelVanish()
+    {
+        if (!m_vanished)
+            return;
+
+        m_vanished = false;
+        ObjectGuid const targetGuid = m_vanishTarget;
+        m_vanishTarget.Clear();
+        DisableTimer(RENATAKI_VANISH_DELAY);
+
+        if (targetGuid)
+            m_creature->RemoveAurasByCasterSpell(SPELL_VANISH_TELEPORT, targetGuid);
+        m_creature->RemoveAurasDueToSpell(SPELL_VANISH);
+
+        SetCombatScriptStatus(false);
+        SetMeleeEnabled(true);
+        SetCombatMovement(true, m_creature->IsAlive() && m_creature->IsInCombat());
+    }
+
+    void FinishVanish(ObjectGuid casterGuid, bool expired)
+    {
+        if (!m_vanished || !m_vanishTarget || m_vanishTarget != casterGuid)
+            return;
+
+        Unit* target = nullptr;
+        if (expired && m_creature->IsAlive() && m_creature->IsInCombat() && m_creature->HasAura(SPELL_VANISH))
+            target = GetVanishTarget();
+
+        CancelVanish();
+        if (target)
+            m_creature->CastSpell(target, SPELL_AMBUSH, TRIGGERED_OLD_TRIGGERED | TRIGGERED_INSTANT_CAST);
+    }
+
+private:
+    bool IsEligibleVanishTarget(Unit* target)
+    {
+        return target && target->IsPlayer() && target->IsAlive() && m_creature->IsWithinDistInMap(target, VanishTargetRange) &&
+            m_creature->CanAttack(target) && m_creature->getThreatManager().HasThreat(target);
+    }
+
+    Unit* GetVanishTarget()
+    {
+        Unit* target = m_creature->GetMap()->GetUnit(m_vanishTarget);
+        return IsEligibleVanishTarget(target) ? target : nullptr;
+    }
+
+    void TeleportForAmbush()
+    {
+        if (!m_vanished)
+            return;
+
+        std::vector<Unit*> targets;
+        m_creature->SelectAttackingTargets(targets, ATTACKING_TARGET_ALL_SUITABLE, 0, nullptr, SELECT_FLAG_PLAYER);
+        std::erase_if(targets, [this](Unit* target) { return !IsEligibleVanishTarget(target); });
+        if (targets.empty())
+        {
+            CancelVanish();
+            return;
+        }
+
+        Unit* target = targets[urand(0, targets.size() - 1)];
+        m_vanishTarget = target->GetObjectGuid();
+        if (target->CastSpell(m_creature, SPELL_VANISH_TELEPORT, TRIGGERED_OLD_TRIGGERED) != SPELL_CAST_OK ||
+            !m_creature->GetSpellAuraHolder(SPELL_VANISH_TELEPORT, m_vanishTarget))
+            CancelVanish();
+    }
+
+    bool m_vanished = false;
+    ObjectGuid m_vanishTarget;
 };
 
 // 24649 - Thousand Blades
@@ -104,24 +206,40 @@ struct ThousandBladesRenataki : public SpellScript
         std::vector<Unit*> selectedTargets;
         Unit* caster = spell->GetCaster();
         caster->SelectAttackingTargets(selectedTargets, ATTACKING_TARGET_ALL_SUITABLE, 0, SPELL_THOUSAND_BLADES, SELECT_FLAG_PLAYER);
-        // remove current target
-        selectedTargets.erase(std::remove(selectedTargets.begin(), selectedTargets.end(), spell->m_targets.getUnitTarget()), selectedTargets.end());
         std::shuffle(selectedTargets.begin(), selectedTargets.end(), *GetRandomGenerator());
-        selectedTargets.resize(9);
+
+        GuidSet selectedGuids;
+        if (Unit* primary = spell->m_targets.getUnitTarget())
+            selectedGuids.insert(primary->GetObjectGuid());
+
+        uint32 additionalTargets = 0;
         for (Unit* target : selectedTargets)
+        {
+            if (!target || !target->IsPlayer() || !target->IsAlive() || !caster->CanAttack(target) ||
+                !selectedGuids.insert(target->GetObjectGuid()).second)
+                continue;
+
             caster->CastSpell(target, SPELL_THOUSAND_BLADES, TRIGGERED_OLD_TRIGGERED | TRIGGERED_INSTANT_CAST);
+            if (++additionalTargets == MaxAdditionalBladesTargets)
+                break;
+        }
     }
 };
 
-struct RenatakiVanish : public SpellScript
+struct RenatakiVanish : public AuraScript
 {
-    void OnEffectExecute(Spell* spell, SpellEffectIndex effIdx) const override
+    void OnAfterApply(Aura* aura, bool apply) const override
     {
-        Unit* caster = spell->GetCaster();
-        if (effIdx != EFFECT_INDEX_0 || !caster->AI())
-            return;
+        if (apply && aura->GetEffIndex() == EFFECT_INDEX_1)
+            if (auto* ai = dynamic_cast<boss_renatakiAI*>(aura->GetTarget()->AI()))
+                ai->BeginVanish();
+    }
 
-        caster->AI()->SendAIEvent(AI_EVENT_CUSTOM_A, spell->GetUnitTarget(), caster);
+    void OnApply(Aura* aura, bool apply) const override
+    {
+        if (!apply && aura->GetEffIndex() == EFFECT_INDEX_1)
+            if (auto* ai = dynamic_cast<boss_renatakiAI*>(aura->GetTarget()->AI()))
+                ai->CancelVanish();
     }
 };
 
@@ -129,11 +247,19 @@ struct RenatakiVanishTeleport : public AuraScript
 {
     void OnApply(Aura* aura, bool apply) const override
     {
-        if (!apply)
-        {
-            aura->GetTarget()->CastSpell(aura->GetCaster(), SPELL_TRASH, TRIGGERED_OLD_TRIGGERED);
-            aura->GetTarget()->RemoveAurasDueToSpell(SPELL_VANISH);
-        }
+        if (!apply && aura->GetEffIndex() == EFFECT_INDEX_1)
+            if (auto* ai = dynamic_cast<boss_renatakiAI*>(aura->GetTarget()->AI()))
+                ai->FinishVanish(aura->GetCasterGuid(), aura->GetRemoveMode() == AURA_REMOVE_BY_EXPIRE);
+    }
+};
+
+struct RenatakiDemoralizingShout : public SpellScript
+{
+    void OnEffectExecute(Spell* spell, SpellEffectIndex effIdx) const override
+    {
+        if (effIdx == EFFECT_INDEX_0)
+            if (Unit* target = spell->GetUnitTarget(); target && target->GetEntry() == NPC_RENATAKI)
+                target->RemoveAurasDueToSpell(SPELL_VANISH);
     }
 };
 
@@ -147,4 +273,5 @@ void AddSC_boss_renataki()
     RegisterSpellScript<ThousandBladesRenataki>("spell_thousand_blades_renataki");
     RegisterSpellScript<RenatakiVanish>("spell_renataki_vanish");
     RegisterSpellScript<RenatakiVanishTeleport>("spell_renataki_vanish_teleport");
+    RegisterSpellScript<RenatakiDemoralizingShout>("spell_renataki_demoralizing_shout");
 }
