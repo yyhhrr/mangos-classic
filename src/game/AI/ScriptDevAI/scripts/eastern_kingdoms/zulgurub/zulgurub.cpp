@@ -209,6 +209,11 @@ void instance_zulgurub::Load(const char* chrIn)
             i = NOT_STARTED;
     }
 
+    if (m_auiEncounter[TYPE_THEKAL] != DONE)
+        m_auiEncounter[TYPE_THEKAL] = NOT_STARTED;
+    m_auiEncounter[TYPE_LORKHAN] = NOT_STARTED;
+    m_auiEncounter[TYPE_ZATH] = NOT_STARTED;
+
     OUT_LOAD_INST_DATA_COMPLETE;
 }
 
