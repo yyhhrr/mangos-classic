@@ -39,6 +39,9 @@ constexpr size_t ArlokkProwlerLimit = 40;
 constexpr uint32 SummonZulianProwlers = 24247;
 constexpr uint32 GahzrankaSummonDelay = 2 * IN_MILLISECONDS;
 constexpr uint32 GahzrankaLifetime = 150 * MINUTE * IN_MILLISECONDS;
+// Static Hakkar spawn in the ClassicDB map 309 layout.
+constexpr uint32 HakkarSpawnGuid = 3090716;
+constexpr uint32 PaglePointeArea = 3419;
 constexpr float GahzrankaSummonRange = 100.0f;
 constexpr float GahzrankaSpawnX = -11675.7f;
 constexpr float GahzrankaSpawnY = -1728.91f;
@@ -194,7 +197,8 @@ void instance_zulgurub::Update(uint32 diff)
 
 bool instance_zulgurub::CanSummonGahzranka(Player const& player) const
 {
-    if (m_gahzrankaState != NOT_STARTED || !m_gahzrankaSummoner.IsEmpty() || !player.IsAlive() || player.GetMap() != instance)
+    if (m_gahzrankaState != NOT_STARTED || !m_gahzrankaSummoner.IsEmpty() || !player.IsAlive() ||
+        player.GetMap() != instance || player.GetAreaId() != PaglePointeArea)
         return false;
 
     Creature const* trigger = GetSingleCreatureFromStorage(NPC_GAHZRANKA_TRIGGER, true);
@@ -426,6 +430,11 @@ void instance_zulgurub::SyncArlokkObject(GameObject& go)
 
 void instance_zulgurub::DoYellAtTriggerIfCan(uint32 triggerId)
 {
+    Creature const* hakkar = GetSingleCreatureFromStorage(NPC_HAKKAR, true);
+    if ((hakkar && !hakkar->IsAlive()) ||
+        (!hakkar && instance->GetPersistentState()->GetCreatureRespawnTime(HakkarSpawnGuid) > time(nullptr)))
+        return;
+
     if (triggerId == AREATRIGGER_ENTER && !m_bHasIntroYelled)
     {
         DoOrSimulateScriptTextForThisInstance(SAY_HAKKAR_PROTECT, NPC_HAKKAR);

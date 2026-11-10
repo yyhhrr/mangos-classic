@@ -23,6 +23,8 @@ EndScriptData */
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "AI/EventAI/CreatureEventAI.h"
+#include "Grids/CellImpl.h"
+#include "Grids/GridNotifiersImpl.h"
 #include "zulgurub.h"
 
 /* ContentData
@@ -267,6 +269,127 @@ private:
     uint32 m_growthStep = 0;
 };
 
+namespace
+{
+constexpr uint32 GurubashiDrainLife = 24435;
+constexpr uint32 GurubashiKnockback = 11130;
+constexpr uint32 GurubashiIntimidatingRoar = 16508;
+constexpr uint32 WillOfHakkar = 24178;
+constexpr float VoodooTrapRange = 5.0f;
+constexpr uint32 VoodooTrapTimeout = 21 * IN_MILLISECONDS;
+constexpr uint32 VoodooTrapSearchInterval = 500;
+
+struct npc_gurubashi_blood_drinkerAI : public CreatureEventAI
+{
+    explicit npc_gurubashi_blood_drinkerAI(Creature* creature) : CreatureEventAI(creature) {}
+
+    Unit* GetTargetByType(uint32 target, Unit* invoker, Unit* sender, Unit* eventTarget, bool& isError,
+        uint32 spellId, uint32 selectFlags) const override
+    {
+        if (target != TARGET_T_EVENT_SPECIFIC || spellId != GurubashiDrainLife)
+            return CreatureEventAI::GetTargetByType(target, invoker, sender, eventTarget, isError, spellId, selectFlags);
+
+        SpellEntry const* spellInfo = sSpellTemplate.LookupEntry<SpellEntry>(spellId);
+        float const range = CalculateSpellRange(spellInfo);
+        MaNGOS::AnySpellAssistableUnitInObjectRangeCheck check(m_creature, spellInfo, range);
+        UnitList nearby;
+        MaNGOS::UnitListSearcher<MaNGOS::AnySpellAssistableUnitInObjectRangeCheck> searcher(nearby, check);
+        Cell::VisitAllObjects(m_creature, searcher, range);
+
+        Unit* closest = nullptr;
+        float closestDistance = range;
+        for (Unit* candidate : nearby)
+        {
+            float const distance = m_creature->GetDistance(candidate);
+            if (candidate != m_creature && distance < closestDistance && m_creature->IsWithinLOSInMap(candidate, true))
+            {
+                closest = candidate;
+                closestDistance = distance;
+            }
+        }
+        isError = !closest;
+        return closest;
+    }
+};
+
+struct npc_gurubashi_berserkerAI : public CreatureEventAI
+{
+    explicit npc_gurubashi_berserkerAI(Creature* creature) : CreatureEventAI(creature) {}
+
+    bool ProcessAction(CreatureEventAI_Action const& action, uint32 random, uint32 eventId, Unit* invoker,
+        Unit* sender, Unit* eventTarget) override
+    {
+        bool const success = CreatureEventAI::ProcessAction(action, random, eventId, invoker, sender, eventTarget);
+        if (success && action.type == ACTION_T_CAST &&
+            (action.cast.spellId == GurubashiKnockback || action.cast.spellId == GurubashiIntimidatingRoar) &&
+            !m_creature->getThreatManager().isThreatListEmpty())
+            DoResetThreat();
+        return success;
+    }
+};
+
+struct npc_jinxed_voodoo_pileAI : public ScriptedAI
+{
+    explicit npc_jinxed_voodoo_pileAI(Creature* creature) : ScriptedAI(creature) {}
+
+    void JustRespawned() override
+    {
+        ScriptedAI::JustRespawned();
+        SetReactState(REACT_PASSIVE);
+        SetCombatMovement(false);
+        SetMeleeEnabled(false);
+        SetAIImmobilizedState(true);
+    }
+
+    void UpdateAI(uint32 diff) override
+    {
+        if (m_creature->HasCharm())
+        {
+            m_charmedPlayer = true;
+            return;
+        }
+        if (m_charmedPlayer || m_timeout <= diff)
+        {
+            m_creature->ForcedDespawn();
+            return;
+        }
+        m_timeout -= diff;
+        if (m_castStarted)
+            return;
+        if (m_searchTimer > diff)
+        {
+            m_searchTimer -= diff;
+            return;
+        }
+        m_searchTimer = VoodooTrapSearchInterval;
+
+        PlayerList nearby;
+        GetPlayerListWithEntryInWorld(nearby, m_creature, VoodooTrapRange);
+        SpellEntry const* spellInfo = sSpellTemplate.LookupEntry<SpellEntry>(WillOfHakkar);
+        Player* closest = nullptr;
+        float closestDistance = VoodooTrapRange;
+        for (Player* player : nearby)
+        {
+            float const distance = m_creature->GetDistance(player);
+            if (distance < closestDistance && !player->HasCharmer() && !player->IsGameMaster() &&
+                m_creature->CanAttackSpell(player, spellInfo))
+            {
+                closest = player;
+                closestDistance = distance;
+            }
+        }
+        if (closest && DoCastSpellIfCan(closest, WillOfHakkar) == CAST_OK)
+            m_castStarted = true;
+    }
+
+private:
+    uint32 m_timeout = VoodooTrapTimeout;
+    uint32 m_searchTimer = VoodooTrapSearchInterval;
+    bool m_castStarted = false;
+    bool m_charmedPlayer = false;
+};
+}
+
 bool GossipHello_go_edge_of_madness_tablet(Player* player, GameObject* tablet)
 {
     auto* instance = dynamic_cast<instance_zulgurub*>(tablet->GetInstanceData());
@@ -297,6 +420,21 @@ void AddSC_zulgurub()
     pNewScript = new Script;
     pNewScript->Name = "npc_shade_of_jindo";
     pNewScript->GetAI = &GetNewAIInstance<npc_shade_of_jindoAI>;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_gurubashi_blood_drinker";
+    pNewScript->GetAI = &GetNewAIInstance<npc_gurubashi_blood_drinkerAI>;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_gurubashi_berserker";
+    pNewScript->GetAI = &GetNewAIInstance<npc_gurubashi_berserkerAI>;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_jinxed_voodoo_pile";
+    pNewScript->GetAI = &GetNewAIInstance<npc_jinxed_voodoo_pileAI>;
     pNewScript->RegisterSelf();
 
     pNewScript = new Script;
