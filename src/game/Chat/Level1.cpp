@@ -536,6 +536,14 @@ bool ChatHandler::HandleGonameCommand(char* args)
 
         std::string chrNameLink = playerLink(target_name);
 
+        // a player being teleported has no valid place yet
+        if (target->IsBeingTeleported())
+        {
+            PSendSysMessage(LANG_IS_TELEPORTED, chrNameLink.c_str());
+            SetSentErrorMessage(true);
+            return false;
+        }
+
         Map* cMap = target->GetMap();
         if (cMap->IsBattleGround())
         {
@@ -616,13 +624,19 @@ bool ChatHandler::HandleGonameCommand(char* args)
         if (!_player->TaxiFlightInterrupt())
             _player->SaveRecallPosition();
 
-        // to point to see at target with same orientation
-        float x, y, z;
-        target->GetContactPoint(target, x, y, z);
-        
         if (GenericTransport* transport = target->GetTransport())
-            transport->CalculatePassengerOffset(x, y, z);
-        _player->TeleportTo(target->GetMapId(), x, y, z, _player->GetAngle(target), TELE_TO_GM_MODE, nullptr, target->GetTransport());
+        {
+            // on a transport the ground near the target is not its deck: go to the target's own place on the transport
+            Position const& pos = target->m_movementInfo.GetTransportPos();
+            _player->TeleportTo(target->GetMapId(), pos.x, pos.y, pos.z, pos.o, TELE_TO_GM_MODE, nullptr, transport);
+        }
+        else
+        {
+            // to point to see at target with same orientation
+            float x, y, z;
+            target->GetContactPoint(target, x, y, z);
+            _player->TeleportTo(target->GetMapId(), x, y, z, _player->GetAngle(target), TELE_TO_GM_MODE);
+        }
     }
     else
     {
@@ -631,6 +645,14 @@ bool ChatHandler::HandleGonameCommand(char* args)
             return false;
 
         std::string nameLink = playerLink(target_name);
+
+        // a player between two maps is online but not found in the world: its saved position is not where it goes
+        if (sObjectAccessor.FindPlayer(target_guid, false))
+        {
+            PSendSysMessage(LANG_IS_TELEPORTED, nameLink.c_str());
+            SetSentErrorMessage(true);
+            return false;
+        }
 
         PSendSysMessage(LANG_APPEARING_AT, nameLink.c_str());
 

@@ -2009,7 +2009,16 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
         }
     }
 
-    if ((GetMapId() == mapid) && (!m_transport) && (!directSummonMap || directSummonMap == GetMap()))            // TODO the !m_transport might have unexpected effects when teleporting from transport to other place on same map
+    // the client takes only the world position of a near teleport of its own player and leaves any transport: onto a transport,
+    // whose deck may be moving, the world is reloaded instead and the player created aboard
+    GenericTransport* destTransport = transport;
+    if (!destTransport && m_teleportTransport && GetMapId() == mapid)
+        destTransport = GetMap()->GetTransport(m_teleportTransport);
+    // A passenger already aboard is not joining a new transport.
+    bool const nearOntoTransport = destTransport && destTransport != m_transport;
+
+    if (GetMapId() == mapid && !m_transport && !nearOntoTransport &&
+        (!directSummonMap || directSummonMap == GetMap()))
     {
         // lets reset far teleport flag if it wasn't reset during chained teleports
         SetSemaphoreTeleportFar(false);
@@ -2073,7 +2082,8 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
         // It will be created in the WorldPortAck.
         DungeonPersistentState* state = GetBoundInstanceSaveForSelfOrGroup(mapid);
         Map* map = directSummonMap ? directSummonMap : sMapMgr.FindMap(mapid, state ? state->GetInstanceId() : 0);
-        if (!map || map->CanEnter(this))
+        // Boarding a transport on the current map does not change instances.
+        if (!map || (nearOntoTransport && map == GetMap()) || map->CanEnter(this))
         {
             // lets reset near teleport flag if it wasn't reset during chained teleports
             SetSemaphoreTeleportNear(false);
@@ -2119,12 +2129,18 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
             RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_LEAVE_WORLD | AURA_INTERRUPT_FLAG_MOVING | AURA_INTERRUPT_FLAG_TURNING);
 
             GenericTransport* targetTransport = transport ? transport : GetTransport();
+            // a delayed teleport keeps the destination transport by guid only
+            if (!transport && m_teleportTransport && map)
+                targetTransport = map->GetTransport(m_teleportTransport);
+            // only a passenger crossing to another map with the transport is sent transport offsets: a player joining a transport
+            // is told the world position, as for a teleport without transport
+            bool const withTransport = targetTransport && m_transport == targetTransport;
             if (!GetSession()->PlayerLogout())
             {
                 // send transfer packet to display load screen
                 WorldPacket data(SMSG_TRANSFER_PENDING, (4 + 4 + 4));
                 data << uint32(mapid);
-                if (targetTransport)
+                if (withTransport)
                 {
                     data << uint32(targetTransport->GetEntry());
                     data << uint32(GetMapId());
@@ -2147,10 +2163,15 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
 
             Position const& transportPosition = m_movementInfo.GetTransportPos();
 
+            // destination in world coordinates (x, y, z are transport offsets when going onto a transport)
+            float world_x = final_x, world_y = final_y, world_z = final_z, world_o = final_o;
+            if (targetTransport)
+                targetTransport->CalculatePassengerPosition(world_x, world_y, world_z, &world_o);
+
             m_teleport_dest = WorldLocation(mapid, final_x, final_y, final_z, final_o);
             if (targetTransport)
                 m_teleportTransport = targetTransport->GetObjectGuid();
-            SetFallInformation(0, final_z);
+            SetFallInformation(0, world_z);
             // if the player is saved before worldport ack (at logout for example)
             // this will be used instead of the current location in SaveToDB
 
@@ -2163,7 +2184,7 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
                 // transfer finished, inform client to start load
                 WorldPacket data(SMSG_NEW_WORLD, (20));
                 data << uint32(mapid);
-                if (targetTransport)
+                if (withTransport)
                 {
                     data << float(transportPosition.x);
                     data << float(transportPosition.y);
@@ -2172,10 +2193,10 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
                 }
                 else
                 {
-                    data << float(final_x);
-                    data << float(final_y);
-                    data << float(final_z);
-                    data << float(final_o);
+                    data << float(world_x);
+                    data << float(world_y);
+                    data << float(world_z);
+                    data << float(world_o);
                 }
 
                 GetSession()->SendPacket(data);
@@ -14598,8 +14619,11 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder* holder)
             GameObjectInfo const* transportInfo = sGOStorage.LookupEntry<GameObjectInfo>(data->id);
             if (transportInfo->type == GAMEOBJECT_TYPE_TRANSPORT)
             {
-                guid = ObjectGuid(HIGHGUID_GAMEOBJECT, data->id, transGUID);
+                guid = ObjectGuid(transportInfo->GetHighGuid(), data->id, transGUID);
                 m_movementInfo.t_guid = guid;
+                // an elevator only exists while its grid is loaded
+                if (data->mapid == GetMapId())
+                    GetMap()->LoadGrid(data->posX, data->posY);
             }
         }
         GenericTransport* transport = GetMap()->GetTransport(guid);
