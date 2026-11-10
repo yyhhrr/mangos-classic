@@ -272,8 +272,6 @@ private:
 namespace
 {
 constexpr uint32 GurubashiDrainLife = 24435;
-constexpr uint32 GurubashiKnockback = 11130;
-constexpr uint32 GurubashiIntimidatingRoar = 16508;
 constexpr uint32 WillOfHakkar = 24178;
 constexpr float VoodooTrapRange = 5.0f;
 constexpr uint32 VoodooTrapTimeout = 21 * IN_MILLISECONDS;
@@ -309,22 +307,6 @@ struct npc_gurubashi_blood_drinkerAI : public CreatureEventAI
         }
         isError = !closest;
         return closest;
-    }
-};
-
-struct npc_gurubashi_berserkerAI : public CreatureEventAI
-{
-    explicit npc_gurubashi_berserkerAI(Creature* creature) : CreatureEventAI(creature) {}
-
-    bool ProcessAction(CreatureEventAI_Action const& action, uint32 random, uint32 eventId, Unit* invoker,
-        Unit* sender, Unit* eventTarget) override
-    {
-        bool const success = CreatureEventAI::ProcessAction(action, random, eventId, invoker, sender, eventTarget);
-        if (success && action.type == ACTION_T_CAST &&
-            (action.cast.spellId == GurubashiKnockback || action.cast.spellId == GurubashiIntimidatingRoar) &&
-            !m_creature->getThreatManager().isThreatListEmpty())
-            DoResetThreat();
-        return success;
     }
 };
 
@@ -425,11 +407,6 @@ void AddSC_zulgurub()
     pNewScript = new Script;
     pNewScript->Name = "npc_gurubashi_blood_drinker";
     pNewScript->GetAI = &GetNewAIInstance<npc_gurubashi_blood_drinkerAI>;
-    pNewScript->RegisterSelf();
-
-    pNewScript = new Script;
-    pNewScript->Name = "npc_gurubashi_berserker";
-    pNewScript->GetAI = &GetNewAIInstance<npc_gurubashi_berserkerAI>;
     pNewScript->RegisterSelf();
 
     pNewScript = new Script;
