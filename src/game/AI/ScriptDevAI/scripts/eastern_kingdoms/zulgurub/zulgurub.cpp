@@ -35,6 +35,43 @@ constexpr uint32 ArlokkSummonDelay = 10000;
 constexpr uint32 ArlokkLifetime = 15 * MINUTE * IN_MILLISECONDS;
 constexpr size_t ArlokkProwlerLimit = 40;
 constexpr uint32 SummonZulianProwlers = 24247;
+constexpr uint32 GahzrankaSummonDelay = 2 * IN_MILLISECONDS;
+constexpr uint32 GahzrankaLifetime = 150 * MINUTE * IN_MILLISECONDS;
+constexpr float GahzrankaSummonRange = 100.0f;
+constexpr float GahzrankaSpawnX = -11675.7f;
+constexpr float GahzrankaSpawnY = -1728.91f;
+constexpr float GahzrankaSpawnZ = -7.08374f;
+constexpr float GahzrankaSpawnOrientation = 4.20624f;
+
+std::string MakeSaveData(uint32 const (&states)[MAX_ENCOUNTER], uint32 gahzrankaState)
+{
+    std::ostringstream stream;
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+    {
+        if (i)
+            stream << ' ';
+        stream << states[i];
+    }
+    if (gahzrankaState != NOT_STARTED)
+        stream << ' ' << gahzrankaState;
+    return stream.str();
+}
+
+bool ReadGahzrankaState(std::istream& stream, uint32& state)
+{
+    // Older saves end after the eight encounter states.
+    stream >> std::ws;
+    if (stream.eof())
+    {
+        state = NOT_STARTED;
+        return true;
+    }
+
+    if (!(stream >> state) || (state != NOT_STARTED && state != IN_PROGRESS && state != DONE))
+        return false;
+    stream >> std::ws;
+    return stream.eof();
+}
 }
 
 instance_zulgurub::instance_zulgurub(Map* map) : ScriptedInstance(map),
@@ -44,6 +81,12 @@ instance_zulgurub::instance_zulgurub(Map* map) : ScriptedInstance(map),
     m_resetArlokkObjects(false)
 {
     Initialize();
+}
+
+instance_zulgurub::~instance_zulgurub()
+{
+    if (!m_gahzrankaSummoner.IsEmpty())
+        RefundGahzrankaSummon(m_gahzrankaSummoner, instance);
 }
 
 void instance_zulgurub::Initialize()
@@ -64,6 +107,8 @@ void instance_zulgurub::StartArlokkEncounter(GameObject& gong)
 
 void instance_zulgurub::Update(uint32 diff)
 {
+    UpdateGahzranka(diff);
+
     if (GetData(TYPE_ARLOKK) != IN_PROGRESS)
         return;
 
@@ -94,6 +139,78 @@ void instance_zulgurub::Update(uint32 diff)
     m_arlokkBossGuid = arlokk->GetObjectGuid();
     if (GameObject* field = GetSingleGameObjectFromStorage(GO_FORCEFIELD, true))
         SyncArlokkObject(*field);
+}
+
+bool instance_zulgurub::CanSummonGahzranka(Player const& player) const
+{
+    if (m_gahzrankaState != NOT_STARTED || !m_gahzrankaSummoner.IsEmpty() || !player.IsAlive() || player.GetMap() != instance)
+        return false;
+
+    Creature const* trigger = GetSingleCreatureFromStorage(NPC_GAHZRANKA_TRIGGER, true);
+    return trigger && trigger->IsAlive() && player.IsWithinDistInMap(trigger, GahzrankaSummonRange) &&
+        !GetSingleCreatureFromStorage(NPC_GAHZRANKA, true);
+}
+
+bool instance_zulgurub::StartGahzrankaSummon(Player& player, uint32 travelTime)
+{
+    if (!CanSummonGahzranka(player))
+        return false;
+
+    m_gahzrankaSummoner = player.GetObjectGuid();
+    m_gahzrankaSummonTimer = travelTime + GahzrankaSummonDelay;
+    return true;
+}
+
+void instance_zulgurub::UpdateGahzranka(uint32 diff)
+{
+    bool const pending = !m_gahzrankaSummoner.IsEmpty();
+    if (!pending && (m_gahzrankaState != IN_PROGRESS || GetSingleCreatureFromStorage(NPC_GAHZRANKA, true)))
+        return;
+
+    if (diff < m_gahzrankaSummonTimer)
+    {
+        m_gahzrankaSummonTimer -= diff;
+        return;
+    }
+
+    if (!pending)
+    {
+        // Restore a paid encounter when someone returns to the area after an unload or timeout.
+        m_gahzrankaSummonTimer = GahzrankaSummonDelay;
+        for (auto const& reference : instance->GetPlayers())
+        {
+            Player const* player = reference.getSource();
+            if (player && player->IsAlive() && player->IsWithinDist3d(GahzrankaSpawnX, GahzrankaSpawnY, GahzrankaSpawnZ, GahzrankaSummonRange))
+            {
+                SummonGahzranka();
+                break;
+            }
+        }
+        return;
+    }
+
+    Creature* trigger = GetSingleCreatureFromStorage(NPC_GAHZRANKA_TRIGGER, true);
+    bool const summoned = trigger && trigger->IsAlive() && !GetSingleCreatureFromStorage(NPC_GAHZRANKA, true) && SummonGahzranka();
+    ObjectGuid const summoner = m_gahzrankaSummoner;
+    m_gahzrankaSummoner.Clear();
+    m_gahzrankaSummonTimer = 0;
+
+    if (!summoned)
+    {
+        RefundGahzrankaSummon(summoner, instance);
+        return;
+    }
+
+    m_gahzrankaState = IN_PROGRESS;
+    m_strInstData = MakeSaveData(m_auiEncounter, m_gahzrankaState);
+    SaveToDB();
+    trigger->ForcedDespawn();
+}
+
+Creature* instance_zulgurub::SummonGahzranka()
+{
+    return WorldObject::SummonCreature(TempSpawnSettings(nullptr, NPC_GAHZRANKA, GahzrankaSpawnX, GahzrankaSpawnY, GahzrankaSpawnZ,
+        GahzrankaSpawnOrientation, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, GahzrankaLifetime, false, false, 1), instance);
 }
 
 void instance_zulgurub::SyncArlokkObject(GameObject& go)
@@ -138,6 +255,8 @@ void instance_zulgurub::OnCreatureCreate(Creature* creature)
         case NPC_JEKLIK:
         case NPC_VENOXIS:
         case NPC_ARLOKK:
+        case NPC_GAHZRANKA:
+        case NPC_GAHZRANKA_TRIGGER:
             m_npcEntryGuidStore[creature->GetEntry()] = creature->GetObjectGuid();
             break;
         case NPC_PANTHER_TRIGGER:
@@ -153,11 +272,19 @@ void instance_zulgurub::OnCreatureDeath(Creature* creature)
 {
     if (creature->GetEntry() == NPC_ZULIAN_PROWLER)
         m_lProwlerGUIDList.remove(creature->GetObjectGuid());
+    else if (creature->GetEntry() == NPC_GAHZRANKA && m_gahzrankaState == IN_PROGRESS &&
+        GetSingleCreatureFromStorage(NPC_GAHZRANKA, true) == creature)
+    {
+        m_gahzrankaState = DONE;
+        m_strInstData = MakeSaveData(m_auiEncounter, m_gahzrankaState);
+        SaveToDB();
+    }
 }
 
 void instance_zulgurub::OnCreatureDespawn(Creature* creature)
 {
-    OnCreatureDeath(creature);
+    if (creature->GetEntry() == NPC_ZULIAN_PROWLER)
+        m_lProwlerGUIDList.remove(creature->GetObjectGuid());
     if (GetData(TYPE_ARLOKK) == IN_PROGRESS && creature->GetObjectGuid() == m_arlokkBossGuid)
         SetData(TYPE_ARLOKK, FAIL);
 }
@@ -256,12 +383,7 @@ void instance_zulgurub::SetData(uint32 type, uint32 data)
     {
         OUT_SAVE_INST_DATA;
 
-        std::ostringstream saveStream;
-        saveStream << m_auiEncounter[0] << " " << m_auiEncounter[1] << " " << m_auiEncounter[2] << " "
-                   << m_auiEncounter[3] << " " << m_auiEncounter[4] << " " << m_auiEncounter[5] << " "
-                   << m_auiEncounter[6] << " " << m_auiEncounter[7];
-
-        m_strInstData = saveStream.str();
+        m_strInstData = MakeSaveData(m_auiEncounter, m_gahzrankaState);
 
         SaveToDB();
         OUT_SAVE_INST_DATA_COMPLETE;
@@ -291,19 +413,31 @@ void instance_zulgurub::Load(const char* chrIn)
     OUT_LOAD_INST_DATA(chrIn);
 
     std::istringstream loadStream(chrIn);
-    loadStream >> m_auiEncounter[0] >> m_auiEncounter[1] >> m_auiEncounter[2] >> m_auiEncounter[3]
-               >> m_auiEncounter[4] >> m_auiEncounter[5] >> m_auiEncounter[6] >> m_auiEncounter[7];
-
-    for (uint32& i : m_auiEncounter)
+    uint32 states[MAX_ENCOUNTER];
+    for (uint32& state : states)
     {
-        if (i == IN_PROGRESS)
-            i = NOT_STARTED;
+        if (!(loadStream >> state))
+        {
+            OUT_LOAD_INST_DATA_FAIL;
+            return;
+        }
     }
+    uint32 gahzrankaState;
+    if (!ReadGahzrankaState(loadStream, gahzrankaState))
+    {
+        OUT_LOAD_INST_DATA_FAIL;
+        return;
+    }
+
+    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
+        m_auiEncounter[i] = states[i] == IN_PROGRESS ? NOT_STARTED : states[i];
 
     if (m_auiEncounter[TYPE_THEKAL] != DONE)
         m_auiEncounter[TYPE_THEKAL] = NOT_STARTED;
     m_auiEncounter[TYPE_LORKHAN] = NOT_STARTED;
     m_auiEncounter[TYPE_ZATH] = NOT_STARTED;
+    m_gahzrankaState = gahzrankaState;
+    m_strInstData = MakeSaveData(m_auiEncounter, m_gahzrankaState);
 
     OUT_LOAD_INST_DATA_COMPLETE;
 }
@@ -376,14 +510,7 @@ bool instance_zulgurub::GetEventResetData(uint32 eventId, std::string& data) con
     if (eventId == TYPE_THEKAL)
         states[TYPE_LORKHAN] = states[TYPE_ZATH] = NOT_STARTED;
 
-    std::ostringstream stream;
-    for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
-    {
-        if (i)
-            stream << ' ';
-        stream << states[i];
-    }
-    data = stream.str();
+    data = MakeSaveData(states, m_gahzrankaState);
     return true;
 }
 
@@ -516,13 +643,14 @@ void instance_zulgurub::ApplyEventReset(uint32 eventId, std::string const& data)
     for (uint32& state : states)
         if (!(stream >> state))
             return;
-    stream >> std::ws;
-    if (!stream.eof())
+    uint32 gahzrankaState;
+    if (!ReadGahzrankaState(stream, gahzrankaState))
         return;
 
     for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
         m_auiEncounter[i] = states[i];
-    m_strInstData = data;
+    m_gahzrankaState = std::max(m_gahzrankaState, gahzrankaState);
+    m_strInstData = MakeSaveData(m_auiEncounter, m_gahzrankaState);
     if (eventId == TYPE_MARLI)
         m_resetMarliObjects = true;
     if (eventId == TYPE_ARLOKK)

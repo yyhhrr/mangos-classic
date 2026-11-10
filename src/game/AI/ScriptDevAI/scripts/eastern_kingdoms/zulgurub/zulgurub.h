@@ -36,6 +36,8 @@ enum
     NPC_VENOXIS             = 14507,
     NPC_ARLOKK              = 14515,
     NPC_ZULIAN_PROWLER      = 15101,
+    NPC_GAHZRANKA           = 15114,
+    NPC_GAHZRANKA_TRIGGER   = 15140,
 
     GO_SPIDER_EGG           = 179985,
     GO_GONG_OF_BETHEKK      = 180526,
@@ -54,11 +56,13 @@ enum
 static const float aMandokirDownstairsPos[3] = { -12196.30f, -1948.37f, 130.31f};
 static const float aArlokkWallShieldPos[3] = { -11494.76f, -1627.56f, 41.30f};
 
+void RefundGahzrankaSummon(ObjectGuid playerGuid, Map* map);
+
 class instance_zulgurub : public ScriptedInstance
 {
     public:
         instance_zulgurub(Map* map);
-        ~instance_zulgurub() {}
+        ~instance_zulgurub() override;
 
         void Initialize() override;
         void Update(uint32 diff) override;
@@ -85,6 +89,8 @@ class instance_zulgurub : public ScriptedInstance
         void StartArlokkEncounter(GameObject& gong);
         bool RegisterArlokkProwler(Creature const& prowler);
         bool IsArlokkProwler(Creature const& prowler) const;
+        bool CanSummonGahzranka(Player const& player) const;
+        bool StartGahzrankaSummon(Player& player, uint32 travelTime);
 
     protected:
         void RemoveHakkarPowerStack();
@@ -94,6 +100,8 @@ class instance_zulgurub : public ScriptedInstance
         void SyncArlokkObject(GameObject& go);
         void StopArlokkProwlers();
         void ReleaseArlokkProwlers();
+        void UpdateGahzranka(uint32 diff);
+        Creature* SummonGahzranka();
 
         uint32 m_auiEncounter[MAX_ENCOUNTER];
         std::string m_strInstData;
@@ -103,6 +111,10 @@ class instance_zulgurub : public ScriptedInstance
         GuidList m_lProwlerGUIDList;
         ObjectGuid m_arlokkBossGuid;
         uint32 m_arlokkSummonTimer = 0;
+
+        ObjectGuid m_gahzrankaSummoner;
+        uint32 m_gahzrankaSummonTimer = 0;
+        uint32 m_gahzrankaState = NOT_STARTED;
 
         bool m_bHasIntroYelled;
         bool m_bHasAltarYelled;

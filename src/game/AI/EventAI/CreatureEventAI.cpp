@@ -1864,7 +1864,7 @@ inline int32 CreatureEventAI::GetRandActionParam(uint32 rnd, int32 param1, int32
     return 0;
 }
 
-inline Unit* CreatureEventAI::GetTargetByType(uint32 target, Unit* actionInvoker, Unit* AIEventSender, Unit* eventTarget, bool& isError, uint32 forSpellId, uint32 selectFlags) const
+Unit* CreatureEventAI::GetTargetByType(uint32 target, Unit* actionInvoker, Unit* AIEventSender, Unit* eventTarget, bool& isError, uint32 forSpellId, uint32 selectFlags) const
 {
     Unit* resTarget;
     switch (target)

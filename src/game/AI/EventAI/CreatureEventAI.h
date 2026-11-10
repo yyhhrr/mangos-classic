@@ -917,7 +917,7 @@ class CreatureEventAI : public CreatureAI
         inline uint32 GetRandActionParam(uint32 rnd, uint32 param1, uint32 param2, uint32 param3) const;
         inline int32 GetRandActionParam(uint32 rnd, int32 param1, int32 param2, int32 param3) const;
         /// If the bool& param is true, an error should be reported
-        inline Unit* GetTargetByType(uint32 target, Unit* actionInvoker, Unit* AIEventSender, Unit* eventTarget, bool& isError, uint32 forSpellId = 0, uint32 selectFlags = 0) const;
+        virtual Unit* GetTargetByType(uint32 target, Unit* actionInvoker, Unit* AIEventSender, Unit* eventTarget, bool& isError, uint32 forSpellId = 0, uint32 selectFlags = 0) const;
 
         bool SpawnedEventConditionsCheck(CreatureEventAI_Event const& event) const;
 
