@@ -933,10 +933,9 @@ uint32 Unit::DealDamage(Unit* dealer, Unit* victim, uint32 damage, CleanDamage c
             if (!se)
                 continue;
 
-            // for creatures, spells which started travelling sooner than aura application should not be broken - we assume same for players
-            if (spell)
-                if (spell->GetSpellStartTravelling() <= aura.second->GetAuraApplyMSTime())
-                    continue;
+            // Pre-existing projectiles normally leave new auras intact. Hazza'rah's Sleep breaks on impact.
+            if (spell && se->Id != 24664 && spell->GetSpellStartTravelling() <= aura.second->GetAuraApplyMSTime())
+                continue;
 
             if (se->AuraInterruptFlags & actionInterruptFlags)
                 cleanupHolder.push_back(aura.second->GetId());

@@ -135,26 +135,28 @@ UnitAI* GetAI_npc_soulflayer(Creature* pCreature)
     return new npc_soulflayerAI(pCreature);
 }
 
-enum // leftover hazzarah enum for future docu
+struct HazzarahChainBurn : public SpellScript
 {
-    SPELL_CHAIN_BURN            = 24684,
-    SPELL_SLEEP                 = 24664,
-    SPELL_EARTH_SHOCK           = 24685,
-    SPELL_SUMMON_ILLUSION_1     = 24681,
-    SPELL_SUMMON_ILLUSION_2     = 24728, // main spell with script effect
-    SPELL_SUMMON_ILLUSION_3     = 24729,
-};
-
-struct SummonNightmareIllusion : public SpellScript
-{
-    void OnEffectExecute(Spell* spell, SpellEffectIndex effIdx) const override
+    SpellCastResult OnCheckCast(Spell* spell, bool /*strict*/) const override
     {
-        if (effIdx == EFFECT_INDEX_1)
-        {
-            Unit* caster = spell->GetCaster();
-            caster->CastSpell(nullptr, SPELL_SUMMON_ILLUSION_1, TRIGGERED_OLD_TRIGGERED);
-            caster->CastSpell(nullptr, SPELL_SUMMON_ILLUSION_3, TRIGGERED_OLD_TRIGGERED);
-        }
+        Unit* caster = spell->GetCaster();
+        if (!caster || caster->GetEntry() != NPC_HAZZARAH)
+            return SPELL_CAST_OK;
+        if (caster->GetPower(POWER_MANA) == 0)
+            return SPELL_FAILED_NO_POWER;
+        return IsManaPlayer(spell->m_targets.getUnitTarget()) ? SPELL_CAST_OK : SPELL_FAILED_BAD_TARGETS;
+    }
+
+    bool OnCheckTarget(Spell const* spell, Unit* target, SpellEffectIndex /*effIdx*/) const override
+    {
+        Unit* caster = spell->GetCaster();
+        return !caster || caster->GetEntry() != NPC_HAZZARAH || IsManaPlayer(target);
+    }
+
+private:
+    static bool IsManaPlayer(Unit const* target)
+    {
+        return target && target->IsPlayer() && target->GetPowerType() == POWER_MANA;
     }
 };
 
@@ -302,6 +304,6 @@ void AddSC_zulgurub()
     pNewScript->pGossipHelloGO = &GossipHello_go_edge_of_madness_tablet;
     pNewScript->RegisterSelf();
 
-    RegisterSpellScript<SummonNightmareIllusion>("spell_summon_nightmare_illusion_hazzarah");
+    RegisterSpellScript<HazzarahChainBurn>("spell_hazzarah_chain_burn");
     RegisterSpellScript<WyvernStingAura>("spell_wyvern_sting_aura");
 }
