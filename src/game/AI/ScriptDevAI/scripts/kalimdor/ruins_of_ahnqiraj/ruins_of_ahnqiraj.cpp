@@ -25,12 +25,10 @@ EndScriptData
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "ruins_of_ahnqiraj.h"
+#include "Groups/Group.h"
 #include "Maps/MapPersistentStateMgr.h"
 
-instance_ruins_of_ahnqiraj::instance_ruins_of_ahnqiraj(Map* map) : ScriptedInstance(map),
-    m_armyDelayTimer(0),
-    m_rajaxxResetTimer(0),
-    m_currentArmyWave(0)
+instance_ruins_of_ahnqiraj::instance_ruins_of_ahnqiraj(Map* map) : ScriptedInstance(map)
 {
     Initialize();
 }
@@ -42,6 +40,18 @@ static char const* const aRajaxxResetGroups[] = {
     "AQ20_XURREM", "AQ20_YEGGETH", "AQ20_PAKKON", "AQ20_ZERRAN"
 };
 
+bool instance_ruins_of_ahnqiraj::CanStartRajaxxEvent()
+{
+    if (GetData(TYPE_KURINNAXX) != DONE || GetData(TYPE_RAJAXX) != NOT_STARTED ||
+        m_rajaxxResetPending || m_rajaxxResetTimer)
+        return false;
+
+    return std::all_of(std::begin(aRajaxxResetGroups), std::end(aRajaxxResetGroups), [this](char const* name)
+    {
+        return instance->GetSpawnManager().GetSpawnGroup(std::string(name));
+    });
+}
+
 std::vector<InstanceEventReset> instance_ruins_of_ahnqiraj::GetResettableEvents() const
 {
     return {{TYPE_RAJAXX, "General Rajaxx / Andorov's Army",
@@ -51,7 +61,7 @@ std::vector<InstanceEventReset> instance_ruins_of_ahnqiraj::GetResettableEvents(
 
 bool instance_ruins_of_ahnqiraj::GetEventResetData(uint32 eventId, std::string& data) const
 {
-    if (eventId != TYPE_RAJAXX || m_rajaxxResetTimer || GetData(TYPE_KURINNAXX) != DONE)
+    if (eventId != TYPE_RAJAXX || m_rajaxxResetPending || m_rajaxxResetTimer || GetData(TYPE_KURINNAXX) != DONE)
         return false;
     // Refuse unsupported/partial army data before changing any live event state.
     for (char const* name : aRajaxxResetGroups)
@@ -71,22 +81,40 @@ void instance_ruins_of_ahnqiraj::ApplyEventReset(uint32 eventId, std::string con
 {
     if (eventId != TYPE_RAJAXX)
         return;
-    // Stop the wave scheduler before despawning anything: group callbacks cannot
-    // schedule the final wave or finish an encounter during this reconstruction.
     m_encounter[TYPE_RAJAXX] = NOT_STARTED;
-    m_armyDelayTimer = 0;
-    m_currentArmyWave = 0;
     m_strInstData = data;
+    ResetRajaxxEvent();
+}
+
+void instance_ruins_of_ahnqiraj::ResetRajaxxEvent()
+{
+    m_rajaxxResetPending = false;
+    m_armyDelayTimer = 0;
+    m_nextArmyWave = 0;
+    m_rajaxxReleased = false;
+    for (GuidSet& members : m_livingArmyWaves)
+        members.clear();
+
+    SetRajaxxGateClosed(false);
     for (char const* name : aRajaxxResetGroups)
         if (SpawnGroup* group = instance->GetSpawnManager().GetSpawnGroup(std::string(name)))
         {
             group->SetEnabled(false);
-            group->Despawn();
+            if (CreatureGroup* army = group->GetCreatureGroup())
+                army->Despawn(0, false, 0);
             for (auto const& member : group->GetGroupEntry().DbGuids)
                 instance->GetPersistentState()->SaveCreatureRespawnTime(member.DbGuid, 0);
         }
-    // A fresh helper generation also discards Andorov's old dialogue, waypoint,
-    // vendor and delayed-despawn timers. Only these event-owned summons are removed.
+    DespawnRajaxxHelpers();
+    m_npcEntryGuidStore.erase(NPC_GENERAL_ANDOROV);
+    m_kaldoreiGuidList.clear();
+
+    // Allow the map to remove the previous actors before recreating the groups.
+    m_rajaxxResetTimer = IN_MILLISECONDS;
+}
+
+void instance_ruins_of_ahnqiraj::DespawnRajaxxHelpers(uint32 delay)
+{
     GuidVector helpers;
     auto& objects = instance->GetObjectsStore();
     for (auto itr = objects.begin<Creature>(); itr != objects.end<Creature>(); ++itr)
@@ -96,17 +124,43 @@ void instance_ruins_of_ahnqiraj::ApplyEventReset(uint32 eventId, std::string con
             !actor->HasStaticDBSpawnData())
             helpers.push_back(actor->GetObjectGuid());
     }
-    m_npcEntryGuidStore.erase(NPC_GENERAL_ANDOROV);
-    m_kaldoreiGuidList.clear();
     for (ObjectGuid guid : helpers)
         if (Creature* actor = instance->GetCreature(guid))
         {
             actor->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP | UNIT_NPC_FLAG_VENDOR);
-            actor->ForcedDespawn();
+            actor->ForcedDespawn(delay);
         }
-    // CreatureGroup::Despawn clears membership immediately, while old objects are
-    // removed at the end of the map update. Keep spawning disabled until then.
-    m_rajaxxResetTimer = IN_MILLISECONDS;
+}
+
+void instance_ruins_of_ahnqiraj::SetRajaxxGateClosed(bool closed)
+{
+    if (GameObject* gate = instance->GetGameObject(m_rajaxxGateGuid))
+    {
+        if (!closed)
+        {
+            gate->SetGoState(GO_STATE_ACTIVE);
+            gate->ForcedDespawn();
+            m_rajaxxGateGuid.Clear();
+        }
+        return;
+    }
+
+    m_rajaxxGateGuid.Clear();
+    if (!closed)
+        return;
+
+    GameObject* gate = new GameObject;
+    const uint32 guid = instance->GenerateLocalLowGuid(HIGHGUID_GAMEOBJECT, GO_RAJAXX_GATE);
+    if (!gate->Create(guid, guid, GO_RAJAXX_GATE, instance, -8526.0f, 1507.4f, 49.0f, 4.20662f, 0.0f, 0.0f, 0.861534f, -0.5077f))
+    {
+        delete gate;
+        return;
+    }
+    gate->SetFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
+    gate->SetActiveObjectState(true);
+    instance->Add(gate);
+    gate->AIM_Initialize();
+    m_rajaxxGateGuid = gate->GetObjectGuid();
 }
 
 void instance_ruins_of_ahnqiraj::Initialize()
@@ -126,9 +180,27 @@ bool instance_ruins_of_ahnqiraj::IsEncounterInProgress() const
 
 void instance_ruins_of_ahnqiraj::OnPlayerEnter(Player* /*player*/)
 {
-    // Spawn andorov if necessary
-    if (!m_rajaxxResetTimer && GetData(TYPE_KURINNAXX) == DONE)
-        DoSpawnAndorovIfCan();
+    // Respawn times can outlive an interrupted attempt even when its state was never saved.
+    // Check here, after the map has initialized both persistent state and spawn groups.
+    if (!m_npcEntryGuidStore.count(NPC_GENERAL_ANDOROV) && CanStartRajaxxEvent())
+    {
+        auto const* state = instance->GetPersistentState();
+        const time_t now = time(nullptr);
+        for (char const* name : aRajaxxResetGroups)
+        {
+            auto const& members = instance->GetSpawnManager().GetSpawnGroup(std::string(name))->GetGroupEntry().DbGuids;
+            if (std::any_of(members.begin(), members.end(), [state, now](auto const& member)
+                {
+                    return state->GetCreatureRespawnTime(member.DbGuid) > now;
+                }))
+            {
+                m_rajaxxResetPending = true;
+                return;
+            }
+        }
+    }
+
+    DoSpawnAndorovIfCan();
 }
 
 void instance_ruins_of_ahnqiraj::OnCreatureCreate(Creature* creature)
@@ -162,6 +234,7 @@ void instance_ruins_of_ahnqiraj::OnCreatureCreate(Creature* creature)
             m_kaldoreiGuidList.push_back(creature->GetObjectGuid());
             break;
     }
+    LockRajaxxActor(creature);
 }
 
 void instance_ruins_of_ahnqiraj::OnObjectCreate(GameObject* go)
@@ -184,6 +257,29 @@ void instance_ruins_of_ahnqiraj::OnCreatureEnterCombat(Creature* creature)
 
 void instance_ruins_of_ahnqiraj::OnCreatureEvade(Creature* creature)
 {
+    if (GetData(TYPE_RAJAXX) == IN_PROGRESS)
+    {
+        const ObjectGuid guid = creature->GetObjectGuid();
+        const bool releasedMember = std::any_of(m_livingArmyWaves.begin(), m_livingArmyWaves.end(), [guid](GuidSet const& members)
+        {
+            return members.count(guid) != 0;
+        });
+        const auto waveInCombat = [this](GuidSet const& members)
+        {
+            return std::any_of(members.begin(), members.end(), [this](ObjectGuid member)
+            {
+                Creature* attacker = instance->GetCreature(member);
+                return attacker && attacker->IsAlive() && attacker->IsInCombat();
+            });
+        };
+        if ((m_rajaxxReleased && creature->GetEntry() == NPC_RAJAXX) ||
+            (releasedMember && std::none_of(m_livingArmyWaves.begin(), m_livingArmyWaves.end(), waveInCombat)))
+        {
+            SetData(TYPE_RAJAXX, FAIL);
+            return;
+        }
+    }
+
     switch (creature->GetEntry())
     {
         case NPC_KURINNAXX: SetData(TYPE_KURINNAXX, FAIL); break;
@@ -191,54 +287,92 @@ void instance_ruins_of_ahnqiraj::OnCreatureEvade(Creature* creature)
         case NPC_BURU:      SetData(TYPE_BURU, FAIL);      break;
         case NPC_AYAMISS:   SetData(TYPE_AYAMISS, FAIL);   break;
         case NPC_OSSIRIAN:  SetData(TYPE_OSSIRIAN, FAIL);  break;
-        case NPC_RAJAXX:
-            // Rajaxx yells on evade
-            // DoScriptText(SAY_DEAGGRO, creature); - unconfirmed
-        // no break;
-        case NPC_COLONEL_ZERRAN:
-        case NPC_MAJOR_PAKKON:
-        case NPC_MAJOR_YEGGETH:
-        case NPC_CAPTAIN_XURREM:
-        case NPC_CAPTAIN_DRENN:
-        case NPC_CAPTAIN_TUUBID:
-        case NPC_CAPTAIN_QEEZ:
-            SetData(TYPE_RAJAXX, FAIL);
-            break;
     }
 }
 
 void instance_ruins_of_ahnqiraj::OnCreatureDeath(Creature* creature)
 {
+    if (GetData(TYPE_RAJAXX) == IN_PROGRESS)
+    {
+        for (GuidSet& members : m_livingArmyWaves)
+            if (members.erase(creature->GetObjectGuid()))
+            {
+                ScheduleRajaxxWaveIfCleared();
+                break;
+            }
+    }
+
     switch (creature->GetEntry())
     {
         case NPC_KURINNAXX: SetData(TYPE_KURINNAXX, DONE); break;
-        case NPC_RAJAXX:    SetData(TYPE_RAJAXX, DONE);    break;
+        case NPC_RAJAXX:
+            if (GetData(TYPE_RAJAXX) == IN_PROGRESS && m_rajaxxReleased)
+            {
+                RewardRajaxxSurvivors(creature);
+                SetData(TYPE_RAJAXX, DONE);
+            }
+            break;
         case NPC_MOAM:      SetData(TYPE_MOAM, DONE);      break;
         case NPC_BURU:      SetData(TYPE_BURU, DONE);      break;
         case NPC_AYAMISS:   SetData(TYPE_AYAMISS, DONE);   break;
         case NPC_OSSIRIAN:  SetData(TYPE_OSSIRIAN, DONE);  break;
-        case NPC_COLONEL_ZERRAN:
-        case NPC_MAJOR_PAKKON:
-        case NPC_MAJOR_YEGGETH:
-        case NPC_CAPTAIN_XURREM:
-        case NPC_CAPTAIN_DRENN:
-        case NPC_CAPTAIN_TUUBID:
-        case NPC_CAPTAIN_QEEZ:
-        case NPC_QIRAJI_WARRIOR:
-        case NPC_SWARMGUARD_NEEDLER:
-        {
-            // If event isn't started by Andorov, return
-            if (GetData(TYPE_RAJAXX) != IN_PROGRESS)
-                return;
-
-
+        case NPC_GENERAL_ANDOROV:
+            if (GetData(TYPE_RAJAXX) == DONE)
+                DespawnRajaxxHelpers(2500);
             break;
-        }
     }
+}
+
+void instance_ruins_of_ahnqiraj::RewardRajaxxSurvivors(Creature* rajaxx)
+{
+    if (rajaxx->IsNoReputation())
+        return;
+
+    uint32 survivors = 0;
+    if (Creature* andorov = GetSingleCreatureFromStorage(NPC_GENERAL_ANDOROV, true))
+        if (andorov->IsAlive())
+            ++survivors;
+    for (ObjectGuid guid : m_kaldoreiGuidList)
+        if (Creature* elite = instance->GetCreature(guid))
+            if (elite->IsAlive())
+                ++survivors;
+
+    if (!survivors)
+        return;
+
+    // Apply the encounter spell's reputation effect to the same players who qualify
+    // for the Boss kill reward, including members who died before the kill.
+    constexpr uint32 bonusReputationSpell = 26342;
+    SpellEntry const* bonus = sSpellTemplate.LookupEntry<SpellEntry>(bonusReputationSpell);
+    if (!bonus)
+        return;
+
+    const uint32 factionId = bonus->EffectMiscValue[EFFECT_INDEX_0];
+    FactionEntry const* faction = sFactionStore.LookupEntry(factionId);
+    if (!faction)
+        return;
+
+    const int32 reputation = bonus->CalculateSimpleValue(EFFECT_INDEX_0);
+    auto reward = [rajaxx, faction, factionId, reputation, survivors](Player* player)
+    {
+        if (player && player->IsAtGroupRewardDistance(rajaxx))
+        {
+            int32 perSurvivor = player->CalculateReputationGain(REPUTATION_SOURCE_SPELL, reputation, factionId);
+            player->GetReputationMgr().ModifyReputation(faction, perSurvivor * int32(survivors));
+        }
+    };
+
+    Player* tapper = rajaxx->GetOriginalLootRecipient();
+    reward(tapper);
+    if (Group* group = rajaxx->GetGroupLootRecipient())
+        for (GroupReference* member = group->GetFirstMember(); member; member = member->next())
+            if (member->getSource() != tapper)
+                reward(member->getSource());
 }
 
 void instance_ruins_of_ahnqiraj::OnCreatureRespawn(Creature* creature)
 {
+    LockRajaxxActor(creature);
     switch (creature->GetEntry())
     {
         case NPC_OSSIRIAN_TRIGGER:
@@ -256,39 +390,46 @@ void instance_ruins_of_ahnqiraj::OnCreatureRespawn(Creature* creature)
     }
 }
 
-void instance_ruins_of_ahnqiraj::OnCreatureGroupDespawn(CreatureGroup* group, Creature* /*creature*/)
-{
-    // last wave makes rajaxx attack immediately
-    if (group->GetGroupEntry().StringId == instance->GetMapDataContainer().GetStringId("AQ20_ZERRAN"))
-    {
-        if (GetData(TYPE_RAJAXX) != IN_PROGRESS)
-            return;
-
-        m_armyDelayTimer = 1;
-    }
-}
-
 void instance_ruins_of_ahnqiraj::SetData(uint32 type, uint32 data)
 {
     switch (type)
     {
         case TYPE_KURINNAXX:
+            if (m_encounter[type] == data)
+                return;
+            m_encounter[type] = data;
             if (data == DONE)
             {
                 DoSpawnAndorovIfCan();
                 DoOrSimulateScriptTextForThisInstance(SAY_OSSIRIAN_INTRO, NPC_OSSIRIAN);
             }
-            m_encounter[type] = data;
             break;
         case TYPE_RAJAXX:
+            if (m_encounter[type] == data || (data == IN_PROGRESS && !CanStartRajaxxEvent()) ||
+                ((data == DONE || data == FAIL) && m_encounter[type] != IN_PROGRESS))
+                return;
+
             m_encounter[type] = data;
             if (data == IN_PROGRESS)
-                DoSortArmyWaves();
-            if (data == DONE)
             {
-                if (Creature* andorov = GetSingleCreatureFromStorage(NPC_GENERAL_ANDOROV))
-                    if (andorov->IsAlive())
-                        andorov->AI()->SendAIEvent(AI_EVENT_CUSTOM_A, andorov, andorov);
+                SetRajaxxGateClosed(true);
+                m_armyDelayTimer = 1;
+            }
+            else if (data == FAIL)
+            {
+                m_armyDelayTimer = 0;
+                m_rajaxxResetPending = true;
+                SetRajaxxGateClosed(false);
+            }
+            else if (data == DONE)
+            {
+                m_armyDelayTimer = 0;
+                SetRajaxxGateClosed(false);
+                Creature* andorov = GetSingleCreatureFromStorage(NPC_GENERAL_ANDOROV, true);
+                if (andorov && andorov->IsAlive())
+                    andorov->AI()->SendAIEvent(AI_EVENT_CUSTOM_A, andorov, andorov);
+                else
+                    DespawnRajaxxHelpers(2500);
             }
             break;
         case TYPE_MOAM:
@@ -338,7 +479,8 @@ uint32 instance_ruins_of_ahnqiraj::GetData(uint32 type) const
 
 void instance_ruins_of_ahnqiraj::DoSpawnAndorovIfCan()
 {
-    if (GetSingleCreatureFromStorage(NPC_GENERAL_ANDOROV))
+    if (GetData(TYPE_KURINNAXX) != DONE || GetData(TYPE_RAJAXX) != NOT_STARTED || m_rajaxxResetPending ||
+        m_rajaxxResetTimer || m_npcEntryGuidStore.count(NPC_GENERAL_ANDOROV))
         return;
 
     Player* player = GetPlayerInMap();
@@ -364,6 +506,7 @@ void instance_ruins_of_ahnqiraj::Load(const char* chrIn)
     loadStream >> m_encounter[0] >> m_encounter[1] >> m_encounter[2]
                >> m_encounter[3] >> m_encounter[4] >> m_encounter[5];
 
+    m_rajaxxResetPending = GetData(TYPE_RAJAXX) == IN_PROGRESS || GetData(TYPE_RAJAXX) == FAIL;
     for (uint32& i : m_encounter)
     {
         if (i == IN_PROGRESS)
@@ -375,6 +518,12 @@ void instance_ruins_of_ahnqiraj::Load(const char* chrIn)
 
 void instance_ruins_of_ahnqiraj::Update(uint32 diff)
 {
+    if (m_rajaxxResetPending)
+    {
+        ResetRajaxxEvent();
+        return;
+    }
+
     if (m_rajaxxResetTimer)
     {
         if (m_rajaxxResetTimer > diff)
@@ -389,79 +538,141 @@ void instance_ruins_of_ahnqiraj::Update(uint32 diff)
                 group->SetEnabled(true);
                 group->Spawn(true, true);
             }
+        m_encounter[TYPE_RAJAXX] = NOT_STARTED;
         DoSpawnAndorovIfCan();
     }
 
-    if (GetData(TYPE_RAJAXX) == IN_PROGRESS)
-    {
-        if (m_armyDelayTimer)
+    if (GetData(TYPE_RAJAXX) != IN_PROGRESS)
+        return;
+
+    auto const& players = instance->GetPlayers();
+    if (std::none_of(players.begin(), players.end(), [](auto const& ref)
         {
-            if (m_armyDelayTimer <= diff)
+            Player* player = ref.getSource();
+            return player && player->IsAlive() && !player->IsGameMaster();
+        }))
+    {
+        SetData(TYPE_RAJAXX, FAIL);
+        return;
+    }
+
+    if (!m_armyDelayTimer)
+        return;
+
+    if (m_armyDelayTimer <= diff)
+    {
+        m_armyDelayTimer = 0;
+        DoSendNextArmyWave();
+    }
+    else
+        m_armyDelayTimer -= diff;
+}
+
+void instance_ruins_of_ahnqiraj::LockRajaxxActor(Creature* creature)
+{
+    if (GetData(TYPE_RAJAXX) == DONE)
+        return;
+
+    bool locked = creature->GetEntry() == NPC_RAJAXX && !m_rajaxxReleased;
+    if (CreatureGroup* group = creature->GetCreatureGroup())
+        for (uint8 wave = m_nextArmyWave; wave < MAX_ARMY_WAVES; ++wave)
+            if (group->GetGroupEntry().StringId == instance->GetMapDataContainer().GetStringId(aArmySortingParameters[wave].m_stringId))
             {
-                DoSendNextArmyWave();
-                m_armyDelayTimer = 3 * MINUTE * IN_MILLISECONDS;
+                locked = true;
+                break;
             }
-            else
-                m_armyDelayTimer -= diff;
-        }
+
+    if (locked)
+    {
+        creature->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PLAYER | UNIT_FLAG_IMMUNE_TO_NPC);
+        if (creature->AI())
+            creature->AI()->SetReactState(REACT_PASSIVE);
     }
 }
 
-void instance_ruins_of_ahnqiraj::DoSortArmyWaves()
+GuidSet instance_ruins_of_ahnqiraj::GetLivingRajaxxGroup(std::string const& name)
 {
-    // send the first wave
-    m_currentArmyWave = 0;
-    DoSendNextArmyWave();
+    GuidSet living;
+    if (SpawnGroup* group = instance->GetSpawnManager().GetSpawnGroup(name))
+    {
+        for (auto const& member : group->GetGroupEntry().DbGuids)
+            if (CreatureData const* data = sObjectMgr.GetCreatureData(member.DbGuid))
+                if (!instance->IsLoaded(data->posX, data->posY))
+                    instance->LoadGrid(data->posX, data->posY);
+
+        group->Spawn(true, false);
+        for (auto const& member : group->GetGroupEntry().DbGuids)
+            if (Creature* creature = instance->GetCreature(member.DbGuid))
+                if (creature->IsAlive())
+                    living.insert(creature->GetObjectGuid());
+    }
+    return living;
+}
+
+void instance_ruins_of_ahnqiraj::ScheduleRajaxxWaveIfCleared()
+{
+    if (!m_nextArmyWave || m_rajaxxReleased)
+        return;
+
+    if (m_nextArmyWave < MAX_ARMY_WAVES)
+    {
+        if (m_livingArmyWaves[m_nextArmyWave - 1].empty())
+            m_armyDelayTimer = 1;
+    }
+    else if (std::all_of(m_livingArmyWaves.begin(), m_livingArmyWaves.end(), [](GuidSet const& members) { return members.empty(); }))
+        m_armyDelayTimer = 1;
 }
 
 void instance_ruins_of_ahnqiraj::DoSendNextArmyWave()
 {
-    // The next army wave is sent into battle after 2 min or after the previous wave is finished
-    if (GetData(TYPE_RAJAXX) != IN_PROGRESS)
+    if (m_rajaxxReleased)
         return;
 
-    // The last wave is General Rajaxx itself
-    if (m_currentArmyWave == MAX_ARMY_WAVES)
+    GuidSet attackers;
+    if (m_nextArmyWave < MAX_ARMY_WAVES)
     {
-        if (Creature* rajaxx = GetSingleCreatureFromStorage(NPC_RAJAXX))
+        SortingParameters const& wave = aArmySortingParameters[m_nextArmyWave];
+        attackers = GetLivingRajaxxGroup(wave.m_stringId);
+        if (attackers.empty())
         {
-            DoScriptText(SAY_INTRO, rajaxx);
-            rajaxx->SetInCombatWithZone();
-            rajaxx->AI()->AttackClosestEnemy();
-        }
-        m_armyDelayTimer = 0;
-    }
-    else
-    {
-        if (m_currentArmyWave == MAX_ARMY_WAVES)
-        {
-            script_error_log("Instance Ruins of Ahn'Qiraj: ERROR Something unexpected happened. Please report to SD2 team.");
+            script_error_log("Instance Ruins of Ahn'Qiraj: no living members of Rajaxx wave %s.", wave.m_stringId.c_str());
+            SetData(TYPE_RAJAXX, FAIL);
             return;
         }
 
-        auto waveInfo = aArmySortingParameters[m_currentArmyWave];
-        auto waveMobs = instance->GetCreatures(waveInfo.m_stringId);
-        if (waveMobs)
-        {
-            for (Creature* member : *waveMobs)
-            {
-                member->SetWalk(false);
-                member->SetInCombatWithZone();
-                member->AI()->AttackClosestEnemy();
-            }
-        }
+        m_livingArmyWaves[m_nextArmyWave++] = attackers;
+        if (m_nextArmyWave < MAX_ARMY_WAVES)
+            m_armyDelayTimer = 3 * MINUTE * IN_MILLISECONDS;
 
-        // Yell on each wave (except the first 2)
-        if (aArmySortingParameters[m_currentArmyWave].m_uiYellEntry)
+        if (wave.m_uiYellEntry)
+            if (Creature* rajaxx = GetSingleCreatureFromStorage(NPC_RAJAXX, true))
+                DoScriptText(wave.m_uiYellEntry, rajaxx);
+    }
+    else
+    {
+        if (std::any_of(m_livingArmyWaves.begin(), m_livingArmyWaves.end(), [](GuidSet const& members) { return !members.empty(); }))
+            return;
+
+        attackers = GetLivingRajaxxGroup("AQ20_RAJAXX");
+        if (attackers.empty())
         {
-            if (Creature* pRajaxx = GetSingleCreatureFromStorage(NPC_RAJAXX))
-                DoScriptText(aArmySortingParameters[m_currentArmyWave].m_uiYellEntry, pRajaxx);
+            script_error_log("Instance Ruins of Ahn'Qiraj: General Rajaxx is unavailable after the last wave.");
+            SetData(TYPE_RAJAXX, FAIL);
+            return;
         }
-        // on wowwiki it states that there were 3 min between the waves, but this was reduced in later patches
-        m_armyDelayTimer = 3 * MINUTE * IN_MILLISECONDS;
+        m_rajaxxReleased = true;
     }
 
-    ++m_currentArmyWave;
+    for (ObjectGuid guid : attackers)
+        if (Creature* attacker = instance->GetCreature(guid))
+        {
+            attacker->SetActiveObjectState(true);
+            attacker->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PLAYER | UNIT_FLAG_IMMUNE_TO_NPC);
+            attacker->SetWalk(false);
+            attacker->AI()->SetReactState(REACT_AGGRESSIVE);
+            attacker->SetInCombatWithZone();
+            attacker->AI()->AttackClosestEnemy();
+        }
 }
 
 void AddSC_instance_ruins_of_ahnqiraj()

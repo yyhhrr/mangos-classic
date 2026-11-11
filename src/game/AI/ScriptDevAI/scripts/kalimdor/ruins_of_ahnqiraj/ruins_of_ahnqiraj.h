@@ -5,6 +5,8 @@
 #ifndef DEF_RUINS_OF_AHNQIRAJ_H
 #define DEF_RUINS_OF_AHNQIRAJ_H
 
+#include <array>
+
 enum
 {
     MAX_ENCOUNTER               = 6,
@@ -37,6 +39,7 @@ enum
 
     MAX_ARMY_WAVES              = 7,
 
+    GO_RAJAXX_GATE              = 176149,
     GO_OSSIRIAN_CRYSTAL         = 180619,                   // Used in the ossirian encounter
     NPC_OSSIRIAN_TRIGGER        = 15590,                    // Triggers ossirian weakness
 
@@ -110,8 +113,6 @@ class instance_ruins_of_ahnqiraj : public ScriptedInstance
         void OnCreatureDeath(Creature* creature) override;
         void OnCreatureRespawn(Creature* creature) override;
 
-        void OnCreatureGroupDespawn(CreatureGroup* group, Creature* creature) override;
-
         void SetData(uint32 type, uint32 data) override;
         uint32 GetData(uint32 type) const override;
         std::vector<InstanceEventReset> GetResettableEvents() const override;
@@ -119,6 +120,9 @@ class instance_ruins_of_ahnqiraj : public ScriptedInstance
         void ApplyEventReset(uint32 eventId, std::string const& data) override;
 
         void GetKaldoreiGuidList(GuidList& lList) const { lList = m_kaldoreiGuidList; }
+        bool CanStartRajaxxEvent();
+        bool IsRajaxxReleased() const { return m_rajaxxReleased; }
+        void DespawnRajaxxHelpers(uint32 delay = 0);
 
         void Update(const uint32 diff) override;
 
@@ -127,16 +131,25 @@ class instance_ruins_of_ahnqiraj : public ScriptedInstance
 
     private:
         void DoSpawnAndorovIfCan();
-        void DoSortArmyWaves();
         void DoSendNextArmyWave();
+        void ScheduleRajaxxWaveIfCleared();
+        void ResetRajaxxEvent();
+        void SetRajaxxGateClosed(bool closed);
+        void LockRajaxxActor(Creature* creature);
+        void RewardRajaxxSurvivors(Creature* rajaxx);
+        GuidSet GetLivingRajaxxGroup(std::string const& name);
 
         uint32 m_encounter[MAX_ENCOUNTER];
         std::string m_strInstData;
 
         GuidList m_kaldoreiGuidList;
 
-        uint32 m_armyDelayTimer;
-        uint32 m_rajaxxResetTimer;
-        uint8 m_currentArmyWave;
+        std::array<GuidSet, MAX_ARMY_WAVES> m_livingArmyWaves;
+        ObjectGuid m_rajaxxGateGuid;
+        uint32 m_armyDelayTimer = 0;
+        uint32 m_rajaxxResetTimer = 0;
+        uint8 m_nextArmyWave = 0;
+        bool m_rajaxxReleased = false;
+        bool m_rajaxxResetPending = false;
 };
 #endif

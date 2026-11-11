@@ -168,6 +168,7 @@ extern void AddSC_boss_kurinnaxx();
 extern void AddSC_boss_ossirian();
 extern void AddSC_boss_moam();
 extern void AddSC_boss_rajaxx();
+extern void AddSC_boss_rajaxx_combat();
 extern void AddSC_ruins_of_ahnqiraj();
 extern void AddSC_instance_ruins_of_ahnqiraj();
 extern void AddSC_boss_cthun();                             // temple_of_ahnqiraj
@@ -381,6 +382,7 @@ void AddScripts()
     AddSC_boss_ossirian();
     AddSC_boss_moam();
     AddSC_boss_rajaxx();
+    AddSC_boss_rajaxx_combat();
     AddSC_ruins_of_ahnqiraj();
     AddSC_instance_ruins_of_ahnqiraj();
     AddSC_boss_cthun();                                     // temple_of_ahnqiraj

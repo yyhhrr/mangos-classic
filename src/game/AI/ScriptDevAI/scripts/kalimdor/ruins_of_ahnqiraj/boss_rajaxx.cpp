@@ -63,6 +63,7 @@ enum
     SPELL_MORTAL_STRIKE         = 16856,
 
     POINT_ID_MOVE_INTRO         = 2,
+    POINT_ID_MOVE_EVENT         = 3,
     POINT_ID_MOVE_ATTACK        = 4,
 };
 
@@ -86,13 +87,22 @@ enum AndorovActions
     ANDOROV_DESPAWN,
 };
 
+enum class AndorovStage
+{
+    Approaching,
+    Waiting,
+    MovingToBattle,
+    BattleDialogue,
+    Fighting,
+    Finished,
+};
+
 struct npc_general_andorovAI : public CombatAI, private DialogueHelper
 {
-    npc_general_andorovAI(Creature* creature) : CombatAI(creature, ANDOROV_ACTION_MAX), m_instance(static_cast<instance_ruins_of_ahnqiraj*>(creature->GetInstanceData())),
+    npc_general_andorovAI(Creature* creature) : CombatAI(creature, ANDOROV_ACTION_MAX), m_instance(dynamic_cast<instance_ruins_of_ahnqiraj*>(creature->GetInstanceData())),
         DialogueHelper(aIntroDialogue)
     {
         InitializeDialogueHelper(m_instance);
-        m_pointId = 0;
         AddCombatAction(ANDOROV_COMMAND_AURA, 1000, 3000);
         AddCombatAction(ANDOROV_BASH, 8000, 11000);
         AddCombatAction(ANDOROV_STRIKE, 2000, 5000);
@@ -102,17 +112,27 @@ struct npc_general_andorovAI : public CombatAI, private DialogueHelper
 
     instance_ruins_of_ahnqiraj* m_instance;
 
-    uint8 m_pointId;
+    AndorovStage m_stage = AndorovStage::Approaching;
 
     void JustRespawned() override
     {
+        CombatAI::JustRespawned();
+        if (!m_instance)
+            return;
+
+        m_stage = AndorovStage::Approaching;
+        m_creature->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP | UNIT_NPC_FLAG_VENDOR);
+        m_creature->SetActiveObjectState(true);
         ResetTimer(ANDOROV_MOVE, 5000);
     }
 
     void MoveInLineOfSight(Unit* who) override
     {
-        // If Rajaxx is in range attack him
-        if (who->GetEntry() == NPC_RAJAXX && m_creature->IsWithinDistInMap(who, 50.0f))
+        if (m_stage != AndorovStage::Fighting)
+            return;
+
+        if (who->GetEntry() == NPC_RAJAXX && m_instance->IsRajaxxReleased() &&
+            m_creature->IsWithinDistInMap(who, 50.0f) && m_creature->CanAttackOnSight(who))
             AttackStart(who);
 
         ScriptedAI::MoveInLineOfSight(who);
@@ -120,25 +140,26 @@ struct npc_general_andorovAI : public CombatAI, private DialogueHelper
 
     void JustDied(Unit* killer) override
     {
-        if (killer->GetEntry() != NPC_RAJAXX)
-            return;
-
-        // Yell when killed by Rajaxx
-        if (m_instance)
-        {
-            if (Creature* pRajaxx = m_instance->GetSingleCreatureFromStorage(NPC_RAJAXX))
-                DoScriptText(SAY_KILLS_ANDOROV, pRajaxx);
-        }
+        CombatAI::JustDied(killer);
+        if (killer && killer->GetEntry() == NPC_RAJAXX)
+            DoScriptText(SAY_KILLS_ANDOROV, killer);
     }
 
     void JustDidDialogueStep(int32 entry) override
     {
         // Start the event when the dialogue is finished
-        if (entry == SAY_ANDOROV_ATTACK_START)
+        if (entry == SAY_ANDOROV_ATTACK_START && m_stage == AndorovStage::BattleDialogue && m_instance->CanStartRajaxxEvent())
         {
-            if (m_instance)
-                m_instance->SetData(TYPE_RAJAXX, IN_PROGRESS);
+            m_stage = AndorovStage::Fighting;
+            SetSquadImmune(false);
+            m_instance->SetData(TYPE_RAJAXX, IN_PROGRESS);
         }
+    }
+
+    void MoveToPoint(uint32 point)
+    {
+        SpawnLocation const& location = aAndorovMoveLocs[point];
+        m_creature->GetMotionMaster()->MovePoint(point, location.m_fx, location.m_fy, location.m_fz);
     }
 
     void MovementInform(uint32 uiType, uint32 uiPointId) override
@@ -150,21 +171,26 @@ struct npc_general_andorovAI : public CombatAI, private DialogueHelper
         {
             case 0:
             case 1:
-            case 3:
-                ++m_pointId;
-                m_creature->GetMotionMaster()->MovePoint(m_pointId, aAndorovMoveLocs[m_pointId].m_fx, aAndorovMoveLocs[m_pointId].m_fy, aAndorovMoveLocs[m_pointId].m_fz);
+                if (m_stage == AndorovStage::Approaching)
+                    MoveToPoint(uiPointId + 1);
                 break;
             case POINT_ID_MOVE_INTRO:
-                m_creature->SetFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
-                m_creature->SetFacingTo(aAndorovMoveLocs[3].m_fo);
-                ++m_pointId;
+                if (m_stage == AndorovStage::Approaching || m_stage == AndorovStage::Waiting)
+                {
+                    m_stage = AndorovStage::Waiting;
+                    m_creature->SetFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
+                    m_creature->SetFacingTo(aAndorovMoveLocs[POINT_ID_MOVE_INTRO].m_fo);
+                }
+                break;
+            case POINT_ID_MOVE_EVENT:
+                if (m_stage == AndorovStage::MovingToBattle)
+                    MoveToPoint(POINT_ID_MOVE_ATTACK);
                 break;
             case POINT_ID_MOVE_ATTACK:
-                // Start dialogue only the first time it reaches the point
-                if (m_pointId == 4)
+                if (m_stage == AndorovStage::MovingToBattle)
                 {
+                    m_stage = AndorovStage::BattleDialogue;
                     StartNextDialogueText(SAY_ANDOROV_INTRO_3);
-                    ++m_pointId;
                 }
                 break;
         }
@@ -173,23 +199,25 @@ struct npc_general_andorovAI : public CombatAI, private DialogueHelper
     void EnterEvadeMode() override
     {
         if (!m_instance)
+        {
+            CombatAI::EnterEvadeMode();
             return;
+        }
 
         m_creature->RemoveAllAurasOnEvade();
         m_creature->CombatStop(true);
 
-        if (m_creature->IsAlive())
+        if (m_creature->IsAlive() && m_stage != AndorovStage::Finished)
         {
-            // reset to combat position
-            if (m_pointId >= 4)
-                m_creature->GetMotionMaster()->MovePoint(POINT_ID_MOVE_ATTACK, aAndorovMoveLocs[4].m_fx, aAndorovMoveLocs[4].m_fy, aAndorovMoveLocs[4].m_fz);
-            // reset to intro position
+            if (m_stage == AndorovStage::MovingToBattle || m_stage == AndorovStage::BattleDialogue || m_stage == AndorovStage::Fighting)
+                MoveToPoint(POINT_ID_MOVE_ATTACK);
             else
-                m_creature->GetMotionMaster()->MovePoint(POINT_ID_MOVE_INTRO, aAndorovMoveLocs[2].m_fx, aAndorovMoveLocs[2].m_fy, aAndorovMoveLocs[2].m_fz);
+                MoveToPoint(POINT_ID_MOVE_INTRO);
         }
 
         m_creature->SetLootRecipient(nullptr);
 
+        ResetTimersOnEvade();
         Reset();
     }
 
@@ -207,24 +235,39 @@ struct npc_general_andorovAI : public CombatAI, private DialogueHelper
                 kaldorei->GetMotionMaster()->MoveFollow(m_creature, kaldorei->GetDistance(m_creature), kaldorei->GetAngle(m_creature));
     }
 
-    // Wrapper to start the event
+    bool CanOfferEvent() const
+    {
+        return m_instance && m_stage == AndorovStage::Waiting &&
+            m_creature->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP) && m_instance->CanStartRajaxxEvent();
+    }
+
     void DoMoveToEventLocation()
     {
-        m_creature->GetMotionMaster()->MovePoint(m_pointId, aAndorovMoveLocs[m_pointId].m_fx, aAndorovMoveLocs[m_pointId].m_fy, aAndorovMoveLocs[m_pointId].m_fz);
+        if (!CanOfferEvent())
+            return;
+
+        m_stage = AndorovStage::MovingToBattle;
         m_creature->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
-        m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_NPC);
-        GuidList m_lKaldoreiGuids;
-        m_instance->GetKaldoreiGuidList(m_lKaldoreiGuids);
-        for (GuidList::const_iterator itr = m_lKaldoreiGuids.begin(); itr != m_lKaldoreiGuids.end(); ++itr)
-            if (Creature* kaldorei = m_creature->GetMap()->GetCreature(*itr))
-                kaldorei->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_NPC);
+        MoveToPoint(POINT_ID_MOVE_EVENT);
         StartNextDialogueText(SAY_ANDOROV_INTRO_1);
+    }
+
+    void SetSquadImmune(bool immune)
+    {
+        m_creature->ApplyModFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_NPC, immune);
+        GuidList guards;
+        m_instance->GetKaldoreiGuidList(guards);
+        for (ObjectGuid guid : guards)
+            if (Creature* guard = m_creature->GetMap()->GetCreature(guid))
+                guard->ApplyModFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_NPC, immune);
     }
 
     void ReceiveAIEvent(AIEventType eventType, Unit* /*sender*/, Unit* /*invoker*/, uint32 /*miscValue*/) override
     {
-        if (eventType == AI_EVENT_CUSTOM_A)
+        if (eventType == AI_EVENT_CUSTOM_A && m_stage == AndorovStage::Fighting)
         {
+            m_stage = AndorovStage::Finished;
+            SetSquadImmune(true);
             m_creature->SetFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP | UNIT_NPC_FLAG_VENDOR);
             ResetTimer(ANDOROV_DESPAWN, 135000u);
         }
@@ -233,13 +276,15 @@ struct npc_general_andorovAI : public CombatAI, private DialogueHelper
     void HandleDespawn()
     {
         DoScriptText(SAY_ANDOROV_DESPAWN, m_creature);
-        m_creature->ForcedDespawn(2500);
+        m_instance->DespawnRajaxxHelpers(2500);
     }
 
     void HandleMove()
     {
+        if (m_stage != AndorovStage::Approaching)
+            return;
         m_creature->SetWalk(false);
-        m_creature->GetMotionMaster()->MovePoint(m_pointId, aAndorovMoveLocs[m_pointId].m_fx, aAndorovMoveLocs[m_pointId].m_fy, aAndorovMoveLocs[m_pointId].m_fz);
+        MoveToPoint(0);
 
         DoInitializeFollowers();
     }
@@ -278,13 +323,14 @@ struct npc_general_andorovAI : public CombatAI, private DialogueHelper
 
 bool GossipHello_npc_general_andorov(Player* player, Creature* creature)
 {
-    if (instance_ruins_of_ahnqiraj* instance = static_cast<instance_ruins_of_ahnqiraj*>(creature->GetInstanceData()))
+    if (instance_ruins_of_ahnqiraj* instance = dynamic_cast<instance_ruins_of_ahnqiraj*>(creature->GetInstanceData()))
     {
         if (instance->GetData(TYPE_RAJAXX) == IN_PROGRESS)
             return true;
 
-        if (instance->GetData(TYPE_RAJAXX) == NOT_STARTED || instance->GetData(TYPE_RAJAXX) == FAIL)
-            player->ADD_GOSSIP_ITEM_ID(GOSSIP_ICON_CHAT, GOSSIP_ITEM_START, GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF + 1);
+        if (npc_general_andorovAI* andorovAI = dynamic_cast<npc_general_andorovAI*>(creature->AI()))
+            if (andorovAI->CanOfferEvent())
+                player->ADD_GOSSIP_ITEM_ID(GOSSIP_ICON_CHAT, GOSSIP_ITEM_START, GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF + 1);
 
         if (creature->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_VENDOR))
             player->ADD_GOSSIP_ITEM_ID(GOSSIP_ICON_VENDOR, GOSSIP_ITEM_TRADE, GOSSIP_SENDER_MAIN, GOSSIP_ACTION_TRADE);
@@ -305,7 +351,7 @@ bool GossipSelect_npc_general_andorov(Player* player, Creature* creature, uint32
         player->CLOSE_GOSSIP_MENU();
     }
 
-    if (action == GOSSIP_ACTION_TRADE)
+    if (action == GOSSIP_ACTION_TRADE && creature->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_VENDOR))
         player->SEND_VENDORLIST(creature->GetObjectGuid());
 
     return true;
@@ -348,6 +394,7 @@ struct npc_kaldorei_eliteAI : public CombatAI
 
         m_creature->SetLootRecipient(nullptr);
 
+        ResetTimersOnEvade();
         Reset();
     }
 
