@@ -1143,10 +1143,10 @@ void Spell::EffectDummy(SpellEffectIndex eff_idx)
                 case 24721:                                 // Buru Transform
                 {
                     // remaining Buru Eggs summon Hive'Zara Hatchlings and despawn
-                    if (unitTarget->GetEntry() == 15514)
+                    if (unitTarget && unitTarget->IsCreature() && unitTarget->GetEntry() == 15514 && unitTarget->IsAlive())
                     {
                         unitTarget->CastSpell(unitTarget, 1881, TRIGGERED_OLD_TRIGGERED);
-                        ((Creature*)unitTarget)->ForcedDespawn();
+                        static_cast<Creature*>(unitTarget)->ForcedDespawn();
                     }
 
                     return;

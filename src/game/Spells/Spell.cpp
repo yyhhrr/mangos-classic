@@ -8062,6 +8062,10 @@ bool Spell::OnCheckTarget(Unit* target, SpellEffectIndex eff) const
                 return false;
             break;
         }
+        case 19593:                                         // Buru Egg Explosion
+            if (eff == EFFECT_INDEX_0)
+                return target->IsPlayer() || target->GetEntry() == 15370;
+            break;
         case 16807:                                         // Mass Teleport
             if (target->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PLAYER_CONTROLLED)) // spell targets only creatures
                 return false;
