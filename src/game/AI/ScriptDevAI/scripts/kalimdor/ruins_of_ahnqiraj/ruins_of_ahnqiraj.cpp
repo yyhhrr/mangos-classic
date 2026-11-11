@@ -436,19 +436,20 @@ void instance_ruins_of_ahnqiraj::SetData(uint32 type, uint32 data)
         case TYPE_BURU:
         case TYPE_AYAMISS:
         case TYPE_OSSIRIAN:
-            if (type == FAIL)
+            if (type == TYPE_OSSIRIAN && data == FAIL)
             {
-                GuidVector crystals;
-                GetGameObjectGuidVectorFromStorage(GO_OSSIRIAN_CRYSTAL, crystals);
-                for (uint32 i = 1; i < crystals.size(); ++i) // skip first
+                auto crystals = m_goEntryGuidCollection.find(GO_OSSIRIAN_CRYSTAL);
+                if (crystals != m_goEntryGuidCollection.end() && crystals->second.size() > 1)
                 {
-                    if (GameObject* go = instance->GetGameObject(crystals[i]))
-                    {
-                        go->SetLootState(GO_JUST_DEACTIVATED);
-                        go->SetForcedDespawn();
-                    }
+                    GuidVector& guids = crystals->second;
+                    for (auto guid = std::next(guids.begin()); guid != guids.end(); ++guid)
+                        if (GameObject* go = instance->GetGameObject(*guid))
+                        {
+                            go->SetLootState(GO_JUST_DEACTIVATED);
+                            go->SetForcedDespawn();
+                        }
+                    guids.resize(1);
                 }
-                m_goEntryGuidCollection[GO_OSSIRIAN_CRYSTAL].resize(1); // keeps first
             }
             m_encounter[type] = data;
             break;

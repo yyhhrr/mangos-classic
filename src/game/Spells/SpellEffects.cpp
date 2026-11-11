@@ -3973,13 +3973,13 @@ void Spell::EffectScriptEffect(SpellEffectIndex eff_idx)
                     unitTarget->CastSpell(m_caster, 26639, TRIGGERED_OLD_TRIGGERED);
                     return;
                 }
-                case 25676: // Moam                         // Drain Mana
+                case 25754: // Moam                         // Drain Mana
                 case 26559: // Obsidian Nullifier
                 {
                     m_caster->CastSpell(unitTarget, 25671, TRIGGERED_OLD_TRIGGERED);
                     return;
                 }
-                case 25754: // Obsidian Destroyer           // Drain Mana
+                case 25676: // Obsidian Destroyer           // Drain Mana
                 case 26457: // Obsidian Eradicator
                 {
                     m_caster->CastSpell(unitTarget, 25755, TRIGGERED_OLD_TRIGGERED);

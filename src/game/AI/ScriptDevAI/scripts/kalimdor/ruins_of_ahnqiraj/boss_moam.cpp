@@ -25,7 +25,10 @@ EndScriptData
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
+#include "Entities/Pet.h"
 #include "Spells/Scripts/SpellScript.h"
+
+#include <optional>
 
 enum
 {
@@ -35,7 +38,7 @@ enum
 
     SPELL_TRAMPLE            = 15550,
     SPELL_DOUBLE_ATTACK      = 18941,
-    SPELL_DRAIN_MANA         = 25676,
+    SPELL_DRAIN_MANA         = 25754,
     SPELL_ARCANE_ERUPTION    = 25672,
     SPELL_SUMMON_MANAFIENDS  = 25684,
     SPELL_ENERGIZE           = 25685,
@@ -50,49 +53,58 @@ enum
 enum MoamActions
 {
     MOAM_ARCANE_ERUPTION,
-    MOAM_MANA_FIENDS,
-    MOAM_ENERGIZE,
+    MOAM_STONE_FORM,
     MOAM_TRAMPLE,
     MOAM_DOUBLE_ATTACK,
     MOAM_MANA_DRAIN,
     MOAM_ACTION_MAX,
-    MOAM_CANCEL_ENERGIZE,
 };
+
+static constexpr auto STONE_FORM_INTERVAL = 90s;
+static constexpr auto STONE_FORM_DURATION = 90s;
 
 struct boss_moamAI : public CombatAI
 {
-    boss_moamAI(Creature* creature) :
-        CombatAI(creature, MOAM_ACTION_MAX),
-        m_uiPhase(0)
+    boss_moamAI(Creature* creature) : CombatAI(creature, MOAM_ACTION_MAX)
     {
         AddCombatAction(MOAM_ARCANE_ERUPTION, 0u);
         AddCombatAction(MOAM_TRAMPLE, 9000u);
         AddCombatAction(MOAM_DOUBLE_ATTACK, 8000, 12000);
         AddCombatAction(MOAM_MANA_DRAIN, 6000u);
-        AddCombatAction(MOAM_MANA_FIENDS, 90000u);
-        AddCombatAction(MOAM_ENERGIZE, 90000u);
-        AddCustomAction(MOAM_CANCEL_ENERGIZE, true, [&]()
-        {
-            m_creature->RemoveAurasDueToSpell(SPELL_ENERGIZE);
-        });
+        AddCombatAction(MOAM_STONE_FORM, STONE_FORM_INTERVAL);
 
         if (m_creature->GetInstanceData())
         {
-            m_creature->GetCombatManager().SetLeashingCheck([](Unit* unit, float x, float y, float z)
+            m_creature->GetCombatManager().SetLeashingCheck([](Unit* unit, float, float, float)
             {
-                return static_cast<ScriptedInstance*>(unit->GetInstanceData())->GetPlayerInMap(true, false) == nullptr;
+                auto const& players = unit->GetMap()->GetPlayers();
+                return std::none_of(players.begin(), players.end(), [](auto const& ref)
+                {
+                    Player* player = ref.getSource();
+                    return player && player->IsAlive() && !player->IsGameMaster();
+                });
             });
         }
     }
 
-    uint8 m_uiPhase;
-    GuidVector m_summons;
+    std::optional<TimePoint> m_stoneFormEndsAt;
+    GuidVector m_stoneFiends;
 
     void Reset() override
     {
         CombatAI::Reset();
+        m_stoneFormEndsAt.reset();
+        m_stoneFiends.clear();
+        m_creature->RemoveAurasDueToSpell(SPELL_ENERGIZE);
         m_creature->SetPower(POWER_MANA, 0);
-        DespawnGuids(m_summons);
+        while (Pet* fiend = m_creature->FindGuardianWithEntry(NPC_MANA_FIEND))
+            fiend->Unsummon(PET_SAVE_AS_DELETED, m_creature);
+    }
+
+    void JustReachedHome() override
+    {
+        CombatAI::JustReachedHome();
+        m_creature->SetHealth(m_creature->GetMaxHealth());
     }
 
     void Aggro(Unit* /*who*/) override
@@ -102,28 +114,47 @@ struct boss_moamAI : public CombatAI
 
     void JustSummoned(Creature* summoned) override
     {
-        if (summoned->GetEntry() == NPC_MANA_FIEND)
+        if (summoned->GetEntry() != NPC_MANA_FIEND)
+            return;
+
+        if (m_stoneFormEndsAt)
+            m_stoneFiends.push_back(summoned->GetObjectGuid());
+        summoned->SetCorpseDelay(2);
+        summoned->SetInCombatWithZone();
+        if (Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, nullptr, SELECT_FLAG_PLAYER))
         {
-            summoned->SetInCombatWithZone();
-            if (Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, nullptr, SELECT_FLAG_PLAYER))
-            {
-                summoned->AddThreat(target, 100000.f);
-                summoned->AI()->AttackStart(target);
-            }
-            summoned->SetCorpseDelay(2);
+            summoned->AddThreat(target, 100.f);
+            summoned->AI()->AttackStart(target);
         }
-        m_summons.push_back(summoned->GetObjectGuid());
     }
 
-    void SummonedCreatureJustDied(Creature* summoned) override
+    void UpdateAI(uint32 diff) override
     {
-        m_summons.erase(std::remove(m_summons.begin(), m_summons.end(), summoned->GetObjectGuid()), m_summons.end());
-        if (m_summons.size() == 0)
+        CombatAI::UpdateAI(diff);
+        if (!m_stoneFormEndsAt || !m_creature->IsInCombat())
+            return;
+
+        Map* map = m_creature->GetMap();
+        bool const manaFull = m_creature->GetPower(POWER_MANA) >= m_creature->GetMaxPower(POWER_MANA);
+        bool const fiendsGone = std::none_of(m_stoneFiends.begin(), m_stoneFiends.end(), [map](ObjectGuid guid)
+        {
+            Creature* fiend = map->GetAnyTypeCreature(guid);
+            return fiend && fiend->IsAlive();
+        });
+        if (manaFull || fiendsGone || map->GetCurrentClockTime() >= *m_stoneFormEndsAt || !m_creature->HasAura(SPELL_ENERGIZE))
+        {
+            m_stoneFormEndsAt.reset();
+            m_stoneFiends.clear();
             m_creature->RemoveAurasDueToSpell(SPELL_ENERGIZE);
+            ResetCombatAction(MOAM_STONE_FORM, STONE_FORM_INTERVAL);
+        }
     }
 
     void ExecuteAction(uint32 action) override
     {
+        if (m_stoneFormEndsAt)
+            return;
+
         switch (action)
         {
             case MOAM_ARCANE_ERUPTION:
@@ -153,19 +184,14 @@ struct boss_moamAI : public CombatAI
                     ResetCombatAction(action, 6000);
                 break;
             }
-            case MOAM_MANA_FIENDS:
-            {
-                if (DoCastSpellIfCan(nullptr, SPELL_SUMMON_MANAFIENDS) == CAST_OK)
-                    ResetCombatAction(action, 90000);
-                break;
-            }
-            case MOAM_ENERGIZE:
+            case MOAM_STONE_FORM:
             {
                 if (DoCastSpellIfCan(nullptr, SPELL_ENERGIZE) == CAST_OK)
                 {
+                    DisableCombatAction(action);
+                    m_stoneFormEndsAt = m_creature->GetMap()->GetCurrentClockTime() + STONE_FORM_DURATION;
+                    m_creature->CastSpell(nullptr, SPELL_SUMMON_MANAFIENDS, TRIGGERED_OLD_TRIGGERED);
                     DoScriptText(EMOTE_ENERGIZING, m_creature);
-                    ResetTimer(MOAM_CANCEL_ENERGIZE, 90000);
-                    ResetCombatAction(action, 180000);
                 }
                 break;
             }
@@ -177,6 +203,9 @@ struct SummonManaFiendsMoam : public SpellScript
 {
     void OnEffectExecute(Spell* spell, SpellEffectIndex effIdx) const override
     {
+        if (effIdx != EFFECT_INDEX_0)
+            return;
+
         spell->GetCaster()->CastSpell(nullptr, SPELL_SUMMON_MANA_FIEND_1, TRIGGERED_OLD_TRIGGERED);
         spell->GetCaster()->CastSpell(nullptr, SPELL_SUMMON_MANA_FIEND_2, TRIGGERED_OLD_TRIGGERED);
         spell->GetCaster()->CastSpell(nullptr, SPELL_SUMMON_MANA_FIEND_3, TRIGGERED_OLD_TRIGGERED);
