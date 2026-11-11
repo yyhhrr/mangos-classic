@@ -124,6 +124,9 @@ class instance_ruins_of_ahnqiraj : public ScriptedInstance
         bool IsRajaxxReleased() const { return m_rajaxxReleased; }
         void DespawnRajaxxHelpers(uint32 delay = 0);
 
+        void UseOssirianCrystal(GameObject* crystal);
+        bool IsOssirianCrystalCasting(ObjectGuid trigger, uint32 spellId) const;
+
         void Update(const uint32 diff) override;
 
         const char* Save() const override { return m_strInstData.c_str(); }
@@ -139,6 +142,12 @@ class instance_ruins_of_ahnqiraj : public ScriptedInstance
         void RewardRajaxxSurvivors(Creature* rajaxx);
         GuidSet GetLivingRajaxxGroup(std::string const& name);
 
+        void BeginOssirianCrystals();
+        void ClearOssirianCrystals();
+        void UpdateOssirianCrystals(uint32 diff);
+        void LoadOssirianCrystalPoints();
+        bool SpawnOssirianCrystal(ObjectGuid triggerGuid);
+
         uint32 m_encounter[MAX_ENCOUNTER];
         std::string m_strInstData;
 
@@ -151,5 +160,21 @@ class instance_ruins_of_ahnqiraj : public ScriptedInstance
         uint8 m_nextArmyWave = 0;
         bool m_rajaxxReleased = false;
         bool m_rajaxxResetPending = false;
+
+        struct OssirianCrystal
+        {
+            ObjectGuid gameObject;
+            uint32 weaknessSpell = 0;
+        };
+
+        GuidVector m_ossirianCrystalPoints;
+        std::map<ObjectGuid, OssirianCrystal> m_ossirianCrystals;
+        ObjectGuid m_ossirianOpener;
+        ObjectGuid m_ossirianCreatedCrystal;
+        uint32 m_ossirianOpeningTimer = 0;
+        uint32 m_ossirianRegularGoal = 0;
+        bool m_ossirianPointsLoaded = false;
+        bool m_ossirianOpenerUsed = false;
+        bool m_creatingOssirianCrystal = false;
 };
 #endif

@@ -1676,7 +1676,9 @@ void GameObject::Use(Unit* user, SpellEntry const* spellInfo)
             if (!info)
                 return;
 
-            // exception - 180619 - ossirian crystal - supposed to be kept from despawning by a pending spellcast - to be implemented, done in db for now
+            // Ossirian's crystal script owns the activation and despawns it after its trigger finishes casting.
+            if (GetEntry() == 180619 && scriptReturnValue)
+                return;
 
             TriggerLinkedGameObject(user);
 

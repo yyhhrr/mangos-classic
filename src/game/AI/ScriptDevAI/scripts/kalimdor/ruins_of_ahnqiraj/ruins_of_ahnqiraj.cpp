@@ -209,12 +209,9 @@ void instance_ruins_of_ahnqiraj::OnCreatureCreate(Creature* creature)
     {
         case NPC_OSSIRIAN_TRIGGER:
         {
-            GuidVector& vector = m_npcEntryGuidCollection[creature->GetEntry()];
-            vector.push_back(creature->GetObjectGuid());
-            std::sort(vector.begin(), vector.end(), [&](ObjectGuid const& a, ObjectGuid const& b) -> bool
-            {
-                return a.GetCounter() < b.GetCounter();
-            });
+            if (CreatureData const* data = sObjectMgr.GetCreatureData(creature->GetDbGuid()))
+                if (data->spawntimesecsmin > 0)
+                    m_ossirianOpener = creature->GetObjectGuid();
             break;
         }
         case NPC_BURU:
@@ -239,8 +236,8 @@ void instance_ruins_of_ahnqiraj::OnCreatureCreate(Creature* creature)
 
 void instance_ruins_of_ahnqiraj::OnObjectCreate(GameObject* go)
 {
-    if (go->GetEntry() == GO_OSSIRIAN_CRYSTAL)
-        m_goEntryGuidCollection[go->GetEntry()].push_back(go->GetObjectGuid());
+    if (go->GetEntry() == GO_OSSIRIAN_CRYSTAL && m_creatingOssirianCrystal)
+        m_ossirianCreatedCrystal = go->GetObjectGuid();
 }
 
 void instance_ruins_of_ahnqiraj::OnCreatureEnterCombat(Creature* creature)
@@ -375,12 +372,6 @@ void instance_ruins_of_ahnqiraj::OnCreatureRespawn(Creature* creature)
     LockRajaxxActor(creature);
     switch (creature->GetEntry())
     {
-        case NPC_OSSIRIAN_TRIGGER:
-        {
-            if (Creature* ossirian = GetSingleCreatureFromStorage(NPC_OSSIRIAN))
-                ossirian->AI()->SendAIEvent(AI_EVENT_CUSTOM_A, creature, ossirian);
-            break;
-        }
         case NPC_QIRAJI_WARRIOR:
         case NPC_SWARMGUARD_NEEDLER:
         {
@@ -435,23 +426,16 @@ void instance_ruins_of_ahnqiraj::SetData(uint32 type, uint32 data)
         case TYPE_MOAM:
         case TYPE_BURU:
         case TYPE_AYAMISS:
-        case TYPE_OSSIRIAN:
-            if (type == TYPE_OSSIRIAN && data == FAIL)
-            {
-                auto crystals = m_goEntryGuidCollection.find(GO_OSSIRIAN_CRYSTAL);
-                if (crystals != m_goEntryGuidCollection.end() && crystals->second.size() > 1)
-                {
-                    GuidVector& guids = crystals->second;
-                    for (auto guid = std::next(guids.begin()); guid != guids.end(); ++guid)
-                        if (GameObject* go = instance->GetGameObject(*guid))
-                        {
-                            go->SetLootState(GO_JUST_DEACTIVATED);
-                            go->SetForcedDespawn();
-                        }
-                    guids.resize(1);
-                }
-            }
             m_encounter[type] = data;
+            break;
+        case TYPE_OSSIRIAN:
+            if (m_encounter[type] == data)
+                break;
+            m_encounter[type] = data;
+            if (data == IN_PROGRESS)
+                BeginOssirianCrystals();
+            else if (data == FAIL || data == DONE)
+                ClearOssirianCrystals();
             break;
     }
 
@@ -519,6 +503,8 @@ void instance_ruins_of_ahnqiraj::Load(const char* chrIn)
 
 void instance_ruins_of_ahnqiraj::Update(uint32 diff)
 {
+    UpdateOssirianCrystals(diff);
+
     if (m_rajaxxResetPending)
     {
         ResetRajaxxEvent();
