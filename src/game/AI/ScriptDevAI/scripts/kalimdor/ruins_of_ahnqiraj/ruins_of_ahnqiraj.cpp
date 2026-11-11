@@ -276,9 +276,7 @@ void instance_ruins_of_ahnqiraj::SetData(uint32 type, uint32 data)
             if (data == DONE)
             {
                 DoSpawnAndorovIfCan();
-                // Yell after kurinnaxx
-                if (Creature* ossirian = GetSingleCreatureFromStorage(NPC_OSSIRIAN))
-                    DoScriptText(SAY_OSSIRIAN_INTRO, ossirian); // targets kurinnaxx in sniff
+                DoOrSimulateScriptTextForThisInstance(SAY_OSSIRIAN_INTRO, NPC_OSSIRIAN);
             }
             m_encounter[type] = data;
             break;
