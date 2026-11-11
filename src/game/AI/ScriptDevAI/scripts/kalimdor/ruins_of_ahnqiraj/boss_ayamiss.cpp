@@ -27,6 +27,7 @@ EndScriptData
 #include "ruins_of_ahnqiraj.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
 #include "MotionGenerators/WaypointManager.h"
+#include "Spells/SpellMgr.h"
 #include <G3D/Vector3.h>
 
 enum
@@ -57,22 +58,110 @@ enum
     NPC_HORNET              = 15934,
 
     PHASE_AIR               = 0,
-    PHASE_GROUND            = 1,
+    PHASE_LANDING,
+    PHASE_GROUND,
 
     POINT_AIR               = 2,
     POINT_GROUND            = 3,
+    POINT_LARVA_ALTAR       = 4,
+    POINT_SWARMER_DIVE      = 5,
 };
 
-struct SummonLocation
+// Route around the Comb, adapted from the AzerothCore swarmer waypoints.
+static const G3D::Vector3 aSwarmerFlightPath[] =
 {
-    float m_fX, m_fY, m_fZ;
+    { -9748.13f, 1488.49f, 45.76f },
+    { -9701.45f, 1522.10f, 43.54f },
+    { -9647.55f, 1544.99f, 42.96f },
+    { -9657.68f, 1593.86f, 45.07f },
+    { -9645.76f, 1642.12f, 50.04f },
+    { -9618.59f, 1606.99f, 45.07f },
+    { -9662.09f, 1559.25f, 45.07f },
+    { -9692.73f, 1523.67f, 45.07f },
+    { -9729.18f, 1490.00f, 45.07f },
 };
 
-// Spawn locations
-static const SummonLocation aAyamissSpawnLocs[] =
+static const Position ayamissLanding = { -9677.917f, 1558.839f, 27.24953f, 0.0f };
+
+struct npc_hive_zara_larvaAI : public ScriptedAI
 {
-    { -9647.352f, 1578.062f, 55.32f},           // anchor point for swarmers
-    { -9717.18f, 1517.72f, 27.4677f},           // teleport location - need to be hardcoded because the player is teleported after the larva is summoned
+    explicit npc_hive_zara_larvaAI(Creature* creature) : ScriptedAI(creature) {}
+
+    ObjectGuid m_bossGuid;
+    ObjectGuid m_targetGuid;
+    bool m_fed = false;
+
+    void StartSacrifice(Creature* boss, Player* target)
+    {
+        m_bossGuid = boss->GetObjectGuid();
+        m_targetGuid = target->GetObjectGuid();
+        SetReactState(REACT_PASSIVE);
+        SetCombatMovement(false);
+        SetMeleeEnabled(false);
+        m_creature->SetCorpseDelay(5);
+
+        if (SpellTargetPosition const* altar = sSpellMgr.GetSpellTargetPosition(SPELL_PARALYZE))
+            m_creature->GetMotionMaster()->MovePoint(POINT_LARVA_ALTAR, altar->target_X, altar->target_Y, altar->target_Z, FORCED_MOVEMENT_RUN);
+        else
+            m_creature->ForcedDespawn();
+    }
+
+    Player* GetSacrificeTarget() const
+    {
+        Creature* boss = m_creature->GetMap()->GetCreature(m_bossGuid);
+        if (!boss || !boss->IsAlive() || !boss->IsInCombat())
+            return nullptr;
+
+        Player* target = m_creature->GetMap()->GetPlayer(m_targetGuid);
+        if (!target || !target->IsAlive() || !target->GetSpellAuraHolder(SPELL_PARALYZE, m_bossGuid))
+            return nullptr;
+
+        return target;
+    }
+
+    void MoveInLineOfSight(Unit* who) override
+    {
+        if (!m_bossGuid)
+            ScriptedAI::MoveInLineOfSight(who);
+    }
+
+    void MovementInform(uint32 motionType, uint32 pointId) override
+    {
+        if (motionType != POINT_MOTION_TYPE || pointId != POINT_LARVA_ALTAR || m_fed || !m_creature->IsAlive())
+            return;
+
+        if (Player* target = GetSacrificeTarget())
+        {
+            if (m_creature->IsWithinDistInMap(target, INTERACTION_DISTANCE))
+            {
+                m_fed = true;
+                m_creature->CastSpell(target, SPELL_FEED, TRIGGERED_OLD_TRIGGERED);
+                return;
+            }
+        }
+
+        m_creature->ForcedDespawn();
+    }
+
+    void JustSummoned(Creature* summoned) override
+    {
+        if (m_bossGuid && summoned->GetEntry() == NPC_HORNET)
+            if (Creature* boss = m_creature->GetMap()->GetCreature(m_bossGuid))
+                boss->AI()->JustSummoned(summoned);
+    }
+
+    void UpdateAI(uint32 /*diff*/) override
+    {
+        if (m_bossGuid)
+        {
+            if (!GetSacrificeTarget())
+                m_creature->ForcedDespawn();
+            return;
+        }
+
+        if (m_creature->SelectHostileTarget() && m_creature->GetVictim())
+            DoMeleeAttackIfReady();
+    }
 };
 
 enum AyamissActions
@@ -88,13 +177,14 @@ enum AyamissActions
     AYAMISS_LASH,
     AYAMISS_THRASH,
     AYAMISS_ACTION_MAX,
+    AYAMISS_LANDING_TIMEOUT = AYAMISS_ACTION_MAX,
 };
 
 struct boss_ayamissAI : public CombatAI
 {
     boss_ayamissAI(Creature* creature) :
         CombatAI(creature, AYAMISS_ACTION_MAX),
-        m_phase(0)
+        m_phase(PHASE_AIR)
     {
         AddTimerlessCombatAction(AYAMISS_FLY_UP, true);
         AddTimerlessCombatAction(AYAMISS_PHASE_2, true);
@@ -106,14 +196,16 @@ struct boss_ayamissAI : public CombatAI
         AddCombatAction(AYAMISS_SWARMER_ATTACK, 60000u);
         AddCombatAction(AYAMISS_LASH, true);
         AddCombatAction(AYAMISS_THRASH, true);
+        AddCustomAction(AYAMISS_LANDING_TIMEOUT, true, [this]() { EnterEvadeMode(); }, TIMER_COMBAT_COMBAT);
         m_creature->SetWalk(false);
     }
 
     uint8 m_phase;
 
-    ObjectGuid m_paralyzeTarget;
+    ObjectGuid m_pendingSacrifice;
+    GuidSet m_paralyzedPlayers;
     GuidList m_swarmersGuidList;
-    GuidVector m_spawns;
+    GuidSet m_spawns;
 
     void Reset() override
     {
@@ -123,8 +215,10 @@ struct boss_ayamissAI : public CombatAI
         SetCombatMovement(false);
         SetMeleeEnabled(false);
         SetCombatScriptStatus(false);
+        m_creature->SetLevitate(false);
+        m_creature->SetHover(false);
 
-        DespawnGuids(m_spawns);
+        ClearEncounter(false);
     }
 
     void EnterEvadeMode() override
@@ -133,68 +227,144 @@ struct boss_ayamissAI : public CombatAI
         CombatAI::EnterEvadeMode();
     }
 
+    void JustDied(Unit* killer) override
+    {
+        CombatAI::JustDied(killer);
+        m_creature->SetImmobilizedState(false);
+        ClearEncounter(true);
+    }
+
+    void ClearEncounter(bool keepCombatHornets)
+    {
+        m_pendingSacrifice.Clear();
+        for (ObjectGuid const& guid : m_paralyzedPlayers)
+            if (Player* player = m_creature->GetMap()->GetPlayer(guid))
+                player->RemoveAurasByCasterSpell(SPELL_PARALYZE, m_creature->GetObjectGuid());
+        m_paralyzedPlayers.clear();
+        m_swarmersGuidList.clear();
+
+        GuidSet spawns;
+        spawns.swap(m_spawns);
+        for (ObjectGuid const& guid : spawns)
+        {
+            if (Creature* summon = m_creature->GetMap()->GetCreature(guid))
+            {
+                if (keepCombatHornets && summon->GetEntry() == NPC_HORNET && summon->IsAlive() && summon->IsInCombat())
+                    continue;
+                summon->ForcedDespawn();
+            }
+        }
+    }
+
+    void SummonedCreatureDespawn(Creature* summoned) override
+    {
+        m_spawns.erase(summoned->GetObjectGuid());
+    }
+
     void JustSummoned(Creature* summoned) override
     {
-        // store the swarmers for a future attack
+        // Wild summon spells can notify the caster twice for the same creature.
+        if (!m_spawns.insert(summoned->GetObjectGuid()).second)
+            return;
+
         if (summoned->GetEntry() == NPC_SWARMER)
-        {
-            m_swarmersGuidList.push_back(summoned->GetObjectGuid());
-            uint32 spellId = 0;
-            switch (urand(0, 4))
-            {
-                case 0: spellId = SPELL_SWARMER_TELEPORT_1; break;
-                case 1: spellId = SPELL_SWARMER_TELEPORT_2; break;
-                case 2: spellId = SPELL_SWARMER_TELEPORT_3; break;
-                case 3: spellId = SPELL_SWARMER_TELEPORT_4; break;
-                case 4: spellId = SPELL_SWARMER_TELEPORT_5; break;
-                default: break;
-            }
-            summoned->CastSpell(nullptr, spellId, TRIGGERED_OLD_TRIGGERED);
-        }
-        // move the larva to paralyze target position
+            StartSwarmerFlight(summoned);
         else if (summoned->GetEntry() == NPC_LARVA)
         {
-            summoned->SetCorpseDelay(5);
-            summoned->SetWalk(false);
-            if (Unit* target = m_creature->GetMap()->GetUnit(m_paralyzeTarget))
-            {
-                summoned->AI()->AttackStart(target);
-                summoned->FixateTarget(target);
-            }
+            auto* larva = dynamic_cast<npc_hive_zara_larvaAI*>(summoned->AI());
+            Player* target = m_creature->GetMap()->GetPlayer(m_pendingSacrifice);
+            if (larva && target)
+                larva->StartSacrifice(m_creature, target);
+            else
+                summoned->ForcedDespawn();
         }
         else if (summoned->GetEntry() == NPC_HORNET)
         {
-            if (Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0))
+            if (Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, nullptr, SELECT_FLAG_PLAYER))
                 summoned->AI()->AttackStart(target);
         }
-        m_spawns.push_back(summoned->GetObjectGuid());
+    }
+
+    void SpellHitTarget(Unit* target, SpellEntry const* spell, SpellMissInfo miss) override
+    {
+        if (spell->Id != SPELL_PARALYZE || miss != SPELL_MISS_NONE || !target->IsPlayer() || !target->IsAlive() ||
+            !target->GetSpellAuraHolder(SPELL_PARALYZE, m_creature->GetObjectGuid()))
+            return;
+
+        m_pendingSacrifice = target->GetObjectGuid();
+        m_paralyzedPlayers.insert(m_pendingSacrifice);
+        m_creature->CastSpell(nullptr, urand(0, 1) ? SPELL_SUMMON_LARVA_1 : SPELL_SUMMON_LARVA_2, TRIGGERED_OLD_TRIGGERED);
+        m_pendingSacrifice.Clear();
     }
 
     void MovementInform(uint32 motionType, uint32 pointId) override
     {
-        if (motionType != POINT_MOTION_TYPE)
-        {
-            if (motionType == WAYPOINT_MOTION_TYPE)
-            {
-                if (pointId == POINT_GROUND)
-                {
-                    SetCombatScriptStatus(false);
-                    SetCombatMovement(true, true);
-                }
-            }
-            return;
-        }
-
-        if (pointId == POINT_AIR)
+        if (motionType == POINT_MOTION_TYPE && pointId == POINT_AIR && m_phase == PHASE_AIR)
         {
             SetCombatScriptStatus(false);
             m_creature->SetImmobilizedState(true);
         }
+        else if (pointId == POINT_GROUND && m_phase == PHASE_LANDING &&
+                 (motionType == PATH_MOTION_TYPE || motionType == POINT_MOTION_TYPE))
+        {
+            DisableTimer(AYAMISS_LANDING_TIMEOUT);
+            m_phase = PHASE_GROUND;
+            m_creature->SetLevitate(false);
+            m_creature->SetHover(false);
+            DoResetThreat();
+            SetCombatScriptStatus(false);
+            SetMeleeEnabled(true);
+            SetCombatMovement(true, true);
+            ResetCombatAction(AYAMISS_LASH, urand(5000, 8000));
+            ResetCombatAction(AYAMISS_THRASH, urand(3000, 6000));
+        }
+    }
+
+    void StartSwarmerFlight(Creature* swarmer)
+    {
+        static constexpr uint32 teleportSpells[] =
+        {
+            SPELL_SWARMER_TELEPORT_1, SPELL_SWARMER_TELEPORT_2, SPELL_SWARMER_TELEPORT_3,
+            SPELL_SWARMER_TELEPORT_4, SPELL_SWARMER_TELEPORT_5,
+        };
+        m_swarmersGuidList.push_back(swarmer->GetObjectGuid());
+        swarmer->AI()->SetReactState(REACT_PASSIVE);
+        swarmer->SetActiveObjectState(true);
+        swarmer->SetLevitate(true);
+        swarmer->SetHover(true);
+        swarmer->CastSpell(nullptr, teleportSpells[urand(0, 4)], TRIGGERED_OLD_TRIGGERED);
+
+        // Keep a little vertical separation between insects following the same route.
+        const float heightOffset = frand(0.0f, 3.0f);
+        std::vector<G3D::Vector3> path(std::begin(aSwarmerFlightPath), std::end(aSwarmerFlightPath));
+        for (G3D::Vector3& point : path)
+            point.z += heightOffset;
+        swarmer->GetMotionMaster()->MovePath(path, FORCED_MOVEMENT_RUN, true, true);
+    }
+
+    void SummonedMovementInform(Creature* summoned, uint32 motionType, uint32 pointId) override
+    {
+        if (summoned->GetEntry() != NPC_SWARMER || motionType != POINT_MOTION_TYPE || pointId != POINT_SWARMER_DIVE ||
+            !summoned->IsAlive() || !m_creature->IsAlive() || !m_creature->IsInCombat())
+            return;
+
+        summoned->SetLevitate(false);
+        summoned->SetHover(false);
+        summoned->SetActiveObjectState(false);
+        summoned->AI()->SetReactState(REACT_AGGRESSIVE);
+        if (Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, nullptr, SELECT_FLAG_PLAYER))
+            summoned->AI()->AttackStart(target);
     }
 
     void StartLanding()
     {
-        m_creature->GetMotionMaster()->MovePath(1, PATH_FROM_ENTRY, FORCED_MOVEMENT_NONE, true);
+        WaypointPath const* path = sWaypointMgr.GetPathFromOrigin(m_creature->GetEntry(), m_creature->GetDbGuid(), 1, PATH_FROM_ENTRY);
+        if (path && path->find(POINT_GROUND) != path->end())
+            m_creature->GetMotionMaster()->MovePath(1, PATH_FROM_ENTRY, FORCED_MOVEMENT_NONE, true);
+        else
+            m_creature->GetMotionMaster()->MovePoint(POINT_GROUND, ayamissLanding, FORCED_MOVEMENT_FLIGHT, 0.0f, false);
+
+        ResetTimer(AYAMISS_LANDING_TIMEOUT, 12000);
     }
 
     void ExecuteAction(uint32 action) override
@@ -206,7 +376,7 @@ struct boss_ayamissAI : public CombatAI
                 m_creature->SetLevitate(true);
                 m_creature->SetHover(true);
                 SetCombatScriptStatus(true);
-                m_creature->GetMotionMaster()->MovePoint(POINT_AIR, -9689.292f, 1547.912f, 48.02729f);
+                m_creature->GetMotionMaster()->MovePoint(POINT_AIR, -9689.292f, 1547.912f, 48.02729f, FORCED_MOVEMENT_FLIGHT, false);
                 SetActionReadyStatus(action, false);
                 break;
             }
@@ -214,19 +384,12 @@ struct boss_ayamissAI : public CombatAI
             {
                 if (m_creature->GetHealthPercent() <= 70.0f)
                 {
-                    m_phase = PHASE_GROUND;
+                    m_phase = PHASE_LANDING;
                     m_creature->SetImmobilizedState(false);
-                    SetMeleeEnabled(true);
-                    m_creature->SetLevitate(false);
-                    m_creature->SetHover(false);
-                    DoResetThreat();
-                    StartLanding();
                     SetCombatScriptStatus(true);
                     SetActionReadyStatus(action, false);
-
                     DisableCombatAction(AYAMISS_POISON_STINGER);
-                    ResetCombatAction(AYAMISS_LASH, urand(5000, 8000));
-                    ResetCombatAction(AYAMISS_THRASH, urand(3000, 6000));
+                    StartLanding();
                 }
                 break;
             }
@@ -244,19 +407,14 @@ struct boss_ayamissAI : public CombatAI
             }
             case AYAMISS_PARALYZE:
             {
-                Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 1, SPELL_PARALYZE, SELECT_FLAG_PLAYER);
+                Unit* target = nullptr;
+                if (m_phase == PHASE_AIR)
+                    target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, SPELL_PARALYZE, SELECT_FLAG_PLAYER | SELECT_FLAG_SKIP_TANK);
                 if (!target)
                     target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, SPELL_PARALYZE, SELECT_FLAG_PLAYER);
 
-                if (DoCastSpellIfCan(target, SPELL_PARALYZE) == CAST_OK)
-                {
-                    m_paralyzeTarget = target->GetObjectGuid();
+                if (target && DoCastSpellIfCan(target, SPELL_PARALYZE) == CAST_OK)
                     ResetCombatAction(action, 15000);
-
-                    // Summon a larva
-                    uint32 spellId = urand(0, 1) ? SPELL_SUMMON_LARVA_1 : SPELL_SUMMON_LARVA_2;
-                    m_creature->CastSpell(nullptr, spellId, TRIGGERED_OLD_TRIGGERED);
-                }
                 break;
             }
             case AYAMISS_STINGER_SPRAY:
@@ -269,7 +427,7 @@ struct boss_ayamissAI : public CombatAI
             {
                 if (Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_TOPAGGRO, 0, SPELL_POISON_STINGER, SELECT_FLAG_PLAYER))
                     if (DoCastSpellIfCan(target, SPELL_POISON_STINGER) == CAST_OK)
-                        ResetCombatAction(action, m_phase == PHASE_AIR ? urand(2000, 3000) : urand(6000, 12000));
+                        ResetCombatAction(action, urand(2000, 3000));
                 break;
             }
             case AYAMISS_SUMMON_SWARMER:
@@ -280,13 +438,19 @@ struct boss_ayamissAI : public CombatAI
             }
             case AYAMISS_SWARMER_ATTACK:
             {
-                for (auto guid : m_swarmersGuidList)
+                Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, nullptr, SELECT_FLAG_PLAYER);
+                if (!target)
+                    break;
+
+                const Position landing = target->GetPosition();
+                for (ObjectGuid guid : m_swarmersGuidList)
                 {
-                    if (Creature* temp = m_creature->GetMap()->GetCreature(guid))
-                    {
-                        if (Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, nullptr, SELECT_FLAG_PLAYER))
-                            temp->AI()->AttackStart(target);
-                    }
+                    Creature* swarmer = m_creature->GetMap()->GetCreature(guid);
+                    if (!swarmer || !swarmer->IsAlive())
+                        continue;
+
+                    swarmer->GetMotionMaster()->Clear(false);
+                    swarmer->GetMotionMaster()->MovePoint(POINT_SWARMER_DIVE, landing, FORCED_MOVEMENT_FLIGHT, 18.0f, false);
                 }
                 m_swarmersGuidList.clear();
                 ResetCombatAction(action, 60000);
@@ -300,57 +464,11 @@ struct boss_ayamissAI : public CombatAI
             }
             case AYAMISS_THRASH:
             {
-                if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_THRASH) == CAST_OK)
+                if (DoCastSpellIfCan(nullptr, SPELL_THRASH) == CAST_OK)
                     ResetCombatAction(action, urand(5000, 7000));
                 break;
             }
         }
-    }
-};
-
-struct npc_hive_zara_larvaAI : public ScriptedAI
-{
-    npc_hive_zara_larvaAI(Creature* creature) : ScriptedAI(creature), m_instance(static_cast<instance_ruins_of_ahnqiraj*>(m_creature->GetInstanceData()))
-    {
-        if (m_instance)
-            if (m_instance->GetData(TYPE_AYAMISS) == IN_PROGRESS)
-                SetReactState(REACT_DEFENSIVE);
-    }
-
-    instance_ruins_of_ahnqiraj* m_instance;
-
-    void Reset() override { }
-
-    void MoveInLineOfSight(Unit* who) override
-    {
-        // don't attack anything during the Ayamiss encounter
-        if (m_instance)
-        {
-            if (m_instance->GetData(TYPE_AYAMISS) == IN_PROGRESS)
-            {
-                if (m_creature->CanReachWithMeleeAttack(who) && who == m_creature->GetVictim())
-                {
-                    m_creature->CastSpell(who, SPELL_FEED, TRIGGERED_OLD_TRIGGERED, nullptr, nullptr, m_creature->GetObjectGuid());
-                }
-                return;
-            }
-        }
-
-        ScriptedAI::MoveInLineOfSight(who);
-    }
-
-    void UpdateAI(const uint32 /*uiDiff*/) override
-    {
-        if (m_instance)
-        {
-            if (m_instance->GetData(TYPE_AYAMISS) == IN_PROGRESS)
-                return;
-        }
-
-        if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
-            return;
-
-        DoMeleeAttackIfReady();
     }
 };
 
