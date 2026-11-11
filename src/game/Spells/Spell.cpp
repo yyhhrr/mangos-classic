@@ -8108,9 +8108,11 @@ bool Spell::OnCheckTarget(Unit* target, SpellEffectIndex eff) const
             if (target->getClass() != CLASS_HUNTER)
                 return false;
             break;
+        case 24150:                                         // Hive'Zara Stinger - Stinger Charge Primer
+            return m_caster && target->IsPlayer() && !m_caster->CanReachWithMeleeAttack(target);
         case 25754:                                         // Moam - Drain Mana
-            return target->IsPlayer() && target->GetPowerType() == POWER_MANA && target->GetPower(POWER_MANA) > 0;
-        case 25676:                                         // Drain Mana
+        case 25676:                                         // Obsidian Destroyer - Drain Mana
+            return target->IsPlayer() && target->IsAlive() && target->GetPowerType() == POWER_MANA && target->GetPower(POWER_MANA) > 0;
         case 26457:
         case 26559:
             if (target->GetPowerType() != POWER_MANA)

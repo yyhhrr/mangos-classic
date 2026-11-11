@@ -23,9 +23,118 @@ EndScriptData
 
 */
 
-#include "AI/ScriptDevAI/include/sc_common.h"/* ContentData
-mob_anubisath_guardian
-EndContentData */
+#include "AI/ScriptDevAI/include/sc_common.h"
+#include "AI/EventAI/CreatureEventAI.h"
+#include "Spells/SpellAuras.h"
+#include "Spells/Scripts/SpellScript.h"
+
+namespace
+{
+enum FleshHunterSpells
+{
+    SPELL_CONSUME = 25371,
+    SPELL_CONSUME_HEAL = 25378,
+    SPELL_SPIT_OUT = 25383,
+};
+
+struct FleshHunterAI : public CreatureEventAI
+{
+    explicit FleshHunterAI(Creature* creature) : CreatureEventAI(creature) {}
+
+    void BeginConsume(Unit* target)
+    {
+        if (m_consumedTarget != target->GetObjectGuid())
+            ClearConsume();
+
+        m_consumedTarget = target->GetObjectGuid();
+        SetConsumedThreat(target, STATE_SUPPRESSED);
+        if (m_creature->GetVictim() == target)
+            SetMeleeEnabled(false);
+    }
+
+    void FinishConsume(Unit* target, AuraRemoveMode mode)
+    {
+        if (m_consumedTarget != target->GetObjectGuid())
+            return;
+
+        m_consumedTarget.Clear();
+        if (!m_creature->IsSuppressedTarget(target))
+            SetConsumedThreat(target, STATE_NORMAL);
+        SetMeleeEnabled(true);
+
+        if (!m_creature->IsAlive() || !m_creature->IsInCombat())
+            return;
+
+        if (mode == AURA_REMOVE_BY_DEATH)
+            m_creature->CastSpell(nullptr, SPELL_CONSUME_HEAL, TRIGGERED_OLD_TRIGGERED);
+        else if (mode == AURA_REMOVE_BY_EXPIRE && target->IsAlive())
+            m_creature->CastSpell(target, SPELL_SPIT_OUT, TRIGGERED_OLD_TRIGGERED);
+    }
+
+    void EnterEvadeMode() override
+    {
+        ClearConsume();
+        CreatureEventAI::EnterEvadeMode();
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        ClearConsume();
+        CreatureEventAI::JustDied(killer);
+    }
+
+    void UpdateEventTimers(uint32 diff) override
+    {
+        if (m_consumedTarget && m_creature->GetVictim())
+            SetMeleeEnabled(m_creature->GetVictim()->GetObjectGuid() != m_consumedTarget);
+        CreatureEventAI::UpdateEventTimers(diff);
+    }
+
+private:
+    void ClearConsume()
+    {
+        if (m_consumedTarget)
+        {
+            if (Unit* target = m_creature->GetMap()->GetUnit(m_consumedTarget))
+                target->RemoveAurasByCasterSpell(SPELL_CONSUME, m_creature->GetObjectGuid());
+            m_consumedTarget.Clear();
+            SetMeleeEnabled(true);
+        }
+    }
+
+    void SetConsumedThreat(Unit* target, HostileState state)
+    {
+        for (HostileReference* ref : m_creature->getThreatManager().getThreatList())
+        {
+            if (ref->getTarget() == target)
+            {
+                ref->SetHostileState(state);
+                break;
+            }
+        }
+    }
+
+    ObjectGuid m_consumedTarget;
+};
+
+struct FleshHunterConsume : public AuraScript
+{
+    void OnApply(Aura* aura, bool apply) const override
+    {
+        if (aura->GetEffIndex() != EFFECT_INDEX_2)
+            return;
+
+        if (Unit* caster = aura->GetCaster())
+            if (auto* ai = dynamic_cast<FleshHunterAI*>(caster->AI()))
+            {
+                if (apply)
+                    ai->BeginConsume(aura->GetTarget());
+                else
+                    ai->FinishConsume(aura->GetTarget(), aura->GetRemoveMode());
+            }
+    }
+};
+}
 
 
 
@@ -66,12 +175,11 @@ struct mob_anubisath_guardianAI : public ScriptedAI
     uint32 m_uiSpell2Timer;
     uint32 m_uiSpell5Timer;
 
-    uint8 m_uiSummonCount;
-
     bool m_bIsEnraged;
 
     void Reset() override
     {
+        m_creature->RemoveGuardians();
         m_uiSpell1 = urand(0, 1) ? SPELL_METEOR : SPELL_PLAGUE;
         m_uiSpell2 = urand(0, 1) ? SPELL_SHADOW_STORM : SPELL_THUNDER_CLAP;
         m_uiSpell3 = urand(0, 1) ? SPELL_REFLECT_ARFR : SPELL_REFLECT_FSSH;
@@ -81,7 +189,6 @@ struct mob_anubisath_guardianAI : public ScriptedAI
         m_uiSpell1Timer = 10000;
         m_uiSpell2Timer = 20000;
         m_uiSpell5Timer = 10000;
-        m_uiSummonCount = 0;
         m_bIsEnraged    = false;
     }
 
@@ -94,28 +201,26 @@ struct mob_anubisath_guardianAI : public ScriptedAI
     void JustSummoned(Creature* pSummoned) override
     {
         pSummoned->AI()->AttackStart(m_creature->GetVictim());
-        ++m_uiSummonCount;
     }
 
-    void SummonedCreatureDespawn(Creature* /*pDespawned*/) override
+    void JustDied(Unit* killer) override
     {
-        --m_uiSummonCount;
+        ScriptedAI::JustDied(killer);
+        m_creature->RemoveGuardians();
     }
 
-    void DamageTaken(Unit* /*dealer*/, uint32& /*damage*/, DamageEffectType /*damagetype*/, SpellEntry const* /*spellInfo*/) override
+    void DamageTaken(Unit* /*dealer*/, uint32& damage, DamageEffectType /*damagetype*/, SpellEntry const* /*spellInfo*/) override
     {
-        // when we reach 10% of HP explode or enrage
-        if (!m_bIsEnraged && m_creature->GetHealthPercent() < 10.0f)
-        {
-            if (m_uiSpell4 == SPELL_ENRAGE)
-            {
-                DoScriptText(EMOTE_FRENZY, m_creature);
-                DoCastSpellIfCan(m_creature, m_uiSpell4);
-                m_bIsEnraged = true;
-            }
-            else
-                DoCastSpellIfCan(m_creature->GetVictim(), m_uiSpell4);
-        }
+        uint32 const health = m_creature->GetHealth();
+        if (m_bIsEnraged || damage >= health || health - damage > m_creature->GetMaxHealth() / 10)
+            return;
+
+        if (DoCastSpellIfCan(m_creature, m_uiSpell4, CAST_TRIGGERED) != CAST_OK)
+            return;
+
+        m_bIsEnraged = true;
+        if (m_uiSpell4 == SPELL_ENRAGE)
+            DoScriptText(EMOTE_FRENZY, m_creature);
     }
 
     void UpdateAI(const uint32 uiDiff) override
@@ -145,7 +250,7 @@ struct mob_anubisath_guardianAI : public ScriptedAI
         if (m_uiSpell5Timer < uiDiff)
         {
             // change for summon spell
-            if (m_uiSummonCount < 4)
+            if (m_creature->CountGuardiansWithEntry(NPC_ANUB_WARRIOR) + m_creature->CountGuardiansWithEntry(NPC_ANUB_SWARM) < 4)
                 DoCastSpellIfCan(m_creature->GetVictim(), m_uiSpell5);
 
             m_uiSpell5Timer = 15000;
@@ -168,4 +273,11 @@ void AddSC_ruins_of_ahnqiraj()
     pNewScript->Name = "mob_anubisath_guardian";
     pNewScript->GetAI = &GetAI_mob_anubisath_guardian;
     pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "mob_aq20_flesh_hunter";
+    pNewScript->GetAI = &GetNewAIInstance<FleshHunterAI>;
+    pNewScript->RegisterSelf();
+
+    RegisterSpellScript<FleshHunterConsume>("spell_aq20_flesh_hunter_consume");
 }

@@ -8996,6 +8996,10 @@ bool Unit::IsSuppressedTarget(Unit* target) const
 {
     MANGOS_ASSERT(target);
 
+    // Consume suppresses the swallowed unit's threat for its own Flesh Hunter only.
+    if (GetEntry() == 15335 && target->GetSpellAuraHolder(25371, GetObjectGuid()))
+        return true;
+
     if (target->IsImmuneToDamage(GetMeleeDamageSchoolMask()))
         return true;
 

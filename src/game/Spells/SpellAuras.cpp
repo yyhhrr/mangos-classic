@@ -1021,8 +1021,11 @@ void Aura::TriggerSpell()
 //                    case 24918: break;
                     case 25371:                             // Consume
                     {
-                        int32 bpDamage = triggerTarget->GetMaxHealth() * 10 / 100;
-                        triggerTarget->CastCustomSpell(triggerTarget, 25373, &bpDamage, nullptr, nullptr, TRIGGERED_OLD_TRIGGERED, nullptr, this, casterGUID);
+                        if (Unit* caster = GetCaster())
+                        {
+                            int32 bpDamage = target->GetMaxHealth() / 10;
+                            caster->CastCustomSpell(target, 25373, &bpDamage, nullptr, nullptr, TRIGGERED_OLD_TRIGGERED, nullptr, this);
+                        }
                         return;
                     }
 //                    // Consume
@@ -1419,7 +1422,9 @@ void Aura::HandleAuraDummy(bool apply, bool Real)
                 return;
             case 25185:                                     // Itch
             {
-                GetCaster()->CastSpell(target, 25187, TRIGGERED_OLD_TRIGGERED);
+                if (m_removeMode == AURA_REMOVE_BY_EXPIRE)
+                    if (Unit* caster = GetCaster())
+                        caster->CastSpell(target, 25187, TRIGGERED_OLD_TRIGGERED);
                 return;
             }
             case 26077:                                     // Itch

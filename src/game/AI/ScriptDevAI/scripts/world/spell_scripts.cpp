@@ -423,13 +423,11 @@ struct IllusionPassive : public AuraScript
     }
 };
 
-// 25680, 27628 - Random Aggro
+// 25680 - Random Aggro
 struct RandomAggro : public SpellScript
 {
     void OnEffectExecute(Spell* spell, SpellEffectIndex /*effIdx*/) const override
     {
-        // 27628 - unknown if it should cause some high threat
-        Unit* caster = spell->GetCaster();
         spell->GetCaster()->AddThreat(spell->GetUnitTarget());
     }
 };
