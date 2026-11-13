@@ -735,13 +735,6 @@ void Spell::EffectDummy(SpellEffectIndex eff_idx)
 
                     return;
                 }
-                case 19411:                                 // Lava Bomb
-                {
-                    if (unitTarget)
-                        unitTarget->CastSpell(unitTarget, 20494, TRIGGERED_OLD_TRIGGERED);
-
-                    return;
-                }
                 case 19484:
                 {
                     if (unitTarget)
@@ -749,13 +742,6 @@ void Spell::EffectDummy(SpellEffectIndex eff_idx)
                         unitTarget->SetFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
                         unitTarget->CastSpell(nullptr, 19527, TRIGGERED_OLD_TRIGGERED);
                     }
-                    return;
-                }
-                case 20474:                                 // Lava Bomb
-                {
-                    if (unitTarget)
-                        unitTarget->CastSpell(unitTarget, 20495, TRIGGERED_OLD_TRIGGERED);
-
                     return;
                 }
                 case 20572:                                 // Blood Fury

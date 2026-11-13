@@ -1003,7 +1003,13 @@ uint32 Unit::DealDamage(Unit* dealer, Unit* victim, uint32 damage, CleanDamage c
         damage = health - 1;
 
     if (health <= damage)
+    {
+        if (damagetype != INSTAKILL && victim->IsAlive())
+            if (UnitAI* ai = victim->AI(); ai && ai->HandleLethalDamage(dealer))
+                return 0;
+
         Kill(dealer, victim, damagetype, spellInfo, durabilityLoss, duel_hasEnded);
+    }
     else                                                    // if (health <= damage)
         HandleDamageDealt(dealer, victim, damage, cleanDamage, damagetype, damageSchoolMask, spellInfo, duel_hasEnded);
 

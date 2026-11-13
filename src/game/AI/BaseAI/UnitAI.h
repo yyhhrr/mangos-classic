@@ -190,6 +190,9 @@ class UnitAI : public CombatActions
          */
         virtual void DamageTaken(Unit* /*dealer*/, uint32& /*damage*/, DamageEffectType /*damageType*/, SpellEntry const* /*spellInfo*/) {}
 
+        // Return true to consume a lethal hit after the complete damage and loot tap are known.
+        virtual bool HandleLethalDamage(Unit* /*dealer*/) { return false; }
+
         /**
          * Called when the creature is killed
          * @param pKiller Unit* who killed the creature

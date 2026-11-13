@@ -25,11 +25,147 @@ EndScriptData
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "molten_core.h"
+#include "AI/EventAI/CreatureEventAI.h"
+#include "Entities/CreatureLinkingMgr.h"
 #include "Globals/ObjectMgr.h"
 #include "Maps/MapPersistentStateMgr.h"
 #include "Maps/SpawnManager.h"
+#include <array>
 
 static constexpr uint32 LUCIFRON_SPAWN_GROUP_ID = 4090000;
+
+namespace
+{
+constexpr size_t CORE_HOUND_PACK_SIZE = 5;
+constexpr auto CORE_HOUND_REVIVE_DELAY = std::chrono::seconds(10);
+constexpr uint32 SPELL_CORE_HOUND_REVIVE_VISUAL = 19823;
+constexpr int32 EMOTE_CORE_HOUND_FALL = 7866;
+constexpr int32 EMOTE_CORE_HOUND_REVIVE = 7867;
+
+class MoltenCoreHoundAI : public CreatureEventAI
+{
+public:
+    explicit MoltenCoreHoundAI(Creature* creature) : CreatureEventAI(creature) {}
+
+    bool HandleLethalDamage(Unit* dealer) override
+    {
+        if (IsDown())
+            return true;
+
+        auto* data = dynamic_cast<instance_molten_core*>(m_creature->GetInstanceData());
+        if (!data || !data->QueueCoreHoundPack(*m_creature))
+            return false;
+
+        m_downedAt = m_creature->GetMap()->GetCurrentClockTime();
+        if (dealer)
+        {
+            m_defeater = dealer->GetObjectGuid();
+            if (!m_creature->IsInCombat() && dealer->IsAlive() && m_creature->CanAttack(dealer))
+                m_creature->EngageInCombatWith(dealer);
+        }
+
+        m_creature->SetHealth(1);
+        m_creature->AttackStop(true, true, true);
+        m_creature->RemoveAllAttackers();
+        DoFakeDeath();
+        m_creature->SetStandState(UNIT_STAND_STATE_DEAD);
+        m_creature->SetFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_DEAD);
+        SetCombatScriptStatus(true);
+        SetCombatMovement(false);
+        SetMeleeEnabled(false);
+        DoBroadcastText(EMOTE_CORE_HOUND_FALL, m_creature, nullptr, CHAT_TYPE_TEXT_EMOTE);
+        return true;
+    }
+
+    void DamageTaken(Unit* dealer, uint32& damage, DamageEffectType damageType, SpellEntry const* spellInfo) override
+    {
+        if (IsDown() && damageType != INSTAKILL)
+            damage = 0;
+        else
+            CreatureEventAI::DamageTaken(dealer, damage, damageType, spellInfo);
+    }
+
+    void UpdateAI(uint32 diff) override
+    {
+        if (!IsDown())
+            CreatureEventAI::UpdateAI(diff);
+    }
+
+    void AttackStart(Unit* target) override
+    {
+        if (!IsDown())
+            CreatureEventAI::AttackStart(target);
+    }
+
+    void Reset() override
+    {
+        RestoreStanding();
+        CreatureEventAI::Reset();
+    }
+
+    void EnterEvadeMode() override
+    {
+        if (IsDown())
+            m_creature->SetHealth(m_creature->GetMaxHealth());
+        RestoreStanding();
+        CreatureEventAI::EnterEvadeMode();
+    }
+
+    bool IsDown() const { return m_downedAt != TimePoint{}; }
+    TimePoint GetDownedAt() const { return m_downedAt; }
+
+    Unit* GetCombatTarget() const
+    {
+        if (!m_creature->IsInCombat() || m_creature->GetCombatManager().IsEvadingHome())
+            return nullptr;
+
+        for (auto const* ref : m_creature->getThreatManager().getThreatList())
+            if (Unit* target = m_creature->GetMap()->GetUnit(ref->getUnitGuid()))
+                if (target->IsAlive() && !target->IsFeigningDeath() && m_creature->CanAttack(target))
+                    return target;
+
+        return nullptr;
+    }
+
+    void Revive(Unit* target)
+    {
+        RestoreStanding();
+        m_creature->SetHealth(m_creature->GetMaxHealth());
+        DoCastSpellIfCan(nullptr, SPELL_CORE_HOUND_REVIVE_VISUAL, CAST_TRIGGERED);
+        DoBroadcastText(EMOTE_CORE_HOUND_REVIVE, m_creature, nullptr, CHAT_TYPE_TEXT_EMOTE);
+        AttackStart(target);
+    }
+
+    void FinishDeath()
+    {
+        Unit* killer = m_creature->GetMap()->GetUnit(m_defeater);
+        if (!killer)
+            killer = m_creature->GetLootRecipient();
+
+        // Keep the damage guard until EventAI calls Reset from the real death callback.
+        Unit::Kill(killer, m_creature, DIRECT_DAMAGE, nullptr, false, false);
+    }
+
+private:
+    void RestoreStanding()
+    {
+        if (!IsDown())
+            return;
+
+        m_downedAt = {};
+        m_defeater.Clear();
+        m_creature->SetStandState(UNIT_STAND_STATE_STAND);
+        m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE);
+        m_creature->RemoveFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_DEAD);
+        SetCombatScriptStatus(false);
+        SetCombatMovement(true);
+        SetMeleeEnabled(true);
+    }
+
+    TimePoint m_downedAt{};
+    ObjectGuid m_defeater;
+};
+}
 
 static SpawnLocation m_aBosspawnLocs[MAX_MAJORDOMO_ADDS] =
 {
@@ -55,6 +191,8 @@ void instance_molten_core::Initialize()
 
 void instance_molten_core::Update(uint32 /*diff*/)
 {
+    UpdateCoreHoundPacks();
+
     if (GetData(TYPE_LUCIFRON) != FAIL)
         return;
 
@@ -68,6 +206,134 @@ void instance_molten_core::Update(uint32 /*diff*/)
     if (group)
         group->ClearRespawnTimes();
     SetData(TYPE_LUCIFRON, NOT_STARTED);
+}
+
+void instance_molten_core::LoadCoreHoundPacks()
+{
+    auto collect = [this](CreatureDataPair const& spawn)
+    {
+        if (spawn.second.id != NPC_CORE_HOUND || spawn.second.mapid != instance->GetId())
+            return false;
+
+        auto const* link = sCreatureLinkingMgr.GetLinkedTriggerInformation(NPC_CORE_HOUND, spawn.first, instance->GetId());
+        if (!link || !(link->linkingFlag & FLAG_CANT_SPAWN_IF_BOSS_DEAD))
+            return false;
+
+        auto const* master = sObjectMgr.GetCreatureData(link->masterDBGuid);
+        if (master && master->mapid == instance->GetId())
+        {
+            if (master->id == NPC_MAGMADAR)
+                m_coreHoundPacks[spawn.first].push_back(spawn.first);
+            else if (master->id == NPC_CORE_HOUND &&
+                     (link->linkingFlag & FLAG_AGGRO_ON_AGGRO) && (link->linkingFlag & FLAG_TO_AGGRO_ON_AGGRO))
+                m_coreHoundPacks[link->masterDBGuid].push_back(spawn.first);
+        }
+        return false;
+    };
+    sObjectMgr.DoCreatureData(collect);
+
+    for (auto pack = m_coreHoundPacks.begin(); pack != m_coreHoundPacks.end();)
+    {
+        auto const& members = pack->second;
+        if (members.size() != CORE_HOUND_PACK_SIZE || std::find(members.begin(), members.end(), pack->first) == members.end())
+            pack = m_coreHoundPacks.erase(pack);
+        else
+            ++pack;
+    }
+    m_coreHoundPacksLoaded = true;
+}
+
+bool instance_molten_core::QueueCoreHoundPack(Creature const& hound)
+{
+    if (!m_coreHoundPacksLoaded)
+        LoadCoreHoundPacks();
+
+    for (auto const& [leader, members] : m_coreHoundPacks)
+    {
+        if (std::find(members.begin(), members.end(), hound.GetDbGuid()) == members.end())
+            continue;
+
+        for (uint32 guid : members)
+        {
+            Creature* member = instance->GetCreature(guid);
+            if (!member || !member->IsAlive() || member->GetEntry() != NPC_CORE_HOUND || !dynamic_cast<MoltenCoreHoundAI*>(member->AI()))
+                return false;
+            if (guid == hound.GetDbGuid() && member != &hound)
+                return false;
+        }
+
+        m_pendingCoreHoundPacks.insert(leader);
+        return true;
+    }
+    return false;
+}
+
+void instance_molten_core::UpdateCoreHoundPacks()
+{
+    auto const now = instance->GetCurrentClockTime();
+    for (auto pack = m_pendingCoreHoundPacks.begin(); pack != m_pendingCoreHoundPacks.end();)
+    {
+        std::array<MoltenCoreHoundAI*, CORE_HOUND_PACK_SIZE> downed{};
+        size_t downedCount = 0;
+        bool missingMember = false;
+        Unit* target = nullptr;
+        TimePoint firstDown = TimePoint::max();
+        TimePoint lastDown{};
+        for (uint32 guid : m_coreHoundPacks.at(*pack))
+        {
+            Creature* member = instance->GetCreature(guid);
+            auto* ai = member && member->IsAlive() ? dynamic_cast<MoltenCoreHoundAI*>(member->AI()) : nullptr;
+            if (!ai)
+            {
+                missingMember = true;
+                continue;
+            }
+            if (!target)
+                target = ai->GetCombatTarget();
+            if (ai->IsDown())
+            {
+                downed[downedCount++] = ai;
+                firstDown = std::min(firstDown, ai->GetDownedAt());
+                lastDown = std::max(lastDown, ai->GetDownedAt());
+            }
+        }
+
+        if (downedCount == 0)
+        {
+            pack = m_pendingCoreHoundPacks.erase(pack);
+            continue;
+        }
+        // The map updates creature combat before instance scripts, so compare the actual fall times.
+        if (downedCount == CORE_HOUND_PACK_SIZE && lastDown - firstDown < CORE_HOUND_REVIVE_DELAY)
+        {
+            pack = m_pendingCoreHoundPacks.erase(pack);
+            for (auto* ai : downed)
+                ai->FinishDeath();
+            continue;
+        }
+
+        if (missingMember || !target)
+        {
+            pack = m_pendingCoreHoundPacks.erase(pack);
+            for (size_t i = 0; i < downedCount; ++i)
+                downed[i]->EnterEvadeMode();
+            continue;
+        }
+
+        size_t revivedCount = 0;
+        for (size_t i = 0; i < downedCount; ++i)
+            if (now - downed[i]->GetDownedAt() >= CORE_HOUND_REVIVE_DELAY)
+            {
+                Unit* ownTarget = downed[i]->GetCombatTarget();
+                downed[i]->Revive(ownTarget ? ownTarget : target);
+                ++revivedCount;
+            }
+
+        if (revivedCount == downedCount)
+            pack = m_pendingCoreHoundPacks.erase(pack);
+        else
+            ++pack;
+    }
 }
 
 bool instance_molten_core::CanSpawnCreatureGroup(uint32 groupId) const
@@ -513,5 +779,10 @@ void AddSC_instance_molten_core()
     Script* pNewScript = new Script;
     pNewScript->Name = "instance_molten_core";
     pNewScript->GetInstanceData = &GetInstance_instance_molten_core;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_molten_core_hound";
+    pNewScript->GetAI = &GetNewAIInstance<MoltenCoreHoundAI>;
     pNewScript->RegisterSelf();
 }

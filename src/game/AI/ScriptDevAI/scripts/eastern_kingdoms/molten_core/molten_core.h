@@ -36,6 +36,7 @@ enum
     NPC_FLAMEWAKER_PROTECTOR    = 12119,                    // Lucifron
     NPC_FLAMEWAKER              = 11661,                    // Gehennas
     NPC_FIRESWORN               = 12099,                    // Garr
+    NPC_CORE_HOUND              = 11671,                    // Magmadar's linked packs
     NPC_CORE_RAGER              = 11672,                    // Golemagg
     NPC_FLAMEWAKER_PRIEST       = 11662,                    // Sulfuron
     NPC_FLAMEWAKER_HEALER       = 11663,                    // Majordomo
@@ -102,6 +103,8 @@ class instance_molten_core : public ScriptedInstance
         void OnObjectCreate(GameObject* pGo) override;
         void OnPlayerEnter(Player* pPlayer) override;
 
+        bool QueueCoreHoundPack(Creature const& hound);
+
         void SetData(uint32 uiType, uint32 uiData) override;
         uint32 GetData(uint32 uiType) const override;
         bool GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const override;
@@ -122,10 +125,16 @@ class instance_molten_core : public ScriptedInstance
         void RestoreResetRune(GameObject* go, uint32 eventId);
         void RestoreResetRuneObjects(uint32 eventId);
         void RemoveResetActors(bool majordomo, bool ragnaros);
+        void LoadCoreHoundPacks();
+        void UpdateCoreHoundPacks();
 
         std::string m_strInstData;
         uint32 m_auiEncounter[MAX_ENCOUNTER];
         std::set<uint32> m_resetRuneEvents;
+
+        bool m_coreHoundPacksLoaded = false;
+        std::unordered_map<uint32, std::vector<uint32>> m_coreHoundPacks;
+        std::set<uint32> m_pendingCoreHoundPacks;
 };
 
 #endif
