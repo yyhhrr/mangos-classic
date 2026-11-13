@@ -32,10 +32,20 @@ EndScriptData
 #include "Maps/SpawnManager.h"
 #include <array>
 
-static constexpr uint32 LUCIFRON_SPAWN_GROUP_ID = 4090000;
-
 namespace
 {
+struct EncounterSpawnGroup
+{
+    uint32 encounter;
+    uint32 groupId;
+};
+
+constexpr EncounterSpawnGroup ENCOUNTER_SPAWN_GROUPS[] =
+{
+    {TYPE_LUCIFRON, 4090000},
+    {TYPE_GEHENNAS, 4090002},
+};
+
 constexpr size_t CORE_HOUND_PACK_SIZE = 5;
 constexpr auto CORE_HOUND_REVIVE_DELAY = std::chrono::seconds(10);
 constexpr uint32 SPELL_CORE_HOUND_REVIVE_VISUAL = 19823;
@@ -193,19 +203,21 @@ void instance_molten_core::Update(uint32 /*diff*/)
 {
     UpdateCoreHoundPacks();
 
-    if (GetData(TYPE_LUCIFRON) != FAIL)
-        return;
+    for (auto const& encounterGroup : ENCOUNTER_SPAWN_GROUPS)
+    {
+        if (GetData(encounterGroup.encounter) != FAIL)
+            continue;
 
-    SpawnGroup* spawnGroup = instance->GetSpawnManager().GetSpawnGroup(LUCIFRON_SPAWN_GROUP_ID);
-    CreatureGroup* group = spawnGroup ? spawnGroup->GetCreatureGroup() : nullptr;
-    if (group && (!group->IsOutOfCombat() || group->IsEvading()))
-        return;
+        SpawnGroup* spawnGroup = instance->GetSpawnManager().GetSpawnGroup(encounterGroup.groupId);
+        CreatureGroup* group = spawnGroup ? spawnGroup->GetCreatureGroup() : nullptr;
+        // The boss may reach home while a surviving guard is still fighting or returning.
+        if (group && (!group->IsOutOfCombat() || group->IsEvading()))
+            continue;
 
-    // Lucifron may have reached home before the last protector. Restore the
-    // group only after every surviving member has finished the pull.
-    if (group)
-        group->ClearRespawnTimes();
-    SetData(TYPE_LUCIFRON, NOT_STARTED);
+        if (group)
+            group->ClearRespawnTimes();
+        SetData(encounterGroup.encounter, NOT_STARTED);
+    }
 }
 
 void instance_molten_core::LoadCoreHoundPacks()
@@ -338,13 +350,17 @@ void instance_molten_core::UpdateCoreHoundPacks()
 
 bool instance_molten_core::CanSpawnCreatureGroup(uint32 groupId) const
 {
-    return groupId != LUCIFRON_SPAWN_GROUP_ID || GetData(TYPE_LUCIFRON) == NOT_STARTED;
+    for (auto const& encounterGroup : ENCOUNTER_SPAWN_GROUPS)
+        if (encounterGroup.groupId == groupId)
+            return GetData(encounterGroup.encounter) == NOT_STARTED;
+    return true;
 }
 
 bool instance_molten_core::IsEncounterInProgress() const
 {
-    if (GetData(TYPE_LUCIFRON) == FAIL)
-        return true;
+    for (auto const& encounterGroup : ENCOUNTER_SPAWN_GROUPS)
+        if (GetData(encounterGroup.encounter) == FAIL)
+            return true;
 
     for (uint32 i : m_auiEncounter)
     {
@@ -446,8 +462,11 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
                 return;
             m_auiEncounter[uiType] = uiData;
             break;
-        case TYPE_MAGMADAR:
         case TYPE_GEHENNAS:
+            if (GetData(TYPE_GEHENNAS) == SPECIAL || (GetData(TYPE_GEHENNAS) == DONE && uiData != SPECIAL))
+                return;
+            [[fallthrough]];
+        case TYPE_MAGMADAR:
         case TYPE_GARR:
         case TYPE_SHAZZRAH:
         case TYPE_GEDDON:
@@ -481,7 +500,8 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
     if (uiData == SPECIAL)
         DoSpawnMajordomoIfCan(false);
 
-    if (uiData == DONE || uiData == SPECIAL)
+    // Keep enough state to restore dead guards if the instance unloads during a Gehennas pull.
+    if (uiData == DONE || uiData == SPECIAL || (uiType == TYPE_GEHENNAS && (uiData == IN_PROGRESS || uiData == NOT_STARTED)))
     {
         OUT_SAVE_INST_DATA;
 
@@ -731,8 +751,9 @@ void instance_molten_core::Load(const char* chrIn)
                >> m_auiEncounter[8] >> m_auiEncounter[9];
 
     // Restore the group together if a saved pull was interrupted by a map reload.
-    if (GetData(TYPE_LUCIFRON) == IN_PROGRESS)
-        m_auiEncounter[TYPE_LUCIFRON] = FAIL;
+    for (auto const& encounterGroup : ENCOUNTER_SPAWN_GROUPS)
+        if (GetData(encounterGroup.encounter) == IN_PROGRESS)
+            m_auiEncounter[encounterGroup.encounter] = FAIL;
 
     for (uint32& i : m_auiEncounter)
     {

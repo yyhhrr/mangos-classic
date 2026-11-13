@@ -63,8 +63,16 @@ struct boss_gehennasAI : public CombatAI
             m_instance->SetData(TYPE_GEHENNAS, IN_PROGRESS);
     }
 
-    void JustDied(Unit* /*killer*/) override
+    void EnterEvadeMode() override
     {
+        m_creature->RemoveDynObject(SPELL_RAIN_OF_FIRE);
+        CombatAI::EnterEvadeMode();
+    }
+
+    void JustDied(Unit* killer) override
+    {
+        m_creature->RemoveDynObject(SPELL_RAIN_OF_FIRE);
+        CombatAI::JustDied(killer);
         if (m_instance)
             m_instance->SetData(TYPE_GEHENNAS, DONE);
     }
