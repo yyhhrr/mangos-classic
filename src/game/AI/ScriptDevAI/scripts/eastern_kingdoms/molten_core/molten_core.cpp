@@ -44,6 +44,7 @@ constexpr EncounterSpawnGroup ENCOUNTER_SPAWN_GROUPS[] =
 {
     {TYPE_LUCIFRON, 4090000},
     {TYPE_GEHENNAS, 4090002},
+    {TYPE_GARR, 4090001},
 };
 
 constexpr size_t CORE_HOUND_PACK_SIZE = 5;
@@ -463,11 +464,11 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
             m_auiEncounter[uiType] = uiData;
             break;
         case TYPE_GEHENNAS:
-            if (GetData(TYPE_GEHENNAS) == SPECIAL || (GetData(TYPE_GEHENNAS) == DONE && uiData != SPECIAL))
+        case TYPE_GARR:
+            if (GetData(uiType) == SPECIAL || (GetData(uiType) == DONE && uiData != SPECIAL))
                 return;
             [[fallthrough]];
         case TYPE_MAGMADAR:
-        case TYPE_GARR:
         case TYPE_SHAZZRAH:
         case TYPE_GEDDON:
         case TYPE_GOLEMAGG:
@@ -500,8 +501,10 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
     if (uiData == SPECIAL)
         DoSpawnMajordomoIfCan(false);
 
-    // Keep enough state to restore dead guards if the instance unloads during a Gehennas pull.
-    if (uiData == DONE || uiData == SPECIAL || (uiType == TYPE_GEHENNAS && (uiData == IN_PROGRESS || uiData == NOT_STARTED)))
+    // Restore dead group members if the instance unloads during a pull.
+    bool const saveGroupReset = (uiType == TYPE_GEHENNAS || uiType == TYPE_GARR) &&
+                                (uiData == IN_PROGRESS || uiData == NOT_STARTED);
+    if (uiData == DONE || uiData == SPECIAL || saveGroupReset)
     {
         OUT_SAVE_INST_DATA;
 

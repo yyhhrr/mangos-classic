@@ -5074,12 +5074,11 @@ void Aura::PeriodicDummyTick()
                         target->CastSpell(target, m_modifier.m_amount, TRIGGERED_OLD_TRIGGERED, nullptr, this);
                     return;
                 case 21094:                                 // Separation Anxiety (Majordomo Executus)
-                case 23487:                                 // Separation Anxiety (Garr)
                     if (Unit* caster = GetCaster())
                     {
                         float m_radius = GetSpellRadius(sSpellRadiusStore.LookupEntry(spell->EffectRadiusIndex[m_effIndex]));
                         if (caster->IsAlive() && !caster->IsWithinDistInMap(target, m_radius))
-                            target->CastSpell(target, (spell->Id == 21094 ? 21095 : 23492), TRIGGERED_OLD_TRIGGERED, nullptr);      // Spell 21095: Separation Anxiety for Majordomo Executus' adds, 23492: Separation Anxiety for Garr's adds
+                            target->CastSpell(target, 21095, TRIGGERED_OLD_TRIGGERED, nullptr);
                     }
                     return;
             }
