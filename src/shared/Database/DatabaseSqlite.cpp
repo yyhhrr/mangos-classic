@@ -49,11 +49,13 @@ bool SQLiteConnection::Initialize(const char* infoString)
         sLog.outError("Could not open SQLite database");
         return false;
     }
+    // realmd and mangosd share the login database, and each process opens several connections: a statement, the pragmas
+    // below included, waits this long for a lock held by another connection before it fails with SQLITE_BUSY.
+    sqlite3_busy_timeout(mSqlite, 5000);
     sqlite3_exec(mSqlite, "PRAGMA journal_mode=WAL;", 0, 0, 0);
     sqlite3_exec(mSqlite, "PRAGMA synchronous=1;", 0, 0, 0);
     sqlite3_exec(mSqlite, "PRAGMA secure_delete=off;", 0, 0, 0);
     sqlite3_exec(mSqlite, "PRAGMA encoding='UTF-8';", 0, 0, 0);
-    sqlite3_busy_timeout(mSqlite, 2);
 
     Tokens tokens = StrSplit(infoString, ";");
 
@@ -81,11 +83,11 @@ bool SQLiteConnection::_Query(const char* sql, sqlite3_stmt** pStmt)
 
 std::unique_ptr<QueryResult> SQLiteConnection::Query(const char* sql)
 {
-    sqlite3_stmt** pStmt = new(sqlite3_stmt*);
-    if (!_Query(sql, pStmt))
+    sqlite3_stmt* stmt = nullptr;
+    if (!_Query(sql, &stmt))
         return nullptr;
 
-    auto queryResult = std::make_unique<QueryResultSqlite>(pStmt);
+    auto queryResult = std::make_unique<QueryResultSqlite>(stmt);
 
     if (queryResult->NextRow())
         return queryResult;
@@ -97,18 +99,18 @@ QueryNamedResult* SQLiteConnection::QueryNamed(const char* sql)
     uint64 rowCount = 0;
     uint32 fieldCount = 0;
 
-    sqlite3_stmt** pStmt = new(sqlite3_stmt*);
+    sqlite3_stmt* stmt = nullptr;
 
-    if (!_Query(sql, pStmt))
+    if (!_Query(sql, &stmt))
         return nullptr;
 
-    fieldCount = sqlite3_column_count(*pStmt);
+    fieldCount = sqlite3_column_count(stmt);
 
     QueryFieldNames names(fieldCount);
     for (uint32 i = 0; i < fieldCount; ++i)
-        names[i] = sqlite3_column_name(*pStmt, i);
+        names[i] = sqlite3_column_name(stmt, i);
 
-    QueryResultSqlite* queryResult = new QueryResultSqlite(pStmt);
+    QueryResultSqlite* queryResult = new QueryResultSqlite(stmt);
 
     queryResult->NextRow();
     return new QueryNamedResult(queryResult, names);
@@ -121,24 +123,27 @@ bool SQLiteConnection::Execute(const char* sql)
 
     {
         uint32 _s = WorldTimer::getMSTime();
-        sqlite3_stmt** pStmt = new(sqlite3_stmt*);
+        sqlite3_stmt* stmt = nullptr;
 
         int result;
-        result = sqlite3_prepare_v2(mSqlite, sql, -1, pStmt, NULL);
+        result = sqlite3_prepare_v2(mSqlite, sql, -1, &stmt, nullptr);
         if (result != SQLITE_OK)
         {
             sLog.outErrorDb("SQL: %s", sql);
             sLog.outErrorDb("SQL ERROR: %s", sqlite3_errmsg(mSqlite));
             return false;
         }
-        result = sqlite3_step(*pStmt);
+        result = sqlite3_step(stmt);
         if (result != SQLITE_DONE && result != SQLITE_OK)
         {
             sLog.outErrorDb("SQL: %s", sql);
             sLog.outErrorDb("SQL ERROR: %s", sqlite3_errmsg(mSqlite));
+            // A statement that is not finalized keeps the implicit transaction of the connection open: the writes that
+            // follow on this connection would never be committed and would keep the database locked.
+            sqlite3_finalize(stmt);
             return false;
         }
-        sqlite3_finalize(*pStmt);
+        sqlite3_finalize(stmt);
         DEBUG_FILTER_LOG(LOG_FILTER_SQL_TEXT, "[%u ms] SQL: %s", WorldTimer::getMSTimeDiff(_s, WorldTimer::getMSTime()), sql);
         // end guarded block
     }
@@ -148,23 +153,25 @@ bool SQLiteConnection::Execute(const char* sql)
 
 bool SQLiteConnection::_TransactionCmd(const char* sql)
 {
-    sqlite3_stmt** pStmt = new(sqlite3_stmt*);
+    sqlite3_stmt* stmt = nullptr;
 
     int result;
-    result = sqlite3_prepare_v2(mSqlite, sql, -1, pStmt, NULL);
+    result = sqlite3_prepare_v2(mSqlite, sql, -1, &stmt, nullptr);
     if (result != SQLITE_OK)
     {
         sLog.outErrorDb("SQL: %s", sql);
         sLog.outErrorDb("SQL ERROR: %s", sqlite3_errmsg(mSqlite));
         return false;
     }
-    result = sqlite3_step(*pStmt);
+    result = sqlite3_step(stmt);
     if (result != SQLITE_DONE && result != SQLITE_OK)
     {
         sLog.outErrorDb("SQL: %s", sql);
         sLog.outErrorDb("SQL ERROR: %s", sqlite3_errmsg(mSqlite));
+        sqlite3_finalize(stmt);
         return false;
     }
+    sqlite3_finalize(stmt);
     DEBUG_FILTER_LOG(LOG_FILTER_SQL_TEXT, "SQL: %s", sql);
     return true;
 }

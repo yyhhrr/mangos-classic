@@ -246,7 +246,7 @@ class WorldSession
         Player* GetPlayer() const { return _player; }
         char const* GetPlayerName() const;
         void SetSecurity(AccountTypes security);
-#if defined(BUILD_DEPRECATED_PLAYERBOT) || defined(ENABLE_PLAYERBOTS)
+#ifdef ENABLE_PLAYERBOTS
         // Players connected without socket are bot
         const std::string GetRemoteAddress() const { return m_socket ? m_socket->GetRemoteAddress() : "disconnected/bot"; }
 #else
@@ -260,7 +260,7 @@ class WorldSession
         void AssignAnticheat(std::unique_ptr<SessionAnticheatInterface>&& anticheat);
         SessionAnticheatInterface* GetAnticheat() const { return m_anticheat.get(); }
 
-#if defined(BUILD_DEPRECATED_PLAYERBOT) || defined(ENABLE_PLAYERBOTS)
+#ifdef ENABLE_PLAYERBOTS
         void SetNoAnticheat();
 #endif
 
@@ -402,7 +402,8 @@ class WorldSession
         const char* GetMangosString(int32 entry) const;
 
         uint32 GetLatency() const { return m_latency; }
-        void SetLatency(uint32 latency) { m_latency = latency; }
+        uint32 GetOneWayDelay() const;
+        void SetLatency(uint32 latency) { m_latency = latency; if (latency) m_pingRoundTrip = latency; }
         void ResetClientTimeDelay() { m_clientTimeDelay = 0; }
         uint32 getDialogStatus(const Player* pPlayer, const Object* questgiver, uint32 defstatus) const;
         ClientOSType GetOS() const { return m_clientOS; }
@@ -855,6 +856,7 @@ class WorldSession
         LocaleConstant m_sessionDbcLocale;
         int m_sessionDbLocaleIndex;
         std::atomic<uint32> m_latency;
+        std::atomic<uint32> m_pingRoundTrip;                // last latency reported by the client, which sends 0 in some pings
         AccountData m_accountData[NUM_ACCOUNT_DATA_TYPES];
         uint32 m_clientTimeDelay;
         uint32 m_Tutorials[8];

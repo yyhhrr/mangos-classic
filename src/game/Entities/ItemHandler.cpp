@@ -561,8 +561,8 @@ void WorldSession::HandleSellItemOpcode(WorldPacket& recv_data)
         }
 
         _player->InterruptNonMeleeSpells(false);
-        pItem->SetCount(pItem->GetCount() - count);
         _player->ItemRemovedQuestCheck(pItem->GetEntry(), count);
+        pItem->SetCount(pItem->GetCount() - count);
         UpdateData data;
         if (_player->IsInWorld())
             _player->GetMap()->AddUpdateObject(pItem);
@@ -894,11 +894,9 @@ void WorldSession::HandleBuyBankSlotOpcode(WorldPacket& recvPacket)
         return;
     }
 
+    // no result is sent on success: the client learns of the new slot from the bank bag slot count
     _player->SetBankBagSlotCount(slot);
     _player->ModifyMoney(-int32(price));
-
-    data << uint32(ERR_BANKSLOT_OK);
-    SendPacket(data);
 }
 
 void WorldSession::HandleAutoBankItemOpcode(WorldPacket& recvPacket)

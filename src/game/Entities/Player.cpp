@@ -65,12 +65,6 @@
 #include "World/WorldState.h"
 #include "Anticheat/Anticheat.hpp"
 
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-#include "PlayerBot/Base/PlayerbotAI.h"
-#include "PlayerBot/Base/PlayerbotMgr.h"
-#include "Config/Config.h"
-#endif
-
 #ifdef ENABLE_PLAYERBOTS
 #include "playerbot/playerbot.h"
 #include "playerbot/PlayerbotAIConfig.h"
@@ -92,10 +86,6 @@
 #define SKILL_TEMP_BONUS(x)    int16(PAIR32_LOPART(x))
 #define SKILL_PERM_BONUS(x)    int16(PAIR32_HIPART(x))
 #define MAKE_SKILL_BONUS(t, p) MAKE_PAIR32(t,p)
-
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-extern Config botConfig;
-#endif
 
 // [-ZERO] need recheck, some values known not existed in 1.12.1
 enum CharacterFlags
@@ -484,7 +474,7 @@ void TradeData::SetAccepted(bool state, bool crosssend /*= false*/)
 
 Player::Player(WorldSession* session): Unit(), m_taxiTracker(*this), m_mover(this), m_camera(this), m_reputationMgr(this), m_launched(false)
 {
-#if defined(BUILD_DEPRECATED_PLAYERBOT) || defined(ENABLE_PLAYERBOTS)
+#ifdef ENABLE_PLAYERBOTS
     m_playerbotAI = nullptr;
     m_playerbotMgr = nullptr;
 #endif
@@ -690,19 +680,6 @@ Player::~Player()
     // clean up player-instance binds, may unload some instance saves
     for (auto& itr : m_boundInstances)
             itr.second.state->RemovePlayer(this);
-
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-    if (m_playerbotAI)
-    {
-        delete m_playerbotAI;
-        m_playerbotAI = nullptr;
-    }
-    if (m_playerbotMgr)
-    {
-        delete m_playerbotMgr;
-        m_playerbotMgr = nullptr;
-    }
-#endif
 
 #ifdef ENABLE_PLAYERBOTS
     RemovePlayerbotAI();
@@ -1596,13 +1573,6 @@ void Player::Update(const uint32 diff)
 
     if (IsHasDelayedTeleport() && !m_semaphoreTeleport_Near)
         TeleportTo(m_teleport_dest, m_teleport_options);
-
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-    if (m_playerbotAI)
-        m_playerbotAI->UpdateAI(diff);
-    else if (m_playerbotMgr)
-        m_playerbotMgr->UpdateAI(diff);
-#endif
 }
 
 void Player::Heartbeat()
@@ -1930,13 +1900,6 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
     // do not let charmed players/creatures teleport
     if (HasCharmer())
         return false;
-
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-    // If this user has bots, tell them to stop following master
-    // so they don't try to follow the master after the master teleports
-    if (GetPlayerbotMgr())
-        GetPlayerbotMgr()->Stay();
-#endif
 
     // don't let enter battlegrounds without assigned battleground id (for example through areatrigger)...
     // don't let gm level > 1 either
@@ -4277,7 +4240,6 @@ void Player::DeleteFromDB(ObjectGuid playerguid, uint32 accountId, bool updateRe
             CharacterDatabase.PExecute("DELETE FROM character_forgotten_skills WHERE guid = '%u'", lowguid);
             CharacterDatabase.PExecute("DELETE FROM item_loot WHERE owner_guid = '%u'", lowguid);
             CharacterDatabase.PExecute("DELETE FROM pvpstats_players WHERE character_guid = '%u'", lowguid);
-            CharacterDatabase.PExecute("DELETE FROM playerbot_saved_data WHERE guid = '%u'", lowguid);
             // Auras it cast on others: caster_guid holds the full guid
             CharacterDatabase.PExecute("DELETE FROM character_aura WHERE caster_guid = '" UI64FMTD "'", playerguid.GetRawValue());
             CharacterDatabase.PExecute("DELETE FROM pet_aura WHERE caster_guid = '" UI64FMTD "'", playerguid.GetRawValue());
@@ -11143,36 +11105,43 @@ void Player::SwapItem(uint16 src, uint16 dst)
     // attempt merge to / fill target item
     if (!pSrcItem->IsBag() && !pDstItem->IsBag())
     {
+        ItemPrototype const* itemProto = pSrcItem->GetProto();
         InventoryResult msg;
         ItemPosCountVec sDest;
-        uint16 eDest = 0;
         uint8 bagSlot;
-        if (IsInventoryPos(dst))
+        // only fill the target stack: the rest stays in the source slot, so no free slot is needed elsewhere. An equipped stack
+        // is always filled this way: it stays in its slot and only its count changes
+        if (IsEquipmentPos(dst) || ((IsInventoryPos(dst) || IsBankPos(dst)) && pSrcItem->GetCount() + pDstItem->GetCount() > itemProto->GetMaxStackSize()))
+        {
+            if (pSrcItem->HasTemporaryLoot())
+                msg = EQUIP_ERR_ALREADY_LOOTED;
+            else if (pSrcItem->IsBindedNotWith(this))
+                msg = EQUIP_ERR_DONT_OWN_THAT_ITEM;
+            else
+                msg = pDstItem->CanBeMergedPartlyWith(itemProto);
+
+            // the whole source joins the equipped stack when it fits
+            if (IsEquipmentPos(dst))
+                sDest.push_back(ItemPosCount(dst, pSrcItem->GetCount()));
+        }
+        else if (IsInventoryPos(dst))
             msg = CanStoreItem(dstbag, dstslot, sDest, pSrcItem, bagSlot, false);
         else if (IsBankPos(dst))
             msg = CanBankItem(dstbag, dstslot, sDest, pSrcItem, false, bagSlot);
-        else if (IsEquipmentPos(dst))
-            msg = CanEquipItem(dstslot, eDest, pSrcItem, false);
         else
             return;
 
         // can be merge/fill
         if (msg == EQUIP_ERR_OK)
         {
-            ItemPrototype const* itemProto = pSrcItem->GetProto();
             if (pSrcItem->GetCount() + pDstItem->GetCount() <= itemProto->GetMaxStackSize())
             {
                 RemoveItem(srcbag, srcslot, true);
 
-                if (IsInventoryPos(dst))
-                    StoreItem(sDest, pSrcItem, true);
-                else if (IsBankPos(dst))
+                if (IsBankPos(dst))
                     BankItem(sDest, pSrcItem, true);
-                else if (IsEquipmentPos(dst))
-                {
-                    EquipItem(eDest, pSrcItem, true);
-                    AutoUnequipOffhandIfNeed();
-                }
+                else
+                    StoreItem(sDest, pSrcItem, true);
             }
             else
             {
@@ -11940,22 +11909,6 @@ void Player::PrepareGossipMenu(WorldObject* pSource, uint32 menuId, bool forceQu
                     break;                                  // no checks
                 case GOSSIP_OPTION_BOT:
                 {
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-                    if (botConfig.GetBoolDefault("PlayerbotAI.DisableBots", false) && !pCreature->isInnkeeper())
-                    {
-                        ChatHandler(this).PSendSysMessage("|cffff0000Playerbot system is currently disabled!");
-                        hasMenuItem = false;
-                        break;
-                    }
-
-                    int32 cost = botConfig.GetIntDefault("PlayerbotAI.BotguyCost", 0);
-                    if (cost >= 0)
-                    {
-                        std::string reqQuestIds = botConfig.GetStringDefault("PlayerbotAI.BotguyQuests", "");
-                        if ((reqQuestIds == "" || requiredQuests(reqQuestIds.c_str())) && !pCreature->isInnkeeper() && this->GetMoney() >= (uint32)cost)
-                            pCreature->LoadBotMenu(this);
-                    }
-#endif
                     hasMenuItem = false;
                     break;
                 }
@@ -12221,57 +12174,6 @@ void Player::OnGossipSelect(WorldObject* pSource, uint32 gossipListId)
             GetSession()->SendBattleGroundList(guid, bgTypeId);
             break;
         }
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-        case GOSSIP_OPTION_BOT:
-        {
-            // DEBUG_LOG("GOSSIP_OPTION_BOT");
-            m_playerMenu->CloseGossip();
-            uint32 guidlo = m_playerMenu->GossipOptionSender(gossipListId);
-            int32 cost = botConfig.GetIntDefault("PlayerbotAI.BotguyCost", 0);
-
-            if (!GetPlayerbotMgr())
-                SetPlayerbotMgr(new PlayerbotMgr(this));
-
-            if (GetPlayerbotMgr()->GetPlayerBot(ObjectGuid(HIGHGUID_PLAYER, guidlo)) != nullptr)
-            {
-                GetPlayerbotMgr()->LogoutPlayerBot(ObjectGuid(HIGHGUID_PLAYER, guidlo));
-            }
-            else if (GetPlayerbotMgr()->GetPlayerBot(ObjectGuid(HIGHGUID_PLAYER, guidlo)) == nullptr)
-            {
-                auto resultchar = CharacterDatabase.PQuery("SELECT COUNT(*) FROM characters WHERE online = '1' AND account = '%u'", m_session->GetAccountId());
-                if (resultchar)
-                {
-                    Field* fields = resultchar->Fetch();
-                    int maxnum = botConfig.GetIntDefault("PlayerbotAI.MaxNumBots", 9);
-                    int acctcharcount = fields[0].GetUInt32();
-                    if (!(m_session->GetSecurity() > SEC_PLAYER))
-                        if (acctcharcount > maxnum)
-                        {
-                            ChatHandler(this).PSendSysMessage("|cffff0000You cannot summon anymore bots.(Current Max: |cffffffff%u)", maxnum);
-                            break;
-                        }
-                }
-
-                auto resultlvl = CharacterDatabase.PQuery("SELECT level,name FROM characters WHERE guid = '%u'", guidlo);
-                if (resultlvl)
-                {
-                    Field* fields = resultlvl->Fetch();
-                    int maxlvl = botConfig.GetIntDefault("PlayerbotAI.RestrictBotLevel", 80);
-                    int charlvl = fields[0].GetUInt32();
-                    if (!(m_session->GetSecurity() > SEC_PLAYER))
-                        if (charlvl > maxlvl)
-                        {
-                            ChatHandler(this).PSendSysMessage("|cffff0000You cannot summon |cffffffff[%s]|cffff0000, it's level is too high.(Current Max:lvl |cffffffff%u)", fields[1].GetString(), maxlvl);
-                            break;
-                        }
-                }
-
-                GetPlayerbotMgr()->LoginPlayerBot(ObjectGuid(HIGHGUID_PLAYER, guidlo));
-                this->ModifyMoney(-(int32)cost);
-            }
-            return;
-        }
-#endif
     }
 
     if (pMenuData && menuData.m_gAction_script)
@@ -12403,7 +12305,7 @@ void Player::PrepareQuestMenu(ObjectGuid guid) const
 
         if (pQuest->IsAutoComplete() && CanTakeQuest(pQuest, false))
             qm.AddMenuItem(quest_id, DIALOG_STATUS_REWARD_REP);
-        else if (status == QUEST_STATUS_NONE && CanTakeQuest(pQuest, false))
+        else if ((status == QUEST_STATUS_NONE || status == QUEST_STATUS_FAILED) && CanTakeQuest(pQuest, false))
             qm.AddMenuItem(quest_id, DIALOG_STATUS_AVAILABLE);
     }
 }
@@ -12599,7 +12501,8 @@ bool Player::CanTakeQuest(Quest const* pQuest, bool msg) const
 
 bool Player::CanAddQuest(Quest const* pQuest, bool msg) const
 {
-    if (!SatisfyQuestLog(msg))
+    // a failed quest taken again keeps its quest log slot
+    if (FindQuestSlot(pQuest->GetQuestId()) >= MAX_QUEST_LOG_SIZE && !SatisfyQuestLog(msg))
         return false;
 
     if (!CanGiveQuestSourceItemIfNeed(pQuest))
@@ -12783,10 +12686,13 @@ void Player::SendPetTameFailure(PetTameFailureReason reason) const
 
 void Player::AddQuest(Quest const* pQuest, Object* questGiver)
 {
-    uint16 log_slot = FindQuestSlot(0);
-    MANGOS_ASSERT(log_slot < MAX_QUEST_LOG_SIZE);
-
     uint32 quest_id = pQuest->GetQuestId();
+
+    // a failed quest taken again keeps its quest log slot, which SetQuestSlot below resets
+    uint16 log_slot = FindQuestSlot(quest_id);
+    if (log_slot >= MAX_QUEST_LOG_SIZE)
+        log_slot = FindQuestSlot(0);
+    MANGOS_ASSERT(log_slot < MAX_QUEST_LOG_SIZE);
 
     // if not exist then created with set uState==NEW and rewarded=false
     QuestStatusData& questStatusData = mQuestStatus[quest_id];
@@ -12908,12 +12814,14 @@ void Player::CompleteQuest(uint32 quest_id)
     {
         SetQuestStatus(quest_id, QUEST_STATUS_COMPLETE);
 
-        uint16 log_slot = FindQuestSlot(quest_id);
-        if (log_slot < MAX_QUEST_LOG_SIZE)
-            SetQuestSlotState(log_slot, QUEST_STATE_COMPLETE);
-
         if (Quest const* qInfo = sObjectMgr.GetQuestTemplate(quest_id))
         {
+            // The client reads the complete state of a quest log slot as the event or area objective
+            // of the quests flagged with one; the other objectives it counts itself.
+            uint16 log_slot = FindQuestSlot(quest_id);
+            if (log_slot < MAX_QUEST_LOG_SIZE && qInfo->HasQuestFlag(QuestFlags(QUEST_FLAGS_PARTY_ACCEPT | QUEST_FLAGS_EXPLORATION)))
+                SetQuestSlotState(log_slot, QUEST_STATE_COMPLETE);
+
             if (qInfo->HasQuestFlag(QUEST_FLAGS_AUTO_REWARDED))
                 RewardQuest(qInfo, 0, this, false);
         }
@@ -12926,8 +12834,12 @@ void Player::IncompleteQuest(uint32 quest_id)
     {
         SetQuestStatus(quest_id, QUEST_STATUS_INCOMPLETE);
 
+        // The complete state of the quest log slot is the event objective, which stays done once the event happened.
+        QuestStatusMap::const_iterator itr = mQuestStatus.find(quest_id);
+        bool eventDone = itr != mQuestStatus.end() && itr->second.m_explored;
+
         uint16 log_slot = FindQuestSlot(quest_id);
-        if (log_slot < MAX_QUEST_LOG_SIZE)
+        if (log_slot < MAX_QUEST_LOG_SIZE && !eventDone)
             RemoveQuestSlotState(log_slot, QUEST_STATE_COMPLETE);
     }
 }
@@ -13144,11 +13056,9 @@ void Player::FailQuest(Quest const* quest)
 
     uint16 log_slot = FindQuestSlot(questId);
 
+    // only the state changes in the quest log: the client does not read the time of a failed quest
     if (log_slot < MAX_QUEST_LOG_SIZE)
-    {
-        SetQuestSlotTimer(log_slot, 1);
         SetQuestSlotState(log_slot, QUEST_STATE_FAIL);
-    }
 
     if (quest->HasSpecialFlag(QUEST_SPECIAL_FLAG_TIMED))
     {
@@ -13438,7 +13348,8 @@ bool Player::SatisfyQuestStatus(Quest const* qInfo, bool msg) const
 {
     QuestStatusMap::const_iterator itr = mQuestStatus.find(qInfo->GetQuestId());
 
-    if (itr != mQuestStatus.end() && itr->second.m_status != QUEST_STATUS_NONE)
+    // a failed quest can be taken again from its quest giver
+    if (itr != mQuestStatus.end() && itr->second.m_status != QUEST_STATUS_NONE && itr->second.m_status != QUEST_STATUS_FAILED)
     {
         if (msg)
             SendCanTakeQuestResponse(INVALIDREASON_QUEST_ALREADY_ON);
@@ -13744,7 +13655,8 @@ void Player::AreaExploredOrEventHappens(uint32 questId)
         {
             QuestStatusData& q_status = mQuestStatus[questId];
 
-            if (!q_status.m_explored)
+            // a failed quest does not progress any more
+            if (!q_status.m_explored && q_status.m_status != QUEST_STATUS_FAILED)
             {
                 SetQuestSlotState(log_slot, QUEST_STATE_COMPLETE);
                 SendQuestCompleteEvent(questId);
@@ -13845,18 +13757,21 @@ void Player::ItemRemovedQuestCheck(uint32 entry, uint32 count)
                 uint32 reqItemCount = qInfo->ReqItemCount[j];
                 uint32 curItemCount = q_status.m_itemcount[j];
 
-                // With items you can have more than the required by the quest.
+                // With items you can have more than the required by the quest. The bank counts as in
+                // AdjustQuestReqItemCount; only the reward needs the items in the bags.
                 if (curItemCount >= reqItemCount)
-                    curItemCount = GetItemCount(entry, false);
+                    curItemCount = GetItemCount(entry, true);
 
-                if (q_status.m_itemcount[j] > curItemCount - count)
+                // The counter is capped at the required count, so it only drops once fewer items than that are left.
+                if (curItemCount >= count && q_status.m_itemcount[j] > curItemCount - count)
                 {
-                    uint32 remitemcount = (curItemCount <= reqItemCount ? count : count + reqItemCount - curItemCount);
-                    q_status.m_itemcount[j] = curItemCount - remitemcount;
+                    q_status.m_itemcount[j] = curItemCount - count;
                     if (q_status.uState != QUEST_NEW)
                         q_status.uState = QUEST_CHANGED;
 
-                    IncompleteQuest(questid);
+                    // Only a complete quest goes back to incomplete: a failed quest stays failed.
+                    if (q_status.m_status == QUEST_STATUS_COMPLETE)
+                        IncompleteQuest(questid);
                     UpdateForQuestWorldObjects();
                 }
             }
@@ -15504,12 +15419,16 @@ void Player::_LoadQuestStatus(std::unique_ptr<QueryResult> queryResult)
 
                 if (pQuest->HasSpecialFlag(QUEST_SPECIAL_FLAG_TIMED) && !GetQuestRewardStatus(quest_id) && questStatusData.m_status != QUEST_STATUS_NONE)
                 {
-                    AddTimedQuest(quest_id);
+                    // A failed quest keeps its time in the quest log, but its timer does not run any more
+                    if (questStatusData.m_status != QUEST_STATUS_FAILED)
+                    {
+                        AddTimedQuest(quest_id);
 
-                    if (quest_time <= sWorld.GetGameTime())
-                        questStatusData.m_timer = 1;
-                    else
-                        questStatusData.m_timer = uint32(quest_time - sWorld.GetGameTime()) * IN_MILLISECONDS;
+                        if (quest_time <= sWorld.GetGameTime())
+                            questStatusData.m_timer = 1;
+                        else
+                            questStatusData.m_timer = uint32(quest_time - sWorld.GetGameTime()) * IN_MILLISECONDS;
+                    }
                 }
                 else
                     quest_time = 0;
@@ -15537,7 +15456,7 @@ void Player::_LoadQuestStatus(std::unique_ptr<QueryResult> queryResult)
                     if (questStatusData.m_explored)
                         SetQuestSlotState(slot, QUEST_STATE_COMPLETE);
 
-                    if (questStatusData.m_status == QUEST_STATUS_COMPLETE)
+                    if (questStatusData.m_status == QUEST_STATUS_COMPLETE && pQuest->HasQuestFlag(QuestFlags(QUEST_FLAGS_PARTY_ACCEPT | QUEST_FLAGS_EXPLORATION)))
                         SetQuestSlotState(slot, QUEST_STATE_COMPLETE);
 
                     if (questStatusData.m_status == QUEST_STATUS_FAILED)

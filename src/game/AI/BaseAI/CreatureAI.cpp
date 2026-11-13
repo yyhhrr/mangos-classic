@@ -223,11 +223,14 @@ void CreatureAI::OnCallForHelp(Unit* enemy)
 
 void CreatureAI::HandleAssistanceCall(Unit* sender, Unit* invoker)
 {
-    if (!invoker || m_creature->IsCritter())
+    if (!invoker || m_creature->IsCritter() || m_creature->IsOfflineTarget(invoker))
         return;
-    if (m_creature->CanAssist(sender) && m_creature->CanAttackOnSight(invoker) && invoker->IsVisibleForOrDetect(m_creature, m_creature, false))
+    if (m_creature->CanAssistInCombatAgainst(sender, invoker) && m_creature->CanJoinInAttacking(invoker) && invoker->IsVisibleForOrDetect(m_creature, m_creature, false) && !m_creature->GetNoCallAssistance())
     {
-        m_creature->SetNoCallAssistance(true);
+        // only a creature that answers is marked: one whose faction ignores the call still calls for help when it is pulled
+        FactionTemplateEntry const* factionTemplate = m_creature->GetFactionTemplateEntry();
+        if (!factionTemplate || factionTemplate->IsFleeFromCallForHelp() || factionTemplate->IsRespondToCallForHelp())
+            m_creature->SetNoCallAssistance(true);
         OnCallForHelp(invoker);
     }
 }
