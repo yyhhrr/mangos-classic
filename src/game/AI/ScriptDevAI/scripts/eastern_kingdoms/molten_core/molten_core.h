@@ -94,7 +94,9 @@ class instance_molten_core : public ScriptedInstance
         ~instance_molten_core() {}
 
         void Initialize() override;
+        void Update(uint32 diff) override;
         bool IsEncounterInProgress() const override;
+        bool CanSpawnCreatureGroup(uint32 groupId) const override;
 
         void OnCreatureCreate(Creature* pCreature) override;
         void OnObjectCreate(GameObject* pGo) override;

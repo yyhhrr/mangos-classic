@@ -29,7 +29,7 @@ EndScriptData
 
 enum
 {
-    SPELL_SHADOWSHOCK       = 19460,
+    SPELL_SHADOWSHOCK       = 20603,
     SPELL_IMPENDINGDOOM     = 19702,
     SPELL_LUCIFRONCURSE     = 19703,
 };
@@ -42,13 +42,15 @@ enum LucifronActions
     LUCIFRON_ACTION_MAX,
 };
 
+constexpr uint32 SHADOW_SHOCK_INTERVAL = 5 * IN_MILLISECONDS;
+
 struct boss_lucifronAI : public CombatAI
 {
     boss_lucifronAI(Creature* creature) : CombatAI(creature, LUCIFRON_ACTION_MAX), m_instance(static_cast<ScriptedInstance*>(creature->GetInstanceData()))
     {
         AddCombatAction(LUCIFRON_IMPENDING_DOOM, 5 * IN_MILLISECONDS, 10 * IN_MILLISECONDS);
         AddCombatAction(LUCIFRON_LUCIFRONS_CURSE, 10 * IN_MILLISECONDS, 15 * IN_MILLISECONDS);
-        AddCombatAction(LUCIFRON_SHADOWSHOCK, 3 * IN_MILLISECONDS, 6 * IN_MILLISECONDS);
+        AddCombatAction(LUCIFRON_SHADOWSHOCK, SHADOW_SHOCK_INTERVAL);
         Reset();
     }
 
@@ -90,8 +92,8 @@ struct boss_lucifronAI : public CombatAI
             }
             case LUCIFRON_SHADOWSHOCK:
             {
-                if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_SHADOWSHOCK) == CAST_OK)
-                    ResetCombatAction(action, urand(3 * IN_MILLISECONDS, 6 * IN_MILLISECONDS));
+                DoCastSpellIfCan(nullptr, SPELL_SHADOWSHOCK);
+                ResetCombatAction(action, SHADOW_SHOCK_INTERVAL);
                 break;
             }
         }

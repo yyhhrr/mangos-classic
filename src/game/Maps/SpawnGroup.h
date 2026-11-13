@@ -101,9 +101,9 @@ class CreatureGroup : public SpawnGroup
         bool IsEvading();
 
         bool HasGroupMember(WorldObject* wo) const;
+        void ClearRespawnTimes();
 
     private:
-        void ClearRespawnTimes();
         FormationDataSPtr m_formationData;
         std::set<Unit*> m_linkageTargets;
 };

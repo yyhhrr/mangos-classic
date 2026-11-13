@@ -29,6 +29,8 @@ EndScriptData
 #include "Maps/MapPersistentStateMgr.h"
 #include "Maps/SpawnManager.h"
 
+static constexpr uint32 LUCIFRON_SPAWN_GROUP_ID = 4090000;
+
 static SpawnLocation m_aBosspawnLocs[MAX_MAJORDOMO_ADDS] =
 {
     {NPC_FLAMEWAKER_ELITE,  737.945f, -1156.48f, -118.945f, 4.46804f, 0, 0},
@@ -51,8 +53,33 @@ void instance_molten_core::Initialize()
     memset(&m_auiEncounter, 0, sizeof(m_auiEncounter));
 }
 
+void instance_molten_core::Update(uint32 /*diff*/)
+{
+    if (GetData(TYPE_LUCIFRON) != FAIL)
+        return;
+
+    SpawnGroup* spawnGroup = instance->GetSpawnManager().GetSpawnGroup(LUCIFRON_SPAWN_GROUP_ID);
+    CreatureGroup* group = spawnGroup ? spawnGroup->GetCreatureGroup() : nullptr;
+    if (group && (!group->IsOutOfCombat() || group->IsEvading()))
+        return;
+
+    // Lucifron may have reached home before the last protector. Restore the
+    // group only after every surviving member has finished the pull.
+    if (group)
+        group->ClearRespawnTimes();
+    SetData(TYPE_LUCIFRON, NOT_STARTED);
+}
+
+bool instance_molten_core::CanSpawnCreatureGroup(uint32 groupId) const
+{
+    return groupId != LUCIFRON_SPAWN_GROUP_ID || GetData(TYPE_LUCIFRON) == NOT_STARTED;
+}
+
 bool instance_molten_core::IsEncounterInProgress() const
 {
+    if (GetData(TYPE_LUCIFRON) == FAIL)
+        return true;
+
     for (uint32 i : m_auiEncounter)
     {
         if (i == IN_PROGRESS)
@@ -149,6 +176,8 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
     switch (uiType)
     {
         case TYPE_LUCIFRON:
+            if (m_auiEncounter[uiType] == DONE)
+                return;
             m_auiEncounter[uiType] = uiData;
             break;
         case TYPE_MAGMADAR:
@@ -434,6 +463,10 @@ void instance_molten_core::Load(const char* chrIn)
     loadStream >> m_auiEncounter[0] >> m_auiEncounter[1] >> m_auiEncounter[2] >> m_auiEncounter[3]
                >> m_auiEncounter[4] >> m_auiEncounter[5] >> m_auiEncounter[6] >> m_auiEncounter[7]
                >> m_auiEncounter[8] >> m_auiEncounter[9];
+
+    // Restore the group together if a saved pull was interrupted by a map reload.
+    if (GetData(TYPE_LUCIFRON) == IN_PROGRESS)
+        m_auiEncounter[TYPE_LUCIFRON] = FAIL;
 
     for (uint32& i : m_auiEncounter)
     {

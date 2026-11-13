@@ -136,6 +136,9 @@ class InstanceData
         // called on creature group last member despawn or death - whichever occurs first and supplies last one to die
         virtual void OnCreatureGroupDespawn(CreatureGroup* /*creatureGroup*/, Creature* creature) {}
 
+        // Instance encounters can temporarily suspend group respawns.
+        virtual bool CanSpawnCreatureGroup(uint32 /*groupId*/) const { return true; }
+
         // called on game event
         virtual void OnEventHappened(uint16 /*event_id*/, bool /*activate*/, bool /*resume*/) {}
 

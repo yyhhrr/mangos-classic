@@ -424,6 +424,11 @@ void SpawnGroup::Spawn(bool forced, bool ignoreRespawntime)
 
 bool SpawnGroup::IsWorldstateConditionSatisfied() const
 {
+    if (m_entry.Type == SPAWN_GROUP_CREATURE)
+        if (InstanceData* instance = m_map.GetInstanceData())
+            if (!instance->CanSpawnCreatureGroup(m_entry.Id))
+                return false;
+
     if (m_entry.WorldStateCondition)
     {
         return IsConditionSatisfied(m_entry.WorldStateCondition, nullptr, &m_map, nullptr, CONDITION_FROM_WORLDSTATE);
@@ -579,6 +584,10 @@ void CreatureGroup::TriggerLinkingEvent(uint32 event, Unit* target)
         case CREATURE_GROUP_EVENT_RESPAWN:
             if ((m_entry.Flags & CREATURE_GROUP_RESPAWN_TOGETHER) == 0)
                 return;
+
+            if (InstanceData* instance = m_map.GetInstanceData())
+                if (!instance->CanSpawnCreatureGroup(m_entry.Id))
+                    return;
 
             ClearRespawnTimes();
             break;
