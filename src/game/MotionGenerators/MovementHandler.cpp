@@ -316,14 +316,12 @@ void WorldSession::HandleMoveTeleportAckOpcode(WorldPacket& recv_data)
 
     plMover->SetSemaphoreTeleportNear(false);
 
-    uint32 old_zone = plMover->GetZoneId();
+    // the position is the destination since the order, the zone still the one before the teleport
+    uint32 old_zone = plMover->GetCachedZoneId();
 
     WorldLocation const& dest = plMover->GetTeleportDest();
 
 #ifdef ENABLE_PLAYERBOTS
-    // send MSG_MOVE_TELEPORT to observers around old position
-    SendTeleportToObservers(dest.coord_x, dest.coord_y, dest.coord_z, dest.orientation);
-
     // interrupt moving for bot if any
     if (plMover->GetPlayerbotAI() && !plMover->GetMotionMaster()->empty())
     {
@@ -616,14 +614,16 @@ void WorldSession::SendKnockBack(Unit* who, float angle, float horizontalSpeed, 
     float vsin = sin(angle);
     float vcos = cos(angle);
 
+    uint32 const counter = GetOrderCounter();
     WorldPacket data(SMSG_MOVE_KNOCK_BACK, 9 + 4 + 4 + 4 + 4 + 4);
     data << who->GetPackGUID();
-    data << GetOrderCounter();
+    data << counter;
     data << float(vcos);                                // x direction
     data << float(vsin);                                // y direction
     data << float(horizontalSpeed);                     // Horizontal speed
     data << float(-verticalSpeed);                      // Z Movement speed (vertical)
     SendPacket(data);
+    m_anticheat->OrderSent(data.GetOpcode(), counter);
     IncrementOrderCounter();
 
     m_anticheat->KnockBack(horizontalSpeed, -verticalSpeed, vcos, vsin);

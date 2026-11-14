@@ -23,7 +23,7 @@
 #include "Util/Errors.h"
 #include "Entities/Player.h"
 
-Camera::Camera(Player* pl) : m_owner(*pl), m_source(pl), m_sendInProgress(false)
+Camera::Camera(Player* pl) : m_owner(*pl), m_source(pl)
 {
     m_source->GetViewPoint().Attach(this);
 }
@@ -108,7 +108,12 @@ void Camera::Event_AddedToWorld(UpdateData* data)
     grid->AddWorldObject(this);
 
     if (data)
-        UpdateVisibilityForOwner(true, *data);
+    {
+        if (m_source == &m_owner)
+            UpdateVisibilityForOwner(*data);
+        else
+            UpdateVisibilityForOwner();                     // data is the packet of the viewpoint, not of this camera's owner
+    }
 }
 
 void Camera::Event_RemovedFromWorld()
@@ -128,43 +133,22 @@ void Camera::Event_Moved()
     m_source->GetViewPoint().m_grid->AddWorldObject(this);
 }
 
-void Camera::UpdateVisibilityOf(WorldObject* target, UpdateData& data) const
+void Camera::UpdateVisibilityOf(WorldObject* target) const
 {
-    m_owner.UpdateVisibilityOf(m_source, target, data);
+    m_owner.UpdateVisibilityOf(m_source, target);
 }
 
-template<class T>
-void Camera::UpdateVisibilityOf(T* target, UpdateData& data, WorldObjectSet& vis)
+void Camera::UpdateVisibilityForOwner()
 {
-    m_owner.UpdateVisibilityOf<T>(m_source, target, data, vis);
-}
-
-template void Camera::UpdateVisibilityOf(Player*, UpdateData&, WorldObjectSet&);
-template void Camera::UpdateVisibilityOf(Creature*, UpdateData&, WorldObjectSet&);
-template void Camera::UpdateVisibilityOf(Corpse*, UpdateData&, WorldObjectSet&);
-template void Camera::UpdateVisibilityOf(GameObject*, UpdateData&, WorldObjectSet&);
-template void Camera::UpdateVisibilityOf(DynamicObject*, UpdateData&, WorldObjectSet&);
-
-void Camera::UpdateVisibilityForOwner(UpdateDataMapType& update_players)
-{
-    UpdateDataMapType::iterator iter = update_players.find(GetOwner());
-
-    if (iter == update_players.end())
-    {
-        std::pair<UpdateDataMapType::iterator, bool> p = update_players.insert(UpdateDataMapType::value_type(GetOwner(), UpdateData()));
-        MANGOS_ASSERT(p.second);
-        iter = p.first;
-    }
-    UpdateVisibilityForOwner(true, iter->second);
-}
-
-void Camera::UpdateVisibilityForOwner(bool addToWorld, UpdateData& data)
-{
-    m_sendInProgress = true;
-    MaNGOS::VisibleNotifier notifier(*this, data, !addToWorld);
-    Cell::VisitAllObjects(m_source, notifier, addToWorld ? MAX_VISIBILITY_DISTANCE : m_source->GetVisibilityData().GetVisibilityDistance(), false);
+    MaNGOS::VisibleNotifier notifier(*this);
+    Cell::VisitAllObjects(m_source, notifier, MAX_VISIBILITY_DISTANCE, false);
     notifier.Notify();
-    m_sendInProgress = false;
+}
+
+void Camera::UpdateVisibilityForOwner(UpdateData& data)
+{
+    UpdateVisibilityForOwner();
+    m_owner.WriteViewChanges(data);
 }
 
 //////////////////

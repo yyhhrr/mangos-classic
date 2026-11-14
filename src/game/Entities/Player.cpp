@@ -545,6 +545,7 @@ Player::Player(WorldSession* session): Unit(), m_taxiTracker(*this), m_mover(thi
     m_DelayedOperations = 0;
     m_bCanDelayTeleport = false;
     m_bHasDelayedTeleport = false;
+    m_cameraVisit = 0;
     m_bHasBeenAliveAtDelayedTeleport = true;                // overwrite always at setup teleport data, so not used infact
     m_teleport_options = 0;
 
@@ -1479,7 +1480,8 @@ void Player::Update(const uint32 diff)
             m_positionStatusUpdateTimer -= diff;
     }
 
-    if (m_zoneUpdateTimer > 0)
+    // the zone of a near teleport changes at its acknowledgement, though the position is the destination since the order
+    if (m_zoneUpdateTimer > 0 && !IsBeingTeleportedNear())
     {
         if (diff >= m_zoneUpdateTimer)
         {
@@ -1573,6 +1575,14 @@ void Player::Update(const uint32 diff)
 
     if (IsHasDelayedTeleport() && !m_semaphoreTeleport_Near)
         TeleportTo(m_teleport_dest, m_teleport_options);
+    // a teleport delayed by a living player is not done once it died: it is dropped with its transport
+    else if (m_bHasDelayedTeleport && !IsHasDelayedTeleport())
+    {
+        m_bHasDelayedTeleport = false;
+        m_teleportTransport = ObjectGuid();
+        SetSemaphoreTeleportNear(false);
+        SetSemaphoreTeleportFar(false);
+    }
 }
 
 void Player::Heartbeat()
@@ -1972,10 +1982,14 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
         }
     }
 
+    // set when this call carries out a teleport delayed by an earlier call
+    bool const delayedTeleport = m_bHasDelayedTeleport;
+
     // the client takes only the world position of a near teleport of its own player and leaves any transport: onto a transport,
     // whose deck may be moving, the world is reloaded instead and the player created aboard
     GenericTransport* destTransport = transport;
-    if (!destTransport && m_teleportTransport && GetMapId() == mapid)
+    // a delayed teleport is carried out without its transport, kept by the call that delayed it
+    if (!destTransport && delayedTeleport && m_teleportTransport && GetMapId() == mapid)
         destTransport = GetMap()->GetTransport(m_teleportTransport);
     // A passenger already aboard is not joining a new transport.
     bool const nearOntoTransport = destTransport && destTransport != m_transport;
@@ -2005,21 +2019,20 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
             RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_ENTER_WORLD);
 
         GenericTransport* currentTransport = transport;
-        if (!transport && m_teleportTransport)
+        if (!transport && delayedTeleport && m_teleportTransport)
             currentTransport = GetMap()->GetTransport(m_teleportTransport);
+        // the acknowledgement boards the player onto the transport of this teleport only
+        m_teleportTransport = currentTransport ? currentTransport->GetObjectGuid() : ObjectGuid();
         if (currentTransport)
         {
             m_movementInfo.AddMovementFlag(MOVEFLAG_ONTRANSPORT);
             m_movementInfo.t_guid = GetObjectGuid();
             m_movementInfo.t_time = currentTransport->GetPathProgress();
 
-            if (!HasAtClient(currentTransport)) // in sniff, this aggregates all surroundings and sends them at once
-            {
-                AddAtClient(currentTransport);
-                UpdateData data;
-                currentTransport->BuildCreateUpdateBlockForPlayer(data, this);
-                data.SendData(*GetSession());
-            }
+            // in sniff, this aggregates all surroundings and sends them at once
+            UpdateData data;
+            CreateAtClient(currentTransport, data);
+            data.SendData(*GetSession());
         }
 
         // this will be used instead of the current location in SaveToDB
@@ -2030,7 +2043,18 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
         SetSemaphoreTeleportNear(true);
         // near teleport, triggering send MSG_MOVE_TELEPORT_ACK from client at landing
         if (!GetSession()->PlayerLogout())
+        {
             SendTeleportPacket(x, y, z, orientation, currentTransport);
+
+            // the player is at the destination from the order on: the next visibility update sends the objects around it
+            // and removes those of the old place
+            if (IsInWorld())
+            {
+                SetDelayedZoneUpdate(false, 0);
+                SetPosition(x, y, z, orientation, true);
+                GetMap()->AddUpdateCreateObject(this);
+            }
+        }
 
         if (Loot* loot = sLootMgr.GetLoot(this))
             loot->Release(this);
@@ -2050,8 +2074,6 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
         {
             // lets reset near teleport flag if it wasn't reset during chained teleports
             SetSemaphoreTeleportNear(false);
-            // set when this call carries out a teleport delayed by an earlier call
-            bool const delayedTeleport = m_bHasDelayedTeleport;
             // setup delayed teleport flag
             // if teleport spell is casted in Unit::Update() func
             // then we need to delay it until update process will be finished
@@ -2566,6 +2588,10 @@ void Player::SetGameMaster(bool on)
         UpdateArea(m_areaUpdateId);
     }
 
+    // a player not in the world yet gets everything when it enters the map
+    if (!IsInWorld())
+        return;
+
     // update dead corpse sparkles
     UnitList deadUnits;
     MaNGOS::AnyDeadUnitCheck u_check(this);
@@ -2578,7 +2604,7 @@ void Player::SetGameMaster(bool on)
     }
 
     UpdateData data;
-    m_camera.UpdateVisibilityForOwner(true, data);
+    m_camera.UpdateVisibilityForOwner(data);
     data.SendData(*GetSession());
     GetMap()->AddUpdateMovementObject(this);
     UpdateEverything();
@@ -10316,7 +10342,7 @@ Item* Player::_StoreItem(uint16 pos, Item* pItem, uint32 count, bool clone, bool
         if (IsInWorld() && update)
         {
             pItem->RemoveFromWorld();
-            GetMap()->AddUpdateRemoveObject({ GetObjectGuid() }, pItem->GetObjectGuid());
+            ScheduleItemOutOfRange(pItem->GetObjectGuid());
         }
 
         RemoveEnchantmentDurations(pItem);
@@ -10350,87 +10376,56 @@ Item* Player::EquipItem(uint16 pos, Item* pItem, bool update)
     AddEnchantmentDurations(pItem);
     AddItemDurations(pItem);
 
-    uint8 bag = pos >> 8;
     uint8 slot = pos & 255;
 
-    Item* pItem2 = GetItemByPos(bag, slot);
+    VisualizeItem(slot, pItem);
 
-    if (!pItem2)
+    if (IsAlive())
     {
-        VisualizeItem(slot, pItem);
+        ItemPrototype const* pProto = pItem->GetProto();
 
-        if (IsAlive())
+        // item set bonuses applied only at equip and removed at unequip, and still active for broken items
+        if (pProto && pProto->ItemSet)
+            AddItemsSetItem(this, pItem);
+
+        _ApplyItemMods(pItem, slot, true);
+
+        // Weapons and also Totem/Relic/Sigil/etc
+        if (pProto && IsInCombat() && (pProto->Class == ITEM_CLASS_WEAPON || pProto->InventoryType == INVTYPE_RELIC))
         {
-            ItemPrototype const* pProto = pItem->GetProto();
+            if (slot == SLOT_MAIN_HAND)
+                resetAttackTimer(BASE_ATTACK);
+            else if (slot == SLOT_OFF_HAND)
+                resetAttackTimer(OFF_ATTACK);
 
-            // item set bonuses applied only at equip and removed at unequip, and still active for broken items
-            if (pProto && pProto->ItemSet)
-                AddItemsSetItem(this, pItem);
+            uint32 cooldownSpell = SPELL_ID_WEAPON_SWITCH_COOLDOWN_1_5s;
 
-            _ApplyItemMods(pItem, slot, true);
+            if (getClass() == CLASS_ROGUE)
+                cooldownSpell = SPELL_ID_WEAPON_SWITCH_COOLDOWN_1_0s;
 
-            // Weapons and also Totem/Relic/Sigil/etc
-            if (pProto && IsInCombat() && (pProto->Class == ITEM_CLASS_WEAPON || pProto->InventoryType == INVTYPE_RELIC))
-            {
-                if (slot == SLOT_MAIN_HAND)
-                    resetAttackTimer(BASE_ATTACK);
-                else if (slot == SLOT_OFF_HAND)
-                    resetAttackTimer(OFF_ATTACK);
+            SpellEntry const* spellProto = sSpellTemplate.LookupEntry<SpellEntry>(cooldownSpell);
 
-                uint32 cooldownSpell = SPELL_ID_WEAPON_SWITCH_COOLDOWN_1_5s;
-
-                if (getClass() == CLASS_ROGUE)
-                    cooldownSpell = SPELL_ID_WEAPON_SWITCH_COOLDOWN_1_0s;
-
-                SpellEntry const* spellProto = sSpellTemplate.LookupEntry<SpellEntry>(cooldownSpell);
-
-                if (!spellProto)
-                    sLog.outError("Weapon switch cooldown spell %u couldn't be found in Spell.dbc", cooldownSpell);
-                else
-                    AddGCD(*spellProto, 0, true);
-            }
+            if (!spellProto)
+                sLog.outError("Weapon switch cooldown spell %u couldn't be found in Spell.dbc", cooldownSpell);
+            else
+                AddGCD(*spellProto, 0, true);
         }
-
-        if (IsInWorld() && update)
-        {
-            pItem->AddToWorld();
-            GetMap()->AddUpdateCreateObject(pItem);
-        }
-
-        ApplyEquipCooldown(pItem);
-
-        if (slot == EQUIPMENT_SLOT_MAINHAND)
-            UpdateWeaponDependantStats(BASE_ATTACK);
-        else if (slot == EQUIPMENT_SLOT_OFFHAND)
-            UpdateWeaponDependantStats(OFF_ATTACK);
-        else if (slot == EQUIPMENT_SLOT_RANGED)
-            UpdateWeaponDependantStats(RANGED_ATTACK);
     }
-    else
+
+    if (IsInWorld() && update)
     {
-        pItem2->SetCount(pItem2->GetCount() + pItem->GetCount());
-        if (IsInWorld() && update)
-        {
-            GetMap()->AddUpdateCreateObject(pItem2);
-        }
-
-        if (IsInWorld() && update)
-        {
-            pItem->RemoveFromWorld();
-            GetMap()->AddUpdateRemoveObject({ GetObjectGuid() }, pItem->GetObjectGuid());
-        }
-
-        RemoveEnchantmentDurations(pItem);
-        RemoveItemDurations(pItem);
-
-        pItem->SetOwnerGuid(GetObjectGuid());               // prevent error at next SetState in case trade/mail/buy from vendor
-        pItem->SetState(ITEM_REMOVED, this);
-        pItem2->SetState(ITEM_CHANGED, this);
-
-        ApplyEquipCooldown(pItem2);
-
-        return pItem2;
+        pItem->AddToWorld();
+        GetMap()->AddUpdateCreateObject(pItem);
     }
+
+    ApplyEquipCooldown(pItem);
+
+    if (slot == EQUIPMENT_SLOT_MAINHAND)
+        UpdateWeaponDependantStats(BASE_ATTACK);
+    else if (slot == EQUIPMENT_SLOT_OFFHAND)
+        UpdateWeaponDependantStats(OFF_ATTACK);
+    else if (slot == EQUIPMENT_SLOT_RANGED)
+        UpdateWeaponDependantStats(RANGED_ATTACK);
 
     return pItem;
 }
@@ -10590,7 +10585,7 @@ void Player::MoveItemFromInventory(uint8 bag, uint8 slot, bool update)
         if (it->IsInWorld())
         {
             it->RemoveFromWorld();
-            GetMap()->AddUpdateRemoveObject({ GetObjectGuid() }, it->GetObjectGuid());
+            ScheduleItemOutOfRange(it->GetObjectGuid());
         }
     }
 }
@@ -10687,7 +10682,7 @@ void Player::DestroyItem(uint8 bag, uint8 slot, bool update)
         if (IsInWorld() && update)
         {
             pItem->RemoveFromWorld();
-            GetMap()->AddUpdateRemoveObject({ GetObjectGuid() }, pItem->GetObjectGuid());
+            ScheduleItemOutOfRange(pItem->GetObjectGuid());
         }
 
         // pItem->SetOwnerGUID(0);
@@ -11360,7 +11355,7 @@ void Player::RemoveItemFromBuyBackSlot(uint32 slot, bool del)
             pItem->RemoveFromWorld();
             if (del)
             {
-                GetMap()->AddUpdateRemoveObject({ GetObjectGuid() }, pItem->GetObjectGuid());
+                ScheduleItemOutOfRange(pItem->GetObjectGuid());
                 pItem->SetState(ITEM_REMOVED, this);
             }
         }
@@ -14489,6 +14484,7 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder* holder)
             const WorldLocation& _loc = GetBattleGroundEntryPoint();
             SetLocationMapId(_loc.mapid);
             Relocate(_loc.coord_x, _loc.coord_y, _loc.coord_z, _loc.orientation);
+            transGUID = 0;                                  // the saved transport is in the battleground
 
             // We are not in BG anymore
             SetBattleGroundId(0, BATTLEGROUND_TYPE_NONE);
@@ -14506,6 +14502,7 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder* holder)
             const WorldLocation& _loc = GetBattleGroundEntryPoint();
             SetLocationMapId(_loc.mapid);
             Relocate(_loc.coord_x, _loc.coord_y, _loc.coord_z, _loc.orientation);
+            transGUID = 0;                                  // the saved transport is in the battleground
 
             // We are not in BG anymore
             SetBattleGroundId(0, BATTLEGROUND_TYPE_NONE);
@@ -17304,12 +17301,7 @@ void Player::SetRestBonus(float rest_bonus_new)
 
 void Player::ResetMap()
 {
-    for (auto guid : m_clientGUIDs)
-    {
-        if (WorldObject* object = GetMap()->GetWorldObject(guid))
-            object->RemoveClientIAmAt(this);
-    }
-    m_clientGUIDs.clear();
+    ForgetClientObjects();
     Unit::ResetMap();
 }
 
@@ -17323,11 +17315,8 @@ void Player::HandleStealthedUnitsDetection()
 
     WorldObject const* viewPoint = GetCamera().GetBody();
 
-    UpdateData data;
-    std::vector<Unit*> added;
-    for (UnitList::const_iterator i = stealthedUnits.begin(); i != stealthedUnits.end(); ++i)
+    for (Unit* target : stealthedUnits)
     {
-        Unit* target = *i;
         if (target == this)
             continue;
 
@@ -17338,20 +17327,17 @@ void Player::HandleStealthedUnitsDetection()
         {
             if (!hasAtClient)
             {
-                GetMap()->AddCreateAtClientObject(this, target);
-                AddAtClient((*i));
-                ObjectGuid i_guid = (*i)->GetObjectGuid();
-                DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "%s is detected in stealth by player %u. Distance = %f", i_guid.GetString().c_str(), GetGUIDLow(), GetDistance(*i));
+                ScheduleCreate(target);
+                DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "%s is detected in stealth by player %u. Distance = %f", target->GetGuidStr().c_str(), GetGUIDLow(), GetDistance(target));
             }
         }
         else
         {
             if (hasAtClient)
             {
-                GetMap()->AddUpdateRemoveObject({ GetObjectGuid()}, target->GetObjectGuid());
                 if (target->GetTypeId() == TYPEID_UNIT)
                     BeforeVisibilityDestroy(static_cast<Creature*>(target));
-                RemoveAtClient(target);
+                ScheduleOutOfRange(target);
             }
         }
     }
@@ -18158,24 +18144,215 @@ bool Player::CanJoinToBattleground() const
     return true;
 }
 
-void Player::AddAtClient(WorldObject* target)
+// The only place where what the client has of an object changes, with what derives from it: the clients of the object
+// (WorldObject::GetClientGuidsIAmAt) and the lists of changes to write. target may be null for an object no longer in
+// the map.
+void Player::SetClientState(ObjectGuid const& guid, WorldObject* target, ClientObject* clientObject, ClientObjectState state)
 {
-    m_clientGUIDs.insert(target->GetObjectGuid());
-    target->AddClientIAmAt(this);
-}
+    if (state == ClientObjectState::None)
+        m_clientObjects.erase(guid);
+    else
+    {
+        if (!clientObject)
+            clientObject = &m_clientObjects.emplace(guid, ClientObject{state, m_cameraVisit, nullptr}).first->second;
+        clientObject->state = state;
+        clientObject->pendingObject = state == ClientObjectState::CreationPending ? target : nullptr;
 
-void Player::RemoveAtClient(WorldObject* target, bool skipRemovalOfAt)
-{
-    m_clientGUIDs.erase(target->GetObjectGuid());
-    if (!skipRemovalOfAt)
+        if (state == ClientObjectState::CreationPending)
+            m_pendingCreations.push_back(guid);
+        else if (state == ClientObjectState::OutOfRangePending)
+            m_pendingOutOfRange.push_back(guid);
+    }
+
+    if (!target)
+        return;
+
+    if (state == ClientObjectState::CreationPending || state == ClientObjectState::Created)
+        target->AddClientIAmAt(this);
+    else
         target->RemoveClientIAmAt(this);
 }
 
-void Player::DestroyAtClient(WorldObject* target, bool skipRemovalOfAt)
+Player::ClientObject* Player::FindClientObject(ObjectGuid const& guid)
 {
-    target->DestroyForPlayer(this);
+    auto itr = m_clientObjects.find(guid);
+    return itr != m_clientObjects.end() ? &itr->second : nullptr;
+}
 
-    RemoveAtClient(target, skipRemovalOfAt);
+bool Player::HasAtClient(ObjectGuid const& guid) const
+{
+    if (guid == GetObjectGuid())
+        return true;
+
+    auto itr = m_clientObjects.find(guid);
+    return itr != m_clientObjects.end() && itr->second.state != ClientObjectState::OutOfRangePending;
+}
+
+bool Player::IsCreatedAtClient(WorldObject const* u) const
+{
+    if (u == this)
+        return true;
+
+    auto itr = m_clientObjects.find(u->GetObjectGuid());
+    return itr != m_clientObjects.end() && itr->second.state == ClientObjectState::Created;
+}
+
+bool Player::IsCreationPending(WorldObject const* u) const
+{
+    if (m_pendingCreations.empty())
+        return false;
+
+    auto itr = m_clientObjects.find(u->GetObjectGuid());
+    return itr != m_clientObjects.end() && itr->second.state == ClientObjectState::CreationPending;
+}
+
+bool Player::IsItemCreationPending(Item const* item) const
+{
+    return std::find(m_pendingItemCreations.begin(), m_pendingItemCreations.end(), item) != m_pendingItemCreations.end();
+}
+
+void Player::SeeAtClient(WorldObject* target, ClientObject* clientObject)
+{
+    if (!clientObject)
+        SetClientState(target->GetObjectGuid(), target, nullptr, ClientObjectState::CreationPending);
+    // one block per object and packet: an object put out of range in the next packet comes back in the packet after
+    else if (clientObject->state == ClientObjectState::OutOfRangePending)
+        GetMap()->AddUpdateCreateObject(target);
+}
+
+void Player::LoseAtClient(ObjectGuid const& guid, WorldObject* target, ClientObject* clientObject)
+{
+    if (!clientObject)
+        return;
+
+    // a creation not written yet is dropped: the client never gets the object
+    if (clientObject->state == ClientObjectState::CreationPending)
+        SetClientState(guid, target, clientObject, ClientObjectState::None);
+    else if (clientObject->state == ClientObjectState::Created)
+        SetClientState(guid, target, clientObject, ClientObjectState::OutOfRangePending);
+}
+
+void Player::ScheduleCreate(WorldObject* target)
+{
+    if (target != this)
+        SeeAtClient(target, FindClientObject(target->GetObjectGuid()));
+}
+
+void Player::ScheduleOutOfRange(WorldObject* target)
+{
+    LoseAtClient(target->GetObjectGuid(), target, FindClientObject(target->GetObjectGuid()));
+}
+
+void Player::ScheduleOutOfRange(ObjectGuid const& guid)
+{
+    LoseAtClient(guid, nullptr, FindClientObject(guid));
+}
+
+void Player::CreateAtClient(WorldObject* target, UpdateData& data)
+{
+    ObjectGuid const& guid = target->GetObjectGuid();
+    ClientObject* clientObject = FindClientObject(guid);
+    if (clientObject && clientObject->state == ClientObjectState::Created)
+        return;
+
+    // an object whose out of range block is not written yet is still at the client
+    if (!clientObject || clientObject->state == ClientObjectState::CreationPending)
+        target->BuildCreateUpdateBlockForPlayer(data, this);
+    SetClientState(guid, target, clientObject, ClientObjectState::Created);
+}
+
+void Player::RemoveAtClient(WorldObject* target, UpdateData& data)
+{
+    ObjectGuid const& guid = target->GetObjectGuid();
+    ClientObject* clientObject = FindClientObject(guid);
+    if (!clientObject)
+        return;
+
+    if (clientObject->state != ClientObjectState::CreationPending)
+        data.AddOutOfRangeGUID(guid);
+    SetClientState(guid, target, clientObject, ClientObjectState::None);
+}
+
+void Player::DestroyAtClient(WorldObject* target)
+{
+    ObjectGuid const& guid = target->GetObjectGuid();
+    ClientObject* clientObject = FindClientObject(guid);
+    if (!clientObject)
+        return;
+
+    if (clientObject->state != ClientObjectState::CreationPending)
+        target->DestroyForPlayer(this);
+    SetClientState(guid, target, clientObject, ClientObjectState::None);
+}
+
+void Player::ForgetClientObjects()
+{
+    for (auto const& clientObject : m_clientObjects)
+    {
+        WorldObject* object = clientObject.second.pendingObject;
+        if (!object)
+            object = GetMap()->GetWorldObject(clientObject.first);
+        if (object)
+            object->RemoveClientIAmAt(this);
+    }
+    m_clientObjects.clear();
+    m_pendingCreations.clear();
+    m_pendingOutOfRange.clear();
+    m_pendingItemCreations.clear();
+    m_clientUpdate.Clear();
+}
+
+void Player::GetObjectsNotMetByCameraVisit(GuidVector& guids) const
+{
+    for (auto const& clientObject : m_clientObjects)
+        if (clientObject.second.cameraVisit != m_cameraVisit && clientObject.second.state != ClientObjectState::OutOfRangePending)
+            guids.push_back(clientObject.first);
+}
+
+void Player::WriteViewChanges(UpdateData& data)
+{
+    for (ObjectGuid const& guid : m_pendingOutOfRange)
+    {
+        auto itr = m_clientObjects.find(guid);
+        if (itr != m_clientObjects.end() && itr->second.state == ClientObjectState::OutOfRangePending)
+        {
+            data.AddOutOfRangeGUID(guid);
+            m_clientObjects.erase(itr);
+        }
+    }
+    m_pendingOutOfRange.clear();
+
+    if (!m_pendingCreations.empty())
+    {
+        // a transport is created before its passengers, so that a split packet never has a passenger first
+        std::vector<std::pair<uint32, WorldObject*>> creations;
+        creations.reserve(m_pendingCreations.size());
+        for (ObjectGuid const& guid : m_pendingCreations)
+        {
+            ClientObject* clientObject = FindClientObject(guid);
+            if (!clientObject || clientObject->state != ClientObjectState::CreationPending)
+                continue;                                   // dropped, or already met in this list
+
+            WorldObject* object = clientObject->pendingObject;
+            creations.emplace_back(object->GetCarrierDepth(), object);
+            SetClientState(guid, object, clientObject, ClientObjectState::Created);
+        }
+        m_pendingCreations.clear();
+
+        std::stable_sort(creations.begin(), creations.end(), [](auto const& a, auto const& b) { return a.first < b.first; });
+        for (auto const& creation : creations)
+            creation.second->BuildCreateUpdateBlockForPlayer(data, this);
+    }
+
+    for (Item* item : m_pendingItemCreations)
+        item->BuildCreateUpdateBlockForPlayer(data, this);
+    m_pendingItemCreations.clear();
+}
+
+void Player::SendClientUpdate()
+{
+    m_clientUpdate.SendData(*GetSession());
+    m_clientUpdate.Clear();
 }
 
 bool Player::IsVisibleInGridForPlayer(Player* pl) const
@@ -18250,80 +18427,35 @@ void Player::BeforeVisibilityDestroy(Creature* creature)
         static_cast<Pet*>(creature)->Unsummon(PET_SAVE_REAGENTS);
 }
 
-void Player::UpdateVisibilityOf(WorldObject const* viewPoint, WorldObject* target, UpdateData& updateData)
+void Player::UpdateVisibilityOf(WorldObject const* viewPoint, WorldObject* target)
 {
-    if (HasAtClient(target))
+    if (target == this)
+        return;
+
+    ObjectGuid const& guid = target->GetObjectGuid();
+    ClientObject* clientObject = FindClientObject(guid);
+    if (clientObject)
+        clientObject->cameraVisit = m_cameraVisit;
+
+    if (clientObject && clientObject->state != ClientObjectState::OutOfRangePending)
     {
         if (!target->isVisibleForInState(this, viewPoint, true))
         {
-            ObjectGuid t_guid = target->GetObjectGuid();
-
             if (target->IsCreature())
                 BeforeVisibilityDestroy(static_cast<Creature*>(target));
 
-            GetMap()->AddUpdateRemoveObject({ this->GetObjectGuid() }, target->GetObjectGuid());
+            LoseAtClient(guid, target, FindClientObject(guid));
 
-            RemoveAtClient(target);
-
-            DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "UpdateVisibilityOf: %s out of range for player %u. Distance = %f", t_guid.GetString().c_str(), GetGUIDLow(), GetDistance(target));
+            DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "UpdateVisibilityOf: %s out of range for player %u. Distance = %f", guid.GetString().c_str(), GetGUIDLow(), GetDistance(target));
         }
     }
-    else
+    else if (target->isVisibleForInState(this, viewPoint, false))
     {
-        if (target->isVisibleForInState(this, viewPoint, false))
-        {
-            target->BuildCreateUpdateBlockForPlayer(updateData, this);
-            AddAtClient(target);
+        SeeAtClient(target, clientObject);
 
-            DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "UpdateVisibilityOf: %s is visible now for player %u. Distance = %f", target->GetGuidStr().c_str(), GetGUIDLow(), GetDistance(target));
-        }
+        DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "UpdateVisibilityOf: %s is visible now for player %u. Distance = %f", target->GetGuidStr().c_str(), GetGUIDLow(), GetDistance(target));
     }
 }
-
-template<class T>
-inline void UpdateVisibilityOf_helper(GuidSet& s64, T* target)
-{
-    if (!target->GetVisibilityData().IsInfiniteVisibility())
-        s64.insert(target->GetObjectGuid());
-}
-
-template<class T>
-void Player::UpdateVisibilityOf(WorldObject const* viewPoint, T* target, UpdateData& data, WorldObjectSet& visibleNow)
-{
-    if (HasAtClient(target))
-    {
-        if (!target->isVisibleForInState(this, viewPoint, true))
-        {
-            ObjectGuid t_guid = target->GetObjectGuid();
-
-            if (target->GetTypeId() == TYPEID_UNIT)
-                BeforeVisibilityDestroy(dynamic_cast<Creature*>(target));
-
-            target->BuildOutOfRangeUpdateBlock(data);
-            RemoveAtClient(target);
-
-            DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "UpdateVisibilityOf(TemplateV): %s is out of range for %s. Distance = %f", t_guid.GetString().c_str(), GetGuidStr().c_str(), GetDistance(target));
-        }
-    }
-    else
-    {
-        if (target->isVisibleForInState(this, viewPoint, false))
-        {
-            visibleNow.insert(target);
-            target->BuildCreateUpdateBlockForPlayer(data, this);
-            AddAtClient(target);
-
-            DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "UpdateVisibilityOf(TemplateV): %s is visible now for %s. Distance = %f", target->GetGuidStr().c_str(), GetGuidStr().c_str(), GetDistance(target));
-        }
-    }
-}
-
-template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, WorldObject*   target, UpdateData& data, WorldObjectSet& visibleNow);
-template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, Player*        target, UpdateData& data, WorldObjectSet& visibleNow);
-template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, Creature*      target, UpdateData& data, WorldObjectSet& visibleNow);
-template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, Corpse*        target, UpdateData& data, WorldObjectSet& visibleNow);
-template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, GameObject*    target, UpdateData& data, WorldObjectSet& visibleNow);
-template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, DynamicObject* target, UpdateData& data, WorldObjectSet& visibleNow);
 
 void Player::InitPrimaryProfessions()
 {
@@ -18438,6 +18570,14 @@ void Player::SendInitialPacketsAfterAddToMap(bool reconnect)
     SendItemDurations();                                    // must be after add to map
 }
 
+Unit* Player::GetGroupUpdatePet() const
+{
+    // An active charm takes the place of the pet in the pet fields of group member stats
+    if (Unit* charm = GetCharm())
+        return charm;
+    return GetPet();
+}
+
 void Player::SendUpdateToOutOfRangeGroupMembers()
 {
     if (m_groupUpdateMask == GROUP_UPDATE_FLAG_NONE)
@@ -18447,8 +18587,8 @@ void Player::SendUpdateToOutOfRangeGroupMembers()
 
     m_groupUpdateMask = GROUP_UPDATE_FLAG_NONE;
     ResetAuraUpdateMask();
-    if (Unit* charm = GetCharm())
-        charm->ResetAuraUpdateMask();
+    if (Unit* pet = GetGroupUpdatePet())
+        pet->ResetAuraUpdateMask();
 }
 
 void Player::SendTransferAbortedByLockStatus(MapEntry const* mapEntry, AreaTrigger const* at, AreaLockStatus lockStatus, uint32 miscRequirement) const
@@ -18849,12 +18989,17 @@ bool Player::HasQuestForGO(int32 GOId) const
 
 void Player::UpdateForQuestWorldObjects()
 {
-    if (m_clientGUIDs.empty())
+    if (m_clientObjects.empty())
         return;
 
     UpdateData updateData;
-    for (auto m_clientGUID : m_clientGUIDs)
+    for (auto const& clientObject : m_clientObjects)
     {
+        // a creation not written yet carries the values
+        if (clientObject.second.state != ClientObjectState::Created)
+            continue;
+
+        ObjectGuid const& m_clientGUID = clientObject.first;
         if (m_clientGUID.IsGameObject())
         {
             if (GameObject* obj = GetMap()->GetGameObject(m_clientGUID))
@@ -18867,13 +19012,14 @@ void Player::UpdateForQuestWorldObjects()
 
 void Player::UpdateEverything()
 {
-    if (m_clientGUIDs.empty())
+    if (m_clientObjects.empty())
         return;
 
     UpdateData updateData;
-    for (const auto guid : m_clientGUIDs)
-        if (WorldObject* obj = GetMap()->GetWorldObject(guid))
-            obj->BuildForcedValuesUpdateBlockForPlayer(updateData, this);
+    for (auto const& clientObject : m_clientObjects)
+        if (clientObject.second.state == ClientObjectState::Created) // a creation not written yet carries the values
+            if (WorldObject* obj = GetMap()->GetWorldObject(clientObject.first))
+                obj->BuildForcedValuesUpdateBlockForPlayer(updateData, this);
 
     updateData.SendData(*GetSession());
 }
@@ -20465,8 +20611,12 @@ bool Player::IsPreventingDeath() const
 
 void Player::ForceHealAndPowerUpdateInZone()
 {
-    for (auto guid : m_clientGUIDs)
+    for (auto const& clientObject : m_clientObjects)
     {
+        ObjectGuid const& guid = clientObject.first;
+        if (clientObject.second.state == ClientObjectState::OutOfRangePending)
+            continue;
+
         if (guid.IsUnit())
         {
             if (auto unit = GetMap()->GetUnit(guid))
