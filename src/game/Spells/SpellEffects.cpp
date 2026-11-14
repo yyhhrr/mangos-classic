@@ -33,6 +33,7 @@
 #include "Entities/UpdateData.h"
 #include "Globals/SharedDefines.h"
 #include "Entities/Pet.h"
+#include "Groups/Group.h"
 #include "Entities/GameObject.h"
 #include "Entities/GossipDef.h"
 #include "Entities/Creature.h"
@@ -3226,6 +3227,8 @@ void Spell::EffectTameCreature(SpellEffectIndex /*eff_idx*/)
 
     // caster have pet now
     plr->SetPet(pet);
+    if (plr->GetGroup() && plr->GetGroupUpdatePet() == pet)
+        plr->SetGroupUpdateFlag(GROUP_UPDATE_PET);
 
     plr->PetSpellInitialize();
     pet->SetLoading(false);
@@ -3375,6 +3378,8 @@ void Spell::EffectSummonPet(SpellEffectIndex eff_idx)
         NewSummon->SavePetToDB(PET_SAVE_AS_CURRENT, _player);
         ((Player*)m_caster)->PetSpellInitialize();
         NewSummon->SetLoading(false);
+        if (_player->GetGroup() && _player->GetGroupUpdatePet() == NewSummon)
+            _player->SetGroupUpdateFlag(GROUP_UPDATE_PET);
     }
     else
     {

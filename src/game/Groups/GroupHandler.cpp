@@ -717,16 +717,26 @@ void WorldSession::BuildPartyMemberStatsChangedPacket(Player* player, WorldPacke
             data << uint16(0);
     }
 
+    uint64 petAuraMask = 0;
+    if (pet && (mask & (GROUP_UPDATE_FLAG_PET_AURAS | GROUP_UPDATE_FLAG_PET_AURAS_NEGATIVE)))
+    {
+        petAuraMask = pet->GetAuraUpdateMask();
+        // A full pet update must include auras applied before the pet became active.
+        if (mask & GROUP_UPDATE_FLAG_PET_GUID)
+            for (uint32 i = 0; i < MAX_AURAS; ++i)
+                if (pet->GetUInt32Value(UNIT_FIELD_AURA + i))
+                    petAuraMask |= uint64(1) << i;
+    }
+
     if (mask & GROUP_UPDATE_FLAG_PET_AURAS)
     {
         if (pet)
         {
-            const uint64& auramask = pet->GetAuraUpdateMask();
-            data << uint32(auramask);
+            data << uint32(petAuraMask);
             // In all checked pre-2.x data of packets included only positive auras
             for (uint32 i = 0; i < MAX_POSITIVE_AURAS; ++i)
             {
-                if (auramask & (uint64(1) << i))
+                if (petAuraMask & (uint64(1) << i))
                 {
                     data << uint16(pet->GetUInt32Value(UNIT_FIELD_AURA + i));
                 }
@@ -740,11 +750,10 @@ void WorldSession::BuildPartyMemberStatsChangedPacket(Player* player, WorldPacke
     {
         if (pet)
         {
-            const uint64& auramask = pet->GetAuraUpdateMask();
-            data << uint16(auramask >> 32);
+            data << uint16(petAuraMask >> 32);
             for (uint32 i = MAX_POSITIVE_AURAS; i < MAX_AURAS; ++i)
             {
-                if (auramask & (uint64(1) << i))
+                if (petAuraMask & (uint64(1) << i))
                 {
                     data << uint16(pet->GetUInt32Value(UNIT_FIELD_AURA + i));
                 }
