@@ -2011,9 +2011,7 @@ bool ChatHandler::HandleBossDropCommand(char* args)
         if (refresh || !hasSnapshot)
         {
             std::set<uint32> itemIds;
-            if (!creature->IsNoLoot()
-                && !creature->GetSettings().HasFlag(CreatureStaticFlags::CAN_WIELD_LOOT)
-                && !creature->GetSettings().HasFlag(CreatureStaticFlags::DESPAWN_INSTANTLY))
+            if (creature->CanReserveBodyLoot())
                 if (LootTemplate const* loot = LootTemplates_Creature.GetLootFor(creature->GetCreatureInfo()->LootId))
                     loot->CollectGuaranteedItems(itemIds);
             BossLootReward reward;
@@ -2185,9 +2183,7 @@ bool ChatHandler::HandleBossLootChangeCommand(char* args, bool append)
         return false;
     }
 
-    bool normalCorpse = !creature->IsNoLoot()
-        && !creature->GetSettings().HasFlag(CreatureStaticFlags::CAN_WIELD_LOOT)
-        && !creature->GetSettings().HasFlag(CreatureStaticFlags::DESPAWN_INSTANTLY);
+    bool const normalCorpse = creature->CanReserveBodyLoot();
     LootTemplate const* corpseLoot = normalCorpse ? LootTemplates_Creature.GetLootFor(creature->GetCreatureInfo()->LootId) : nullptr;
     bool recognizedBoss = creature->IsWorldBoss()
         || creature->GetSettings().HasFlag(CreatureStaticFlags::BOSS_MOB)

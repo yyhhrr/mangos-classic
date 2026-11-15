@@ -751,6 +751,7 @@ class Creature : public Unit
         virtual void DeleteFromDB();                        // overwrited in Pet
         static void DeleteFromDB(uint32 lowguid, CreatureData const* data);
 
+        bool CanReserveBodyLoot();
         void PrepareBodyLootState(Unit* killer);
         std::vector<uint32> const& GetBossLootItems() const { return m_bossLootItems; }
         void SetBossLootItems(std::vector<uint32> const& itemIds) { m_bossLootItems = itemIds; }

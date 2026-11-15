@@ -1063,38 +1063,49 @@ bool Creature::CanTrainAndResetTalentsOf(Player* pPlayer) const
            && pPlayer->getClass() == GetCreatureInfo()->TrainerClass;
 }
 
+bool Creature::CanReserveBodyLoot()
+{
+    return !IsNoLoot()
+        && !GetSettings().HasFlag(CreatureStaticFlags::DESPAWN_INSTANTLY)
+        && (!GetSettings().HasFlag(CreatureStaticFlags::CAN_WIELD_LOOT)
+            || GetCreatureInfo()->Rank == CREATURE_ELITE_RAREELITE);
+}
+
 void Creature::PrepareBodyLootState(Unit* killer)
 {
     // A reservation belongs to this life only, including kills without a valid loot recipient.
     auto guaranteedItemIds = std::move(m_bossLootItems);
     m_bossLootItems.clear();
 
-    // if can weild loot - already generated on spawn
-    if (GetSettings().HasFlag(CreatureStaticFlags::CAN_WIELD_LOOT) && m_loot != nullptr && m_loot->GetLootType() == LOOT_CORPSE)
+    bool const noLoot = IsNoLoot();
+    bool const canWieldLoot = GetSettings().HasFlag(CreatureStaticFlags::CAN_WIELD_LOOT);
+    Player* looter = nullptr;
+    if (!noLoot)
+        looter = GetSettings().HasFlag(CreatureStaticFlags3::CAN_BE_MULTITAPPED) ? dynamic_cast<Player*>(killer) : GetLootRecipient();
+
+    if (canWieldLoot && m_loot && m_loot->GetLootType() == LOOT_CORPSE)
     {
-        if (!guaranteedItemIds.empty())
-            sLog.outError("BossLoot: consumed %u reserved corpse items for %s without applying them because loot was generated before death.",
-                uint32(guaranteedItemIds.size()), GetGuidStr().c_str());
-        return;
+        if (IsAlive() || !looter || guaranteedItemIds.empty() || !CanReserveBodyLoot())
+        {
+            if (!guaranteedItemIds.empty())
+                sLog.outError("BossLoot: consumed %u reserved corpse items for %s without applying them to pre-generated loot.",
+                    uint32(guaranteedItemIds.size()), GetGuidStr().c_str());
+            return;
+        }
+
+        // The spawn-time loot can belong to a prior recipient. Roll this reserved death for the current looter.
+        SetLootStatus(CREATURE_LOOT_STATUS_NONE, true);
+        RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SKINNABLE);
     }
 
     // loot may already exist (pickpocket case)
     delete m_loot;
     m_loot = nullptr;
 
-    if (IsNoLoot())
+    if (noLoot)
         SetLootStatus(CREATURE_LOOT_STATUS_LOOTED);
-    else
-    {
-        Player* looter = nullptr;
-        if (GetSettings().HasFlag(CreatureStaticFlags3::CAN_BE_MULTITAPPED))
-            looter = dynamic_cast<Player*>(killer);
-        else
-            looter = GetLootRecipient();
-
-        if (looter || GetSettings().HasFlag(CreatureStaticFlags::CAN_WIELD_LOOT))
-            m_loot = new Loot(looter, this, LOOT_CORPSE, guaranteedItemIds);
-    }
+    else if (looter || canWieldLoot)
+        m_loot = new Loot(looter, this, LOOT_CORPSE, guaranteedItemIds);
 
     if (!guaranteedItemIds.empty() && !m_loot)
         sLog.outError("BossLoot: consumed %u reserved corpse items for %s without generating loot (no loot recipient or loot disabled).",
