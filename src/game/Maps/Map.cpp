@@ -788,9 +788,8 @@ void Map::Update(const uint32& t_diff)
     /// update active cells around players and active objects
     resetMarkedCells();
 
-    MaNGOS::ObjectUpdateDiagnostics updateDiagnostics(*this);
-    auto const& objToUpdate = updateDiagnostics.Objects();
-    MaNGOS::ObjectUpdater obj_updater(updateDiagnostics, t_diff);
+    WorldObjectUnSet objToUpdate;
+    MaNGOS::ObjectUpdater obj_updater(objToUpdate, t_diff);
     TypeContainerVisitor<MaNGOS::ObjectUpdater, GridTypeMapContainer  > grid_object_update(obj_updater);    // For creature
     TypeContainerVisitor<MaNGOS::ObjectUpdater, WorldTypeMapContainer > world_object_update(obj_updater);   // For pets
 
@@ -1017,9 +1016,7 @@ void Map::Update(const uint32& t_diff)
         for (m_activeNonPlayersIter = m_activeNonPlayers.begin(); m_activeNonPlayersIter != m_activeNonPlayers.end();)
         {
             // skip not in world
-            auto const sourceSlot = std::addressof(*m_activeNonPlayersIter);
-            WorldObject* obj = *sourceSlot;
-            updateDiagnostics.CheckInput(obj, MaNGOS::ObjectUpdateDiagnostics::Source::ActiveNonPlayer, sourceSlot);
+            WorldObject* obj = *m_activeNonPlayersIter;
 
             // step before processing, in this case if Map::Remove remove next object we correctly
             // step to next-next, and if we step to end() then newly added objects can wait next update.
@@ -1040,7 +1037,7 @@ void Map::Update(const uint32& t_diff)
             }
 #endif
 
-            updateDiagnostics.Insert(obj, MaNGOS::ObjectUpdateDiagnostics::Source::ActiveNonPlayer, sourceSlot);
+            objToUpdate.insert(obj);
 
             // lets update mobs/objects in ALL visible cells around player!
             CellArea area = Cell::CalculateCellArea(obj->GetPositionX(), obj->GetPositionY(), GetVisibilityDistance());
@@ -1107,9 +1104,7 @@ void Map::Update(const uint32& t_diff)
         }
     }
 
-    updateDiagnostics.SealLinks();
-    uint64 count = PerformObjectUpdate(t_diff, objToUpdate, updateDiagnostics);
-    updateDiagnostics.CheckLinks("after-update");
+    uint64 count = PerformObjectUpdate(t_diff, objToUpdate);
 
 #ifdef BUILD_METRICS
     meas.add_field("count", std::to_string(static_cast<int32>(count)));
@@ -1148,13 +1143,12 @@ void Map::Update(const uint32& t_diff)
     m_weatherSystem->UpdateWeathers(t_diff);
 }
 
-uint64 Map::PerformObjectUpdate(uint32 t_diff, WorldObjectUnSet const& objToUpdate, MaNGOS::ObjectUpdateDiagnostics const& diagnostics)
+uint64 Map::PerformObjectUpdate(uint32 t_diff, WorldObjectUnSet& objToUpdate)
 {
     uint64 count = 0;
     // update all objects
-    for (auto it = diagnostics.BeginUpdate(), end = objToUpdate.end(); it != end; diagnostics.Advance(it))
+    for (WorldObject* object : objToUpdate)
     {
-        WorldObject* object = diagnostics.BeforeUpdate(it);
         if (uint32 accumulatedDiff = object->ShouldPerformObjectUpdate(t_diff))
         {
             object->Update(accumulatedDiff);

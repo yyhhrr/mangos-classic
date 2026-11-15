@@ -40,7 +40,7 @@ inline void MaNGOS::VisibleNotifier::Visit(GridRefManager<T>& m)
 inline void MaNGOS::ObjectUpdater::Visit(CreatureMapType& m)
 {
     for (auto& iter : m)
-        Add(iter.getSource(), ObjectUpdateDiagnostics::Source::GridCreatureOrPet, std::addressof(iter));
+        m_objectToUpdateSet.emplace(iter.getSource());
 }
 
 inline void UnitVisitObjectsNotifierWorker(Unit* unitA, Unit* unitB)

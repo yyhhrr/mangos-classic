@@ -29,9 +29,6 @@
 #include "Entities/Unit.h"
 
 #include <memory>
-#include <memory_resource>
-#include <unordered_map>
-#include <utility>
 
 namespace MaNGOS
 {
@@ -100,72 +97,9 @@ namespace MaNGOS
         template<class SKIP> void Visit(GridRefManager<SKIP>&) {}
     };
 
-    class ObjectUpdateDiagnostics
-    {
-        public:
-            using Slot = WorldObject* const*;
-            using Iterator = WorldObjectUnSet::const_iterator;
-            enum class Source { Unknown, ActiveNonPlayer, GridCreatureOrPet, GridGameObject, GridDynamicObject };
-
-            explicit ObjectUpdateDiagnostics(Map const& map) : m_map(map) {}
-            ~ObjectUpdateDiagnostics();
-            WorldObjectUnSet& Objects() { return m_objects; }
-            void CheckInput(WorldObject* object, Source source, void const* sourceSlot) const;
-            void Insert(WorldObject* object, Source source, void const* sourceSlot);
-            void SealLinks();
-            Iterator BeginUpdate() const;
-            WorldObject* BeforeUpdate(Iterator const& it) const;
-            void Advance(Iterator& it) const;
-            void CheckLinks(char const* stage) const;
-
-        private:
-#if defined(_MSVC_STL_VERSION)
-            // The MSVC STL exposes a typed pointer to its underlying list node.
-            using Node = decltype(std::declval<Iterator>()._Ptr);
-            using SampleKey = Node;
-#else
-            using SampleKey = Slot;
-#endif
-
-            struct Sample
-            {
-                WorldObject* before;
-                WorldObject* after;
-                Source source;
-                void const* sourceSlot;
-#if defined(_MSVC_STL_VERSION)
-                Node next = nullptr;
-#endif
-            };
-
-            static SampleKey Key(Iterator const& it);
-            [[noreturn]] void Fail(char const* stage, Sample const& sample, Slot slot, WorldObject* current) const;
-#if defined(_MSVC_STL_VERSION)
-            static Node ReadLink(Node const volatile& link);
-            Node CheckNext(char const* stage, Node node, Sample const& sample) const;
-            [[noreturn]] void FailLink(char const* stage, char const* field, char const* reason, Node node,
-                Sample const& sample, Node expected, Node observed) const;
-#endif
-
-            Map const& m_map;
-            std::pmr::monotonic_buffer_resource m_memory;
-            // Node and element addresses survive rehash. Keep the first insertion's source.
-            std::pmr::unordered_map<SampleKey, Sample> m_samples{&m_memory};
-#if defined(_MSVC_STL_VERSION)
-            Node m_head = nullptr;
-            Node m_tail = nullptr;
-            Sample m_headSample{nullptr, nullptr, Source::Unknown, nullptr};
-#endif
-            // Destroy the set immediately after the final check, while the samples are still live.
-            WorldObjectUnSet m_objects;
-    };
-
     struct ObjectUpdater
     {
-        ObjectUpdater(WorldObjectUnSet& otus, const uint32& diff)
-            : m_objectToUpdateSet(otus), m_timeDiff(diff), m_diagnostics(nullptr) {}
-        ObjectUpdater(ObjectUpdateDiagnostics& diagnostics, const uint32& diff)
-            : m_objectToUpdateSet(diagnostics.Objects()), m_timeDiff(diff), m_diagnostics(&diagnostics) {}
+        ObjectUpdater(WorldObjectUnSet& otus, const uint32& diff) : m_objectToUpdateSet(otus), m_timeDiff(diff) {}
         template<class T> void Visit(GridRefManager<T>& m);
         void Visit(PlayerMapType&) {}
         void Visit(CorpseMapType&) {}
@@ -173,10 +107,8 @@ namespace MaNGOS
         void Visit(CreatureMapType&);
 
         private:
-            void Add(WorldObject* object, ObjectUpdateDiagnostics::Source source, void const* sourceSlot);
             WorldObjectUnSet& m_objectToUpdateSet;
             uint32 m_timeDiff;
-            ObjectUpdateDiagnostics* m_diagnostics;
     };
 
     struct PlayerVisitObjectsNotifier
