@@ -62,7 +62,7 @@ class GridMap;
 class GameObjectModel;
 class WeatherSystem;
 class GenericTransport;
-namespace MaNGOS { struct ObjectUpdater; }
+namespace MaNGOS { class ObjectUpdateDiagnostics; struct ObjectUpdater; }
 class Transport;
 
 // GCC have alternative #pragma pack(N) syntax and old gcc version not support pack(push,N), also any gcc version not support it at some platform
@@ -135,7 +135,7 @@ class Map : public GridRefManager<NGridType>
         void VisitNearbyCellsOf(WorldObject* obj, TypeContainerVisitor<MaNGOS::ObjectUpdater, GridTypeMapContainer> &gridVisitor, TypeContainerVisitor<MaNGOS::ObjectUpdater, WorldTypeMapContainer> &worldVisitor);
         virtual void Update(const uint32&);
 
-        uint64 PerformObjectUpdate(uint32 t_diff, WorldObjectUnSet& objToUpdate);
+        uint64 PerformObjectUpdate(uint32 t_diff, WorldObjectUnSet const& objToUpdate, MaNGOS::ObjectUpdateDiagnostics const& diagnostics);
 
         void MessageBroadcast(Player const*, WorldPacket const&, bool to_self);
         void MessageBroadcast(WorldObject const*, WorldPacket const&);
