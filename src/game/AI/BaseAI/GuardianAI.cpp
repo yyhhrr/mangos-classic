@@ -17,10 +17,45 @@
 */
 
 #include "GuardianAI.h"
+#include "Entities/Pet.h"
 #include "Grids/Cell.h"
 #include "Grids/CellImpl.h"
 #include "Grids/GridNotifiers.h"
 #include "Grids/GridNotifiersImpl.h"
+#include <algorithm>
+#include <iterator>
+
+namespace
+{
+    struct PlayerGuardianSummon
+    {
+        uint32 spellId;
+        uint32 creatureEntry;
+    };
+
+    // These mobile guardians keep the owner follow movement when combat movement is cleared.
+    constexpr PlayerGuardianSummon playerGuardianSummons[] =
+    {
+        {4073, 2678},   // Mechanical Dragonling
+        {4078, 2676},   // Compact Harvest Reaper
+        {5666, 3570},   // Guardian Treant
+        {6084, 3619},   // Ghost Saber
+        {8176, 10656},  // Guardian Felhunter
+        {9515, 6867},   // Tracking Hound
+        {12749, 8615},  // Mithril Dragonling
+        {13049, 8776},  // Emerald Dragon Whelp
+        {13166, 8836},  // Battle Chicken
+        {17490, 11200}, // Summoned Skeleton
+        {18307, 11637}, // Servant of Alexi Barov
+        {18308, 11636}, // Servant of Weldon Barov
+        {19363, 12257}, // Mechanical Yeti
+        {19804, 12473}, // Arcanite Dragonling
+        {22649, 14306}, // Eskhandar
+        {26066, 15720}, // Timbermaw Ancestor
+        {26067, 15721}, // Mechanical Greench
+        {29305, 17003}, // Cinder Elemental
+    };
+}
 
 GuardianAI::GuardianAI(Creature* creature) : CreatureEventAI(creature)
 {
@@ -32,11 +67,6 @@ GuardianAI::GuardianAI(Creature* creature) : CreatureEventAI(creature)
 
     switch (creature->GetUInt32Value(UNIT_CREATED_BY_SPELL))
     {
-        case 9515: // Dog Whistle - Tracking Hound
-            // Preserve owner-follow as the base movement when combat ends.
-            if (creature->GetEntry() == 6867 && owner->IsPlayer())
-                creature->SetDefaultMovementType(FOLLOW_MOTION_TYPE);
-            break;
         case 11939: // Thule Ravenclaw - Imp
             m_followDist = 3.f;
             break;
@@ -52,8 +82,22 @@ void GuardianAI::JustRespawned()
 
     CreatureEventAI::JustRespawned();
 
-    if (GetDefaultMovement() == FOLLOW_MOTION_TYPE)
-        RequestFollow(owner);
+    if (GetDefaultMovement() != FOLLOW_MOTION_TYPE)
+        return;
+
+    if (owner->IsPlayer() && m_creature->IsPet() && static_cast<Pet*>(m_creature)->IsGuardian())
+    {
+        uint32 const summonSpell = m_creature->GetUInt32Value(UNIT_CREATED_BY_SPELL);
+        uint32 const creatureEntry = m_creature->GetEntry();
+        if (std::any_of(std::begin(playerGuardianSummons), std::end(playerGuardianSummons),
+            [summonSpell, creatureEntry](auto const& summon)
+            {
+                return summon.spellId == summonSpell && summon.creatureEntry == creatureEntry;
+            }))
+            m_creature->SetDefaultMovementType(FOLLOW_MOTION_TYPE);
+    }
+
+    RequestFollow(owner);
 }
 
 void GuardianAI::UpdateAI(const uint32 diff)
