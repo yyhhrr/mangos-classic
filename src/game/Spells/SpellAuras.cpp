@@ -1404,17 +1404,6 @@ void Aura::HandleAuraDummy(bool apply, bool Real)
                         caster->CastSpell(target, 11828, TRIGGERED_OLD_TRIGGERED, ((Player*)caster)->GetItemByGuid(this->GetCastItemGuid()), this);
                 }
                 return;
-            case 12774:                                     // (DND) Belnistrasz Idol Shutdown Visual
-            {
-                if (m_removeMode == AURA_REMOVE_BY_DEATH)
-                    return;
-
-                // Idom Rool Camera Shake <- wtf, don't drink while making spellnames?
-                if (Unit* caster = GetCaster())
-                    caster->CastSpell(caster, 12816, TRIGGERED_OLD_TRIGGERED);
-
-                return;
-            }
             case 17189:                                     // Frostwhisper's Lifeblood
                 // Ras Frostwhisper gets back to full health when turned to his human form
                 if (Unit* caster = GetCaster())

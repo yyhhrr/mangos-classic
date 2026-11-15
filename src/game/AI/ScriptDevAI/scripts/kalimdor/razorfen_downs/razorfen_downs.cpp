@@ -345,7 +345,9 @@ struct npc_belnistraszAI : public npc_escortAI
     {
         if (m_eventCompleted)
             return;
-        m_eventCompleted = true; // Clear before world/quest callbacks can re-enter.
+        m_eventCompleted = true; // Guard against re-entry from world or quest callbacks.
+        m_ritualActive = false;
+        m_creature->CastSpell(m_creature, SPELL_IDOL_ROOM_SHAKE, TRIGGERED_OLD_TRIGGERED);
         if (auto instance = static_cast<instance_razorfen_downs*>(m_creature->GetInstanceData()))
             instance->CompleteIdolEvent(); // Seconds-based brazier and persistent world state, even with owner offline.
         for (ObjectGuid guid : m_participants)
@@ -353,15 +355,16 @@ struct npc_belnistraszAI : public npc_escortAI
                 if (IsInitialParticipant(player) && player->GetQuestStatus(QUEST_EXTINGUISHING_THE_IDOL) == QUEST_STATUS_INCOMPLETE &&
                     player->IsAtGroupRewardDistance(m_creature) && !player->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
                     player->AreaExploredOrEventHappens(QUEST_EXTINGUISHING_THE_IDOL);
-        m_creature->RemoveAurasDueToSpell(SPELL_IDOL_SHUTDOWN);
-        DoCastSpellIfCan(m_creature, SPELL_IDOL_ROOM_SHAKE);
-        m_ritualActive = false;
-        RestoreRitualMovement();
-        SetEscortPaused(false);
+        QuestEnd();
+        // Stay at the ritual site until the exit, even if a wave is still in combat.
+        m_creature->ForcedDespawn(5000);
     }
 
     void UpdateEscortAI(uint32 diff) override
     {
+        if (m_eventCompleted)
+            return;
+
         if (m_ritualActive)
         {
             if (m_uiRitualTimer > diff)
@@ -410,12 +413,13 @@ struct npc_belnistraszAI : public npc_escortAI
                     m_uiRitualTimer = 20000;
                     break;
                 case 9:
+                    m_creature->InterruptNonMeleeSpells(false, SPELL_IDOL_SHUTDOWN);
                     DoScriptText(SAY_BELNISTRASZ_FINISH, m_creature, m_creature);
                     m_uiRitualTimer = 3000;
                     break;
                 case 10:
                     CompleteRitual();
-                    break;
+                    return;
                 default:
                     return;
             }
