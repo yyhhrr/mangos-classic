@@ -71,9 +71,10 @@ class WaypointMovementGenerator<Creature>
       public PathMovementBase<Creature, WaypointPath const*>
 {
     public:
-        WaypointMovementGenerator(Creature&) :
+        WaypointMovementGenerator(Creature&, bool stopAtEnd = false) :
             i_nextMoveTime(0), m_scriptTime(0), m_lastReachedWaypoint(0), m_pathId(0),
-            m_pathDuration(0), m_PathOrigin(), m_speedChanged(false), m_forcedMovement(FORCED_MOVEMENT_NONE)
+            m_pathDuration(0), m_PathOrigin(), m_stopAtEnd(stopAtEnd), m_pathFinished(false),
+            m_speedChanged(false), m_forcedMovement(FORCED_MOVEMENT_NONE)
         {}
         ~WaypointMovementGenerator() override { i_path = nullptr; }
         void Initialize(Creature& creature);
@@ -125,6 +126,8 @@ class WaypointMovementGenerator<Creature>
         std::list<int32> m_nodeIndexes;
         WaypointPathOrigin m_PathOrigin;
 
+        const bool m_stopAtEnd;
+        bool m_pathFinished;
         bool m_speedChanged;
         ForcedMovement m_forcedMovement;
 

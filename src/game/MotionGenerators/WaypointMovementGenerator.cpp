@@ -308,6 +308,9 @@ static const uint32 PreSendTime     = 1500;
 // build and send path to next node
 void WaypointMovementGenerator<Creature>::SendNextWayPointPath(Creature& creature)
 {
+    if (m_pathFinished)
+        return;
+
     // make sure to reset spline index as its new path
     m_nodeIndexes.clear();
 
@@ -339,17 +342,26 @@ void WaypointMovementGenerator<Creature>::SendNextWayPointPath(Creature& creatur
     }
 
     // Inform AI that we start to move or reached last node
+    bool const reachedPathEnd = i_path->rbegin()->first == m_lastReachedWaypoint &&
+        (m_stopAtEnd ? m_currentWaypointNode == i_path->begin() : i_path->begin()->first == i_currentNode);
+    bool const stopMovement = m_stopAtEnd && reachedPathEnd;
+    if (stopMovement)
+    {
+        m_pathFinished = true;
+        creature.clearUnitState(UNIT_STAT_ROAMING_MOVE);
+    }
+
     if (creature.AI() && inform)
     {
-        uint32 type = uint32(EXTERNAL_WAYPOINT_MOVE_START);
-        if (i_path->begin()->first == i_currentNode && i_path->rbegin()->first == m_lastReachedWaypoint)
-            type = uint32(EXTERNAL_WAYPOINT_FINISHED_LAST);
-
-        InformAI(creature, type, i_currentNode);
+        InformAI(creature, reachedPathEnd ? EXTERNAL_WAYPOINT_FINISHED_LAST : EXTERNAL_WAYPOINT_MOVE_START,
+            stopMovement ? m_currentWaypointNode->first : i_currentNode);
 
         if (creature.IsDead() || !creature.IsInWorld()) // Might have happened with above calls
             return;
     }
+
+    if (stopMovement)
+        return;
 
     // will contain generated path
     PointsArray genPath;
@@ -373,6 +385,10 @@ void WaypointMovementGenerator<Creature>::SendNextWayPointPath(Creature& creatur
     // add more node until travel time is big enough
     while (!nextNode->delay && travelTime < MinimumPathTime)
     {
+        // Leave room for the escort's final arrival and waiting time before the end callback.
+        if (m_stopAtEnd && std::next(currPointItr) == i_path->end())
+            break;
+
         // we'll add path to node after this one too to make animation more smoother
         auto nodeAfterItr = currPointItr;
 
@@ -411,8 +427,8 @@ void WaypointMovementGenerator<Creature>::SendNextWayPointPath(Creature& creatur
     // send path to client
     m_pathDuration = init.Launch();
 
-    // remove presend time if next node have no delay
-    if (nextNode->delay == 0)
+    // A terminal spline must finish before the escort sends its end notification.
+    if (nextNode->delay == 0 && (!m_stopAtEnd || std::next(currPointItr) != i_path->end()))
         m_pathDuration -= PreSendTime;
     if (i_path->size() == 1)
         m_lastReachedWaypoint = 0;
@@ -432,6 +448,9 @@ void WaypointMovementGenerator<Creature>::InformAI(Creature& creature, uint32 ty
 
 bool WaypointMovementGenerator<Creature>::Update(Creature& creature, const uint32& diff)
 {
+    if (m_pathFinished)
+        return true;
+
     // Waypoint movement can be switched on/off
     // This is quite handy for escort quests and other stuff
     if (creature.hasUnitState(UNIT_STAT_NOT_MOVE))
@@ -610,6 +629,7 @@ bool WaypointMovementGenerator<Creature>::SetNextWaypoint(uint32 pointId)
     i_nextMoveTime.Reset(1);
 
     // Set the point
+    m_pathFinished = false;
     i_currentNode = pointId;
     m_currentWaypointNode = currPoint;
 

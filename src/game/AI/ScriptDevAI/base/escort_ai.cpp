@@ -291,7 +291,7 @@ void npc_escortAI::Start(bool run, const Player* player, const Quest* quest, boo
 
     // Start moving along the path with 2500ms delay
     m_creature->GetMotionMaster()->Clear(false, true);
-    m_creature->GetMotionMaster()->MoveWaypoint(pathId, origin, 2500);
+    m_creature->GetMotionMaster()->MoveWaypoint(pathId, origin, 2500, 0, FORCED_MOVEMENT_NONE, ObjectGuid(), !canLoopPath);
 
     JustStartedEscort();
 }
