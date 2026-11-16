@@ -502,10 +502,13 @@ bool LootItem::AllowedForPlayer(Player const* player, WorldObject const* lootTar
 
 LootSlotType LootItem::GetSlotTypeForSharedLoot(Player const* player, Loot const* loot) const
 {
-    // The master looter has to see conditional items above the threshold in order to
-    // distribute them, even when he does not fulfill the condition himself. The
-    // receiver is still checked in HandleLootMasterGiveOpcode.
-    bool const isMasterForConditionalOverThreshold = loot->m_lootMethod == MASTER_LOOT && !isUnderThreshold &&
+    // allowedGuid holds who may still loot the item, or for a chest who already looted it
+    bool const isStillToLoot = loot->m_isChest ? allowedGuid.empty() : !allowedGuid.empty();
+
+    // The master looter has to see conditional items above the threshold that are still
+    // to loot in order to distribute them, even when he does not fulfill the condition
+    // himself. The receiver is still checked in HandleLootMasterGiveOpcode.
+    bool const isMasterForConditionalOverThreshold = isStillToLoot && loot->m_lootMethod == MASTER_LOOT && !isUnderThreshold &&
                                                     lootItemType == LOOTITEM_TYPE_CONDITIONNAL &&
                                                     player->GetObjectGuid() == loot->m_masterOwnerGuid;
 
@@ -780,8 +783,8 @@ bool GroupLootRoll::TryToStart(Loot& loot, uint32 itemSlot)
             ++playerCount;
         }
 
-        // initialize item prototype
-        m_voteMask = ROLL_VOTE_MASK_ALL;
+        // the client offers pass, need and greed, whatever vote mask it is sent
+        m_voteMask = RollVoteMask(ROLL_VOTE_MASK_PASS | ROLL_VOTE_MASK_NEED | ROLL_VOTE_MASK_GREED);
 
         if (playerCount > 1)                                    // check if more than one player can loot this item
         {
@@ -803,7 +806,11 @@ bool GroupLootRoll::PlayerVote(Player* player, RollVote vote)
 {
     ObjectGuid const& playerGuid = player->GetObjectGuid();
     RollVoteMap::iterator voterItr = m_rollVoteMap.find(playerGuid);
-    if (voterItr == m_rollVoteMap.end())
+    // only a player offered the roll may vote, once, and for one of the offered choices
+    if (voterItr == m_rollVoteMap.end() || voterItr->second.vote != ROLL_NOT_EMITED_YET)
+        return false;
+
+    if (!(m_voteMask & (1 << vote)))
         return false;
 
     voterItr->second.vote = vote;
@@ -1596,9 +1603,13 @@ void Loot::SetPlayerIsLooting(Player* player)
 
 void Loot::SetPlayerIsNotLooting(Player* player)
 {
-    m_playersLooting.erase(player->GetObjectGuid());
-    player->SetLootGuid(ObjectGuid());
-    if (m_lootType == LOOT_CORPSE || m_isChest)
+    bool const wasLooting = m_playersLooting.erase(player->GetObjectGuid()) != 0;
+
+    // the player may be looting another object
+    if (player->GetLootGuid() == m_guidTarget)
+        player->SetLootGuid(ObjectGuid());
+
+    if (wasLooting && (m_lootType == LOOT_CORPSE || m_isChest))
     {
         player->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING);
         if (m_guidTarget.IsGameObject())
@@ -2019,6 +2030,8 @@ void Loot::SetGroupLootRight(Player* player)
         }
 
         // if more than one player have right to loot than we have to handle group method, round robin, roll, etc..
+        // Items under the threshold are reserved to the current looter until he releases the loot. As on retail,
+        // they stay reserved to him even if he logs out without looting.
         if (m_ownerSet.size() > 1 && m_lootMethod != FREE_FOR_ALL)
         {
             // is current looter have right for this loot?
@@ -2508,30 +2521,40 @@ InventoryResult Loot::SendItem(Player* target, LootItem* lootItem, bool sendErro
     }
     else
     {
-        if (IsLootedForAll())
-        {
-            SendReleaseForAll();
-            if (m_isChest)
-            {
-                GameObject* go = (GameObject*)m_lootTarget;
-                uint32 go_min = go->GetGOInfo()->chest.minSuccessOpens;
-                uint32 go_max = go->GetGOInfo()->chest.maxSuccessOpens;
-                // only vein pass this check
-                if (go_min != 0 && go_max > go_min)
-                {
-                    // nothing to do refill is handled in Loot::Release()
-                }
-                else
-                    go->SetLootState(GO_JUST_DEACTIVATED);
-            }
-        }
-        else if (IsLootedFor(target))
-            SendReleaseFor(target);
+        if (!ReleaseIfLootedForAll() && IsLootedFor(target) && m_playersLooting.find(target->GetObjectGuid()) != m_playersLooting.end())
+            SendReleaseFor(target);                                   // a roll winner or a master loot receiver may not be looting this
         ForceLootAnimationClientUpdate();
     }
     if (playerGotItem)
         PersistForInstance();
     return msg;
+}
+
+// Closes every loot window and finishes the loot target once nobody has anything left to loot.
+// It cannot wait for a CMSG_LOOT_RELEASE: the client does not send one on SMSG_LOOT_RELEASE_RESPONSE,
+// nor at all when the last item is won by roll while nobody is looting.
+bool Loot::ReleaseIfLootedForAll()
+{
+    if (!IsLootedForAll())
+        return false;
+
+    SendReleaseForAll();
+    if (m_isChest)
+    {
+        GameObject* go = (GameObject*)m_lootTarget;
+        uint32 go_min = go->GetGOInfo()->chest.minSuccessOpens;
+        uint32 go_max = go->GetGOInfo()->chest.maxSuccessOpens;
+        // only vein pass this check
+        if (go_min != 0 && go_max > go_min)
+        {
+            // nothing to do refill is handled in Loot::Release()
+        }
+        else
+            go->SetLootState(GO_JUST_DEACTIVATED);
+    }
+    else if (m_lootType == LOOT_CORPSE && m_lootTarget && m_lootTarget->GetTypeId() == TYPEID_UNIT)
+        static_cast<Creature*>(m_lootTarget)->SetLootStatus(CREATURE_LOOT_STATUS_LOOTED);
+    return true;
 }
 
 std::tuple<uint32, uint32, uint32> Loot::GetQualifiedWeapons()

@@ -2835,7 +2835,7 @@ void Unit::SendMeleeAttackStop(Unit const* victim) const
         data << victim->GetPackGUID();
     else
         data << PackedGuid();
-    data << uint32(IsDead() ? 1 : 0);
+    data << uint32(victim && IsDead() ? 1 : 0);             // the client uses it only with a victim
     if (victim)
         SendMessageToSet(data, true);
     else if (IsPlayer())

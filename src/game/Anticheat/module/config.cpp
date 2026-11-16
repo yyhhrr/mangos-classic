@@ -32,7 +32,8 @@ static const char *sCheatTypeNames[] =
     "TeleportFar",
     "FixedZ",
     "BadOrderAck",
-    "Warden"
+    "Warden",
+    "CharmedAction"
 };
 
 static_assert(sizeof(sCheatTypeNames) / sizeof(sCheatTypeNames[0]) == NamreebAnticheat::CheatType::CHEATS_COUNT,
@@ -140,7 +141,7 @@ void AnticheatConfig::loadConfigSettings()
     setConfig(CONFIG_BOOL_AC_MOVEMENT_CHEAT_BAD_FALL_RESET_ENABLED, "Movement.BadFallReset.Enable", true);
     setConfig(CONFIG_UINT32_AC_MOVEMENT_CHEAT_BAD_FALL_RESET_THRESHOLD, "Movement.BadFallReset.Threshold", 1);
     setConfig(CONFIG_UINT32_AC_MOVEMENT_CHEAT_BAD_FALL_RESET_PENALTY, "Movement.BadFallReset.Penalty", CHEAT_ACTION_INFO_LOG | CHEAT_ACTION_PROMPT_LOG | CHEAT_ACTION_KICK);
-    setConfig(CONFIG_BOOL_AC_WARDEN_ENABLED, "Warden.Enable", false);
+    setConfig(CONFIG_BOOL_AC_WARDEN_ENABLED, "Warden.Enable", true);
     m_wardenModuleDir = GetStringDefault("Warden.ModuleDir", "warden_modules");
 }
 

@@ -424,6 +424,7 @@ class Loot
             m_isChecked(false), m_isChest(false), m_isChanged(false), m_isFakeLoot(false)
         {}
         void Clear();
+        bool ReleaseIfLootedForAll();
         void SendReleaseFor(ObjectGuid const& guid);
         void SendReleaseFor(Player* plr);
         void SendReleaseForAll();
