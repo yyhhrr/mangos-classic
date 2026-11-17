@@ -30,6 +30,7 @@
 
 class Player;
 class Group;
+class Map;
 class LootStore;
 class WorldObject;
 class LootTemplate;
@@ -57,7 +58,10 @@ enum LootSlotType
     LOOT_SLOT_VIEW    = 1,                                  // can be only view (ignore any loot attempts)
     LOOT_SLOT_MASTER  = 2,                                  // can be looted only master (error message)
     LOOT_SLOT_REQS    = 3,                                  // can't be looted (error message about missing reqs)
-    MAX_LOOT_SLOT_TYPE                                      // custom, use for mark skipped from show items
+    MAX_LOOT_SLOT_TYPE,                                     // custom, use for mark skipped from show items
+
+    // item seen by a player who may not take it: the client has no locked slot type, the item shows as being rolled for
+    LOOT_SLOT_LOCKED = LOOT_SLOT_VIEW
 };
 
 enum RollVote
@@ -174,25 +178,29 @@ class GroupLootRoll
     public:
         typedef std::unordered_map<ObjectGuid, PlayerRollVote> RollVoteMap;
 
-        GroupLootRoll() : m_rollVoteMap(ROLL_VOTE_MASK_ALL), m_isStarted(false), m_lootItem(nullptr), m_loot(nullptr), m_itemSlot(0), m_voteMask(), m_endTime(0)
+        GroupLootRoll() : m_rollVoteMap(ROLL_VOTE_MASK_ALL), m_isStarted(false), m_lootItem(nullptr), m_loot(nullptr), m_lootMap(nullptr), m_itemSlot(0), m_voteMask(), m_endTime(0)
         {}
         ~GroupLootRoll();
 
         bool TryToStart(Loot& loot, uint32 itemSlot);
         bool PlayerVote(Player* player, RollVote vote);
         bool UpdateRoll();
+        void ResendStartRollTo(Player const* player) const;
 
     private:
         void SendStartRoll();
+        void SendStartRollTo(Player const* player, uint32 countdown) const;
         void SendAllPassed();
         void SendRoll(ObjectGuid const& targetGuid, uint32 rollNumber, uint32 rollType);
         void SendLootRollWon(ObjectGuid const& targetGuid, uint32 rollNumber, RollVote rollType);
         void Finish(RollVoteMap::const_iterator& winnerItr);
         bool AllPlayerVoted(RollVoteMap::const_iterator& winnerItr);
+        Player* GetPlayerOnLootMap(ObjectGuid const& playerGuid) const;
         RollVoteMap           m_rollVoteMap;
         bool                  m_isStarted;
         LootItem*             m_lootItem;
         Loot*                 m_loot;
+        Map*                  m_lootMap;                    // the loot target may have left its map when the roll ends with it
         uint32                m_itemSlot;
         RollVoteMask          m_voteMask;
         time_t                m_endTime;
@@ -228,6 +236,7 @@ struct LootItem
     uint32       displayID;
     LootItemType lootItemType;
     GuidSet      allowedGuid;                                       // player's that have right to loot this item
+    ObjectGuid   rollWinnerGuid;                                    // a roll winner who could not receive the item, the only one who may take it
     uint32       lootSlot;                                          // the slot number will be send to client
     uint16       conditionId       : 16;                            // allow compiler pack structure
     uint8        count             : 8;
@@ -385,7 +394,7 @@ class Loot
         bool AutoStore(Player* player, bool broadcast = false, uint32 bag = NULL_BAG, uint32 slot = NULL_SLOT);
         bool CanLoot(Player const* player);
         void ShowContentTo(Player* plr);
-        void Update();
+        bool Update();                                      // returns true while a group roll is running
         bool IsChanged() const { return m_isChanged; }
         void Release(Player* player);
         void GetLootItemsListFor(Player* player, LootItemList& lootList);
@@ -405,6 +414,7 @@ class Loot
         std::string GetInstanceSnapshot() const { return SerializeInstanceSnapshot(); }
         LootItem* GetLootItemInSlot(uint32 itemSlot);
         GroupLootRoll* GetRollForSlot(uint32 itemSlot);
+        void ResendStartRollsTo(Player const* player) const;  // to a voter arriving on the map of the loot
         InventoryResult SendItem(Player* target, uint32 itemSlot);
         InventoryResult SendItem(Player* target, LootItem* lootItem, bool sendError = true);
         WorldObject const* GetLootTarget() const { return m_lootTarget; }

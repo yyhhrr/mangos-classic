@@ -921,13 +921,7 @@ bool FollowMovementGenerator::Move(Unit& owner, float x, float y, float z)
             if (!i_target->IsWithinLOS(x, y, (z + owner.GetCollisionHeight()), true))
                 i_target->GetPosition(x, y, z);
 
-        if (owner.GetTypeId() == TYPEID_PLAYER)
-            owner.NearTeleportTo(x, y, z, o);
-        else
-        {
-            owner.GetMap()->CreatureRelocation(static_cast<Creature*>(&owner), x, y, z, o);
-            owner.SendHeartBeat();
-        }
+        owner.NearTeleportTo(x, y, z, o);
 
         return false;
     }
@@ -1154,8 +1148,8 @@ void FollowMovementGenerator::HandleFinalizedMovement(Unit& owner)
     _reachTarget(owner);
 }
 
-FormationMovementGenerator::FormationMovementGenerator(FormationSlotDataSPtr& sData, bool main) :
-    FollowMovementGenerator(*sData->GetMaster(), sData->GetDistance(), sData->GetDistance(), main, false, false),
+FormationMovementGenerator::FormationMovementGenerator(Unit& owner, FormationSlotDataSPtr& sData, bool main) :
+    FollowMovementGenerator(owner, *sData->GetMaster(), sData->GetDistance(), sData->GetDistance(), main, false, false),
     m_slot(sData), m_lastAngle(0), m_headingToMaster(false)
 {
     if (!this->i_path)

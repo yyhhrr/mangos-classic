@@ -14444,17 +14444,6 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder* holder)
 
     _LoadBoundInstances(holder->GetResult(PLAYER_LOGIN_QUERY_LOADBOUNDINSTANCES));
 
-    if (!IsPositionValid())
-    {
-        sLog.outError("%s have invalid coordinates (X: %f Y: %f Z: %f O: %f). Teleport to default race/class locations.",
-                      guid.GetString().c_str(), GetPositionX(), GetPositionY(), GetPositionZ(), GetOrientation());
-        RelocateToHomebind();
-
-        transGUID = 0;
-
-        m_movementInfo.ClearTransportData();
-    }
-
     _LoadBGData(holder->GetResult(PLAYER_LOGIN_QUERY_LOADBGDATA));
 
     if (m_bgData.bgInstanceID)                              // saved in BattleGround
@@ -14511,6 +14500,18 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder* holder)
             // remove outdated DB data in DB
             _SaveBGData();
         }
+    }
+
+    // the position is either the saved one or the battleground entry point
+    if (!MapManager::IsValidMapCoord(GetMapId(), GetPositionX(), GetPositionY(), GetPositionZ(), GetOrientation()))
+    {
+        sLog.outError("%s have invalid coordinates (Map: %u X: %f Y: %f Z: %f O: %f). Teleport to default race/class locations.",
+                      guid.GetString().c_str(), GetMapId(), GetPositionX(), GetPositionY(), GetPositionZ(), GetOrientation());
+        RelocateToHomebind();
+
+        transGUID = 0;
+
+        m_movementInfo.ClearTransportData();
     }
 
     if (transGUID != 0)
@@ -18570,6 +18571,10 @@ void Player::SendInitialPacketsAfterAddToMap(bool reconnect)
 
     SendEnchantmentDurations();                             // must be after add to map
     SendItemDurations();                                    // must be after add to map
+
+    // a voter arriving on the map during a group loot roll gets it again
+    if (IsInWorld())
+        GetMap()->ResendLootRollsTo(this);
 }
 
 Unit* Player::GetGroupUpdatePet() const
