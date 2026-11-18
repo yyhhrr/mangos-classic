@@ -741,7 +741,7 @@ ChatCommand* ChatHandler::getCommandTable()
 
     static ChatCommand bossLootCommandTable[] =
     {
-        { "set",            SEC_GAMEMASTER,     false, &ChatHandler::HandleBossLootSetCommand, BossLootUtf8(u8"用法：.bossloot set <物品ID或物品链接> [更多物品ID或链接]。为选中活着的目标替换下一次指定掉落；仅能选择其原有掉落或关联奖励箱中的物品，可在战斗中设置。"), nullptr },
+        { "set",            SEC_GAMEMASTER,     false, &ChatHandler::HandleBossLootSetCommand, BossLootUtf8(u8"用法：.bossloot set <物品ID或物品链接> [更多物品ID或链接]。设置选中目标下一次掉落要包含的物品，从本次掉落中替换同品质物品，保留原件数。仅能选择目标或关联奖励箱原有掉落表中的物品。"), nullptr },
         { "add",            SEC_GAMEMASTER,     false, &ChatHandler::HandleBossLootAddCommand, BossLootUtf8(u8"用法：.bossloot add <物品ID或物品链接>。在当前预约中追加一种物品，可在战斗中使用。"), nullptr },
         { "remove",         SEC_GAMEMASTER,     false, &ChatHandler::HandleBossLootRemoveCommand, BossLootUtf8(u8"用法：.bossloot remove <物品ID或物品链接>。从当前预约中移除一种物品，可在战斗中使用。"), nullptr },
         { "show",           SEC_GAMEMASTER,     false, &ChatHandler::HandleBossLootShowCommand, BossLootUtf8(u8"用法：.bossloot show。查看选中目标的尸体和关联奖励箱预约。"), nullptr },
@@ -948,7 +948,7 @@ ChatCommand* ChatHandler::getCommandTable()
         { "cast",           SEC_ADMINISTRATOR,  false, nullptr,                                           "", castCommandTable     },
         { "character",      SEC_GAMEMASTER,     true,  nullptr,                                           "", characterCommandTable},
         { "bossloot",       SEC_GAMEMASTER,     false, nullptr,                                           "", bossLootCommandTable },
-        { "bd",             SEC_GAMEMASTER,     false, &ChatHandler::HandleBossDropCommand, BossLootUtf8(u8"选中目标：.bd <多个物品ID或链接> 替换指定清单；.bd 查看；.bd add/remove <物品ID或链接> 追加/移除；.bd clear 清空；.bd list [页码] 列出可选物品；.bd pick <多个编号> 按刚列出的编号替换清单。仅本次有效，可在战斗中修改。"), nullptr },
+        { "bd",             SEC_GAMEMASTER,     false, &ChatHandler::HandleBossDropCommand, BossLootUtf8(u8"选中目标：.bd <多个物品ID或链接> 替换指定清单；.bd 查看；.bd add/remove <物品ID或链接> 追加/移除；.bd clear 清空；.bd list [页码] 列出可选物品；.bd pick <多个编号> 按刚列出的编号替换清单。本次有可替换的同品质掉落格时，按原件数更换。可在战斗中修改。"), nullptr },
         { "channel",        SEC_MODERATOR,      false, nullptr,                                           "", channelCommandTable  },
         { "debug",          SEC_MODERATOR,      true,  nullptr,                                           "", debugCommandTable    },
         { "dummy",          SEC_GAMEMASTER,     false, nullptr,                                           "", dummyCommandTable    },

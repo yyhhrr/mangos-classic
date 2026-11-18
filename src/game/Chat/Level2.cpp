@@ -2297,7 +2297,7 @@ bool ChatHandler::HandleBossLootChangeCommand(char* args, bool append)
 
     PSendSysMessage(BossLootUtf8(u8"已%s %s（NPC %u）的下一次指定掉落，共 %u 种物品。"),
         append ? BossLootUtf8(u8"追加并更新") : BossLootUtf8(u8"设置"), creature->GetNameForLocaleIdx(GetSessionDbLocaleIndex()), creature->GetEntry(), uint32(requestedItems.size()));
-    SendSysMessage(BossLootUtf8(u8"仅本次有效；随机已出的指定物品不重复补入。任务条件照常。实际超过16格时优先保留指定物品；重启或地图卸载取消预设。"));
+    SendSysMessage(BossLootUtf8(u8"仅本次有效。已掉落的指定物品会保留，其余指定物品只会替换可用的同品质掉落格，件数保持原样。任务和拾取条件照常，重启或地图卸载会取消预约。"));
     m_session->SendNotification(BossLootUtf8(u8"已指定 %u 种物品，仅本次有效。"), uint32(requestedItems.size()));
     HandleBossLootShowCommand(nullptr);
     sLog.outCommand(GetAccountId(), "BossLoot %s: actor=%s account=%u target=%s entry=%u map=%u instance=%u corpseItems=[%s] chestEntry=%u chestItems=[%s] nextOnly=1",

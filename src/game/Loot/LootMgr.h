@@ -23,6 +23,7 @@
 #include "Entities/ObjectGuid.h"
 #include "Globals/SharedDefines.h"
 
+#include <functional>
 #include <vector>
 #include "Entities/Bag.h"
 
@@ -301,7 +302,7 @@ class LootTemplate
         void Process(Loot& loot, Player const* lootOwner, bool rate, LootStatsData* lootStatsData = nullptr) const;
 
         // Validate actual item/reference/group reachability; optional runtime loot also checks eligibility.
-        LootStoreItem const* FindGuaranteedItem(uint32 itemId, Loot const* loot = nullptr, Player const* lootOwner = nullptr) const;
+        LootStoreItem const* FindGuaranteedItem(uint32 itemId, Loot const* loot = nullptr, Player const* lootOwner = nullptr, std::function<bool(LootStoreItem const&)> const& accepts = {}) const;
         // Conservative upper bound, saturated at the client limit (16).
         uint32 GetMaxLootItems() const;
         void CollectGuaranteedItems(std::set<uint32>& itemIds) const;
@@ -317,8 +318,8 @@ class LootTemplate
         void Verify(LootStore const& lootstore, uint32 id) const;
         bool CheckLootRefs(LootIdSet* ref_set, LootIdSet& prevRefs);
     private:
-        LootStoreItem const* FindGuaranteedItem(uint32 itemId, Loot const* loot, Player const* lootOwner, std::set<LootTemplate const*> ancestors) const;
-        LootStoreItem const* FindGuaranteedItemInList(LootStoreItemList const& entries, bool grouped, uint32 itemId, Loot const* loot, Player const* lootOwner, std::set<LootTemplate const*> const& ancestors) const;
+        LootStoreItem const* FindGuaranteedItem(uint32 itemId, Loot const* loot, Player const* lootOwner, std::function<bool(LootStoreItem const&)> const& accepts, std::set<LootTemplate const*> ancestors) const;
+        LootStoreItem const* FindGuaranteedItemInList(LootStoreItemList const& entries, bool grouped, uint32 itemId, Loot const* loot, Player const* lootOwner, std::function<bool(LootStoreItem const&)> const& accepts, std::set<LootTemplate const*> const& ancestors) const;
         uint32 GetMaxLootItems(std::set<LootTemplate const*> ancestors) const;
         uint32 GetMaxLootItemsInList(LootStoreItemList const& entries, bool grouped, std::set<LootTemplate const*> const& ancestors) const;
         void CollectGuaranteedItems(std::set<uint32>& itemIds, std::set<LootTemplate const*> ancestors) const;
@@ -448,8 +449,6 @@ class Loot
         void GenerateMoneyLoot(uint32 minAmount, uint32 maxAmount);
         bool FillLoot(uint32 loot_id, LootStore const& store, Player* lootOwner, bool personal, bool noEmptyError = false, std::vector<uint32> const& guaranteedItemIds = {});
         bool ApplyGuaranteedItems(std::vector<uint32> const& itemIds, LootTemplate const& lootTemplate, Player* lootOwner);
-        void ReserveGuaranteedItems(std::vector<uint32> const& itemIds, LootTemplate const& lootTemplate, Player* lootOwner);
-        void ClearGuaranteedItems();
         std::string SerializeInstanceSnapshot() const;
         bool RestoreInstanceSnapshot(std::string const& snapshot);
         void PersistForInstance();
@@ -465,9 +464,6 @@ class Loot
         Item*            m_itemTarget;
         ObjectGuid       m_guidTarget;
 
-        // Temporary state for one FillLoot call; only eligible missing IDs reserve slots.
-        std::set<uint32> m_reservedLootItems;
-        Player const*   m_guaranteedLootOwner = nullptr;
         LootItemList     m_lootItems;                     // store of the items contained in loot
         uint32           m_gold;                          // amount of money contained in loot
         uint32           m_maxSlot;                       // used to increment slot index and get total items count
