@@ -1647,6 +1647,14 @@ void Loot::SetPlayerIsNotLooting(Player* player)
 
 void Loot::Release(Player* player)
 {
+    // a loot is released only by a player who opened it, who may no longer be looting it: the client releases
+    // a loot it emptied even after the server closed its window
+    if (!IsLootOpenedBy(player->GetObjectGuid()))
+    {
+        SetPlayerIsNotLooting(player);
+        return;
+    }
+
     bool updateClients = false;
     if (player->GetObjectGuid() == m_currentLooterGuid)
     {
@@ -1668,6 +1676,10 @@ void Loot::Release(Player* player)
         {
             GameObject* go = (GameObject*) m_lootTarget;
             SetPlayerIsNotLooting(player);
+
+            // a deactivated object is done with its loot, which it drops at its next update or when it restocks
+            if (go->GetLootState() == GO_JUST_DEACTIVATED || go->GetLootState() == GO_NOT_READY)
+                break;
 
             // GO is mineral vein? so it is not removed after its looted
             switch (go->GetGoType())
@@ -1719,7 +1731,9 @@ void Loot::Release(Player* player)
 
                     if (refill)
                     {
-                        // this vein have can be now refilled, as this is a vein no other player are looting it so no need to send them release
+                        // another player may have opened the emptied vein before this release; Clear() drops the looters
+                        // without ending their looting, so release them first
+                        SendReleaseForAll();
                         Clear();                // clear the content and reset some values
                         FillLoot(go->GetGOInfo()->GetLootId(), LootTemplates_Gameobject, player, false); // refill the loot with new items
                         go->SetLootState(GO_READY);
@@ -1730,6 +1744,10 @@ void Loot::Release(Player* player)
                     break;
                 }
                 case GAMEOBJECT_TYPE_FISHINGHOLE:
+                    // a catch activates the fishing hole, which counts one use at the first release of that catch
+                    if (go->GetLootState() != GO_ACTIVATED)
+                        break;
+
                     // The fishing hole used once more
                     go->AddUse();                           // if the max usage is reached, will be despawned at next tick
                     if (go->GetUseCount() >= urand(go->GetGOInfo()->fishinghole.minSuccessOpens, go->GetGOInfo()->fishinghole.maxSuccessOpens))
@@ -1892,9 +1910,6 @@ void Loot::ShowContentTo(Player* plr)
             sLog.outError("Loot::ShowContentTo()> %s is trying to open a loot without credential", plr->GetGuidStr().c_str());
             return;
         }
-
-        // add this player to the the openers list of this loot
-        m_playersOpened.emplace(plr->GetObjectGuid());
     }
     else
     {
@@ -1907,6 +1922,9 @@ void Loot::ShowContentTo(Player* plr)
         if (m_ownerSet.find(plr->GetObjectGuid()) == m_ownerSet.end())
             SetGroupLootRight(plr);
     }
+
+    // add this player to the openers list of this loot
+    m_playersOpened.emplace(plr->GetObjectGuid());
 
     if (m_lootMethod != NOT_GROUP_TYPE_LOOT && !m_isChecked)
         GroupCheck();
@@ -2745,6 +2763,7 @@ void Loot::Clear()
         delete m_lootItem;
     m_lootItems.clear();
     m_playersLooting.clear();
+    m_playersOpened.clear();
     m_gold = 0;
     m_ownerSet.clear();
     m_masterOwnerGuid.Clear();

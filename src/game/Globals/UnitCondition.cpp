@@ -205,6 +205,7 @@ std::shared_ptr<std::map<int32, UnitConditionEntry>> UnitConditionMgr::Load()
         }
 
         unitConditions->emplace(conditionEntry.Id, conditionEntry);
+        ++Count;
     }
     while (result->NextRow());
 

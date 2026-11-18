@@ -842,7 +842,7 @@ void MapPersistentStateManager::CleanupInstances()
 
 void MapPersistentStateManager::PackInstances() const
 {
-    // this routine renumbers player instance associations in such a way so they start from 1 and go up
+    // this routine renumbers player instance associations in such a way so they start from FIRST_INSTANCE_ID and go up
     // TODO: this can be done a LOT more efficiently
 
     // obtain set of all associations
@@ -865,9 +865,13 @@ void MapPersistentStateManager::PackInstances() const
     BarGoLink bar(InstanceSet.size() + 1);
     bar.step();
 
-    uint32 InstanceNumber = 2; //Reserve instance id 1 for ebonhold GetTeam() == ALLIANCE.
-    // we do assume std::set is sorted properly on integer value
-    for (uint32 i : InstanceSet)
+    // instances are renumbered by increasing id (std::set is sorted), so the new id of an instance is never held by one
+    // not renumbered yet; the ids below FIRST_INSTANCE_ID are renumbered last, after the highest new id
+    std::vector<uint32> instanceIds(InstanceSet.lower_bound(FIRST_INSTANCE_ID), InstanceSet.end());
+    instanceIds.insert(instanceIds.end(), InstanceSet.begin(), InstanceSet.lower_bound(FIRST_INSTANCE_ID));
+
+    uint32 InstanceNumber = FIRST_INSTANCE_ID;
+    for (uint32 i : instanceIds)
     {
         if (i != InstanceNumber)
         {
@@ -984,8 +988,8 @@ void MapPersistentStateManager::_ResetOrWarnAll(uint32 mapid, bool warn, uint32 
 
         // delete them from the DB, even if not loaded
         CharacterDatabase.BeginTransaction();
-        CharacterDatabase.PExecute("DELETE FROM character_instance USING character_instance LEFT JOIN instance ON character_instance.instance = id WHERE map = '%u'", mapid);
-        CharacterDatabase.PExecute("DELETE FROM group_instance USING group_instance LEFT JOIN instance ON group_instance.instance = id WHERE map = '%u'", mapid);
+        CharacterDatabase.PExecute("DELETE FROM character_instance WHERE instance IN (SELECT id FROM instance WHERE map = '%u')", mapid);
+        CharacterDatabase.PExecute("DELETE FROM group_instance WHERE instance IN (SELECT id FROM instance WHERE map = '%u')", mapid);
         CharacterDatabase.PExecute("DELETE FROM instance WHERE map = '%u'", mapid);
         CharacterDatabase.CommitTransaction();
 

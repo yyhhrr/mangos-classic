@@ -898,7 +898,7 @@ bool GameObject::LoadFromDB(uint32 dbGuid, Map* map, uint32 newGuid, uint32 forc
     if (map->GetGameObject(dbGuid))
         return false;
 
-    uint32 entry = forcedEntry ? forcedEntry : data->id;
+    uint32 entry = forcedEntry;
     // uint32 map_id = data->mapid;                         // already used before call
     float x = data->posX;
     float y = data->posY;
@@ -917,9 +917,13 @@ bool GameObject::LoadFromDB(uint32 dbGuid, Map* map, uint32 newGuid, uint32 forc
     if (groupEntry)
     {
         group = static_cast<GameObjectGroup*>(map->GetSpawnManager().GetSpawnGroup(groupEntry->Id));
-        if (!entry)
+        // a member loaded with its grid takes the entry its group chose for it, as when the group spawns it
+        if (!entry && group)
             entry = group->GetGuidEntry(dbGuid);
     }
+
+    if (!entry)
+        entry = data->id;
 
     if (uint32 randomEntry = sObjectMgr.GetRandomGameObjectEntry(dbGuid))
         entry = randomEntry;
@@ -1935,14 +1939,15 @@ void GameObject::Use(Unit* user, SpellEntry const* spellInfo)
 
             spellId = info->spellcaster.spellId;
 
-            onSuccess = [&]()
+            // called after the switch, once the spell has started: capture by value only
+            onSuccess = [this, charges = info->spellcaster.charges]()
             {
                 AddUse();
 
                 // Previously we locked all spellcasters on use with no real indication why
                 // or timeout of the locking. Now only doing it on it being consumed to prevent further use.
                 // spellcaster GOs like city portals should never be locked
-                if (info->spellcaster.charges > 0 && !GetUseCount())
+                if (charges > 0 && !GetUseCount())
                     SetUInt32Value(GAMEOBJECT_FLAGS, GO_FLAG_LOCKED);
             };
             break;

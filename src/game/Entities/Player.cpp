@@ -1569,8 +1569,9 @@ void Player::Update(const uint32 diff)
     else
         m_createdInstanceClearTimer -= diff;
 
+    // a pet beyond the visibility distance is unsummoned, unless its owner possesses it (Eyes of the Beast)
     Pet* pet = GetPet();
-    if (pet && !pet->IsWithinDistInMap(this, GetMap()->GetVisibilityDistance()) && (GetCharmGuid() && (pet->GetObjectGuid() != GetCharmGuid())))
+    if (pet && !pet->IsWithinDistInMap(this, GetMap()->GetVisibilityDistance()) && pet->GetObjectGuid() != GetCharmGuid())
         pet->Unsummon(PET_SAVE_REAGENTS, this);
 
     if (IsHasDelayedTeleport() && !m_semaphoreTeleport_Near)
@@ -1916,9 +1917,9 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
     if (!InBattleGround() && mEntry->IsBattleGround())
         return false;
 
-    // Get MapEntrance trigger if teleport to other -nonBG- map
+    // Get MapEntrance trigger if teleport to other -nonBG- map, or for a player outside the world, who enters the map anew
     bool assignedAreaTrigger = false;
-    if (GetMapId() != mapid && !mEntry->IsBattleGround() && !at)
+    if ((GetMapId() != mapid || !IsInWorld()) && !mEntry->IsBattleGround() && !at)
     {
         at = sObjectMgr.GetMapEntranceTrigger(mapid);
         assignedAreaTrigger = true;
@@ -1928,7 +1929,7 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
     if (at)
     {
         uint32 miscRequirement = 0;
-        AreaLockStatus lockStatus = GetAreaTriggerLockStatus(at, miscRequirement);
+        AreaLockStatus lockStatus = GetAreaTriggerLockStatus(at, miscRequirement, !IsInWorld());
         if (lockStatus != AREA_LOCKSTATUS_OK)
         {
             SendTransferAbortedByLockStatus(mEntry, at, lockStatus, miscRequirement);
@@ -1994,7 +1995,8 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
     // A passenger already aboard is not joining a new transport.
     bool const nearOntoTransport = destTransport && destTransport != m_transport;
 
-    if (GetMapId() == mapid && !m_transport && !nearOntoTransport &&
+    // A player already removed from its map needs the far path to re-enter the world, even on the same map id.
+    if (GetMapId() == mapid && !m_transport && !nearOntoTransport && IsInWorld() &&
         (!directSummonMap || directSummonMap == GetMap()))
     {
         // lets reset far teleport flag if it wasn't reset during chained teleports
@@ -8536,7 +8538,8 @@ Item* Player::GetItemByGuid(ObjectGuid guid) const
                     if (pItem->GetObjectGuid() == guid)
                         return pItem;
 
-    for (int i = BANK_SLOT_ITEM_START; i < BANK_SLOT_ITEM_END; ++i)
+    // bank slots and bank bags, whose contents are searched below
+    for (int i = BANK_SLOT_ITEM_START; i < BANK_SLOT_BAG_END; ++i)
         if (Item* pItem = GetItemByPos(INVENTORY_SLOT_BAG_0, i))
             if (pItem->GetObjectGuid() == guid)
                 return pItem;
@@ -8807,7 +8810,8 @@ bool Player::HasItemCount(uint32 item, uint32 count, bool inBankAlso) const
 
     if (inBankAlso)
     {
-        for (int i = BANK_SLOT_ITEM_START; i < BANK_SLOT_ITEM_END; ++i)
+        // bank slots and bank bags, whose contents are counted below
+        for (int i = BANK_SLOT_ITEM_START; i < BANK_SLOT_BAG_END; ++i)
         {
             Item* pItem = GetItemByPos(INVENTORY_SLOT_BAG_0, i);
             if (pItem && pItem->GetEntry() == item && !pItem->IsInTrade())
