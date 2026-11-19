@@ -735,6 +735,7 @@ UnitAI* GetAI_npc_ogron(Creature* pCreature)
 enum
 {
     EMOTE_SURRENDER             = -1000415,
+    EMOTE_HENDEL_FLEES          = 8225,
 
     QUEST_MISSING_DIPLO_PT16    = 1324,
     FACTION_HOSTILE             = 168,                      // guessed, may be different
@@ -743,6 +744,9 @@ enum
     NPC_JAINA                   = 4968,                     // appears once hendel gives up
     NPC_TERVOSH                 = 4967,
     NPC_PAINED                  = 4965,
+    SPAWN_HENDEL                = 31274,
+    POINT_HENDEL_RETREAT        = 1,
+    RELAY_HENDEL_DEPARTURE      = 496701,
 
     SPELL_TELEPORT_VISUAL       = 12980,
     SPELL_TELEPORT              = 7079
@@ -774,11 +778,26 @@ const OutroSpawnLocation lOutroSpawns[] =
     }
 };
 
-const float fSentryFleePoint[] {-2917.56f, -3329.90f, 30.37f};
+constexpr float hendelRetreatX = -2895.49f;
+constexpr float hendelRetreatY = -3350.66f;
+constexpr float hendelRetreatZ = 31.2543f;
+
+struct HendelSentry
+{
+    uint32 spawnGuid;
+    uint32 escapePath;
+    int32 escapeText;
+};
+
+constexpr HendelSentry hendelSentries[] =
+{
+    {31271, 1, 7325},
+    {31268, 2, 7342}
+};
 
 struct npc_private_hendelAI : public ScriptedAI
 {
-    enum Phase { IDLE, FIGHT, OUTRO, COMPLETE, ABORTED };
+    enum Phase { IDLE, FIGHT, RETREAT, OUTRO, COMPLETE, ABORTED };
 
     explicit npc_private_hendelAI(Creature* creature) : ScriptedAI(creature),
         m_originalDeathPrevention(creature->IsPreventingDeath()) { Reset(); }
@@ -795,6 +814,7 @@ struct npc_private_hendelAI : public ScriptedAI
     uint32 m_playerTimer = 1000;
     uint32 m_rendTimer = 20000;
     uint32 m_outroTimer = 0;
+    uint32 m_retreatTimer = 0;
     bool m_cleaningActors = false;
     bool m_outroFailed = false;
 
@@ -830,8 +850,7 @@ struct npc_private_hendelAI : public ScriptedAI
     void Reset() override
     {
         SetDeathPrevention(m_phase == FIGHT || m_originalDeathPrevention);
-        // EnterEvadeMode is part of a successful surrender. Preserve its round
-        // and actors; ordinary fight evades instead retire the admitted round.
+        // The scripted retreat leaves combat with the quest round still active.
         if (m_phase == FIGHT)
             m_outroFailed = true;
     }
@@ -855,7 +874,7 @@ struct npc_private_hendelAI : public ScriptedAI
         if (!player || !player->IsAlive() || player->GetMap() != m_creature->GetMap() ||
             player->GetQuestStatus(QUEST_MISSING_DIPLO_PT16) != QUEST_STATUS_INCOMPLETE)
             return false;
-        if ((m_phase == FIGHT || m_phase == OUTRO) && IsParticipant(player))
+        if ((m_phase == FIGHT || m_phase == RETREAT || m_phase == OUTRO) && IsParticipant(player))
             return true;
         if (!CanStart())
             return false;
@@ -863,22 +882,22 @@ struct npc_private_hendelAI : public ScriptedAI
         m_playerGuid = player->GetObjectGuid();
         m_phase = FIGHT;
         m_outroFailed = false;
-        m_spawnFailures = m_retryTimer = m_outroTimer = 0;
+        m_spawnFailures = m_retryTimer = m_outroTimer = m_retreatTimer = 0;
         m_playerTimer = 1000;
         m_rendTimer = 20000;
         SetDeathPrevention(true);
         SetReactState(REACT_AGGRESSIVE);
         m_creature->SetFactionTemporary(FACTION_HOSTILE, TEMPFACTION_RESTORE_COMBAT_STOP | TEMPFACTION_RESTORE_RESPAWN);
         AttackStart(player);
-        CreatureList sentries;
-        GetCreatureListWithEntryInGrid(sentries, m_creature, NPC_SENTRY, 40.0f);
-        for (Creature* sentry : sentries)
-            if (sentry->IsAlive())
-            {
-                m_sentries.insert(sentry->GetObjectGuid());
-                sentry->SetFactionTemporary(FACTION_HOSTILE, TEMPFACTION_RESTORE_COMBAT_STOP | TEMPFACTION_RESTORE_RESPAWN);
-                sentry->AI()->AttackStart(player);
-            }
+        if (m_creature->GetMapId() == 1 && m_creature->GetDbGuid() == SPAWN_HENDEL)
+            for (HendelSentry const& guard : hendelSentries)
+                if (Creature* sentry = m_creature->GetMap()->GetCreature(guard.spawnGuid))
+                    if (sentry->GetEntry() == NPC_SENTRY && sentry->IsAlive())
+                    {
+                        m_sentries.insert(sentry->GetObjectGuid());
+                        sentry->SetFactionTemporary(FACTION_HOSTILE, TEMPFACTION_RESTORE_COMBAT_STOP | TEMPFACTION_RESTORE_RESPAWN);
+                        sentry->AI()->AttackStart(player);
+                    }
         return true;
     }
 
@@ -893,7 +912,7 @@ struct npc_private_hendelAI : public ScriptedAI
         CleanupOutro(true);
         RestoreSentries();
         m_playerGuid.Clear();
-        m_retryTimer = m_outroTimer = 0;
+        m_retryTimer = m_outroTimer = m_retreatTimer = 0;
         m_creature->ClearTemporaryFaction();
         m_creature->ForcedDespawn();
     }
@@ -905,7 +924,7 @@ struct npc_private_hendelAI : public ScriptedAI
         m_playerGuid.Clear();
         m_phase = IDLE;
         m_outroFailed = false;
-        m_spawnFailures = m_retryTimer = m_outroTimer = 0;
+        m_spawnFailures = m_retryTimer = m_outroTimer = m_retreatTimer = 0;
         m_playerTimer = 1000;
         SetDeathPrevention(m_originalDeathPrevention);
         ScriptedAI::JustRespawned();
@@ -915,8 +934,7 @@ struct npc_private_hendelAI : public ScriptedAI
     {
         if (m_phase == COMPLETE)
         {
-            // DB496701 intentionally removes Hendel at15s while the summoned
-            // actors keep speaking until124s. Do not cut that scene short.
+            // Hendel leaves before the summoned actors' departure scene.
             CleanupOutro(false);
             m_sentries.clear();
             m_playerGuid.Clear();
@@ -928,8 +946,7 @@ struct npc_private_hendelAI : public ScriptedAI
 
     void AttackedBy(Unit* attacker) override
     {
-        if (m_phase != OUTRO && m_phase != COMPLETE && m_phase != ABORTED &&
-            !m_creature->GetVictim() && attacker && m_creature->CanAttackNow(attacker))
+        if ((m_phase == IDLE || m_phase == FIGHT) && !m_creature->GetVictim() && attacker && m_creature->CanAttackNow(attacker))
             AttackStart(attacker);
     }
 
@@ -956,6 +973,23 @@ struct npc_private_hendelAI : public ScriptedAI
     {
         if (m_phase == OUTRO && OwnedOutro(actor) && actor->GetObjectGuid() == m_tervoshGuid)
             m_outroFailed = true;
+    }
+
+    void DismissSentries()
+    {
+        for (HendelSentry const& guard : hendelSentries)
+        {
+            Creature* sentry = m_creature->GetMap()->GetCreature(guard.spawnGuid);
+            if (!sentry || !m_sentries.count(sentry->GetObjectGuid()) || !sentry->IsAlive())
+                continue;
+
+            sentry->RemoveAllAurasOnEvade();
+            sentry->CombatStop(true);
+            sentry->GetMotionMaster()->Clear(false);
+            DoBroadcastText(guard.escapeText, sentry);
+            sentry->GetMotionMaster()->MoveWaypoint(guard.escapePath, PATH_FROM_ENTRY, 0, 0, FORCED_MOVEMENT_RUN, ObjectGuid(), true);
+            sentry->ForcedDespawn(15000); // Fallback if the escape route is interrupted.
+        }
     }
 
     void SpawnOutro()
@@ -991,28 +1025,44 @@ struct npc_private_hendelAI : public ScriptedAI
         m_spawnFailures = m_retryTimer = 0;
         m_outroTimer = 190000;
         tervosh->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER | UNIT_NPC_FLAG_GOSSIP);
-        tervosh->GetMotionMaster()->MoveWaypoint(0); // Keep the existing DB496701 speech and7079 credit.
+        tervosh->GetMotionMaster()->MoveWaypoint(0);
+        // Time the departure from the party's appearance, independently of the approach.
+        m_creature->GetMap()->ScriptsStart(SCRIPT_TYPE_RELAY, RELAY_HENDEL_DEPARTURE, tervosh, tervosh);
+        DismissSentries();
     }
 
     void Surrender()
     {
         if (m_phase != FIGHT || m_outroFailed)
             return;
-        m_phase = OUTRO;
+        m_phase = RETREAT;
+        m_retreatTimer = 20 * IN_MILLISECONDS;
         SetDeathPrevention(m_originalDeathPrevention);
-        DoScriptText(EMOTE_SURRENDER, m_creature);
-        EnterEvadeMode();
+        DoBroadcastText(EMOTE_HENDEL_FLEES, m_creature, nullptr, CHAT_TYPE_TEXT_EMOTE);
         SetReactState(REACT_PASSIVE);
-        for (ObjectGuid guid : m_sentries)
-            if (Creature* sentry = m_creature->GetMap()->GetCreature(guid))
-                if (sentry->GetEntry() == NPC_SENTRY && sentry->IsAlive())
-                {
-                    sentry->RemoveAllAurasOnEvade();
-                    sentry->CombatStop(true);
-                    sentry->SetWalk(false);
-                    sentry->GetMotionMaster()->MovePoint(0, fSentryFleePoint[0], fSentryFleePoint[1], fSentryFleePoint[2]);
-                    sentry->ForcedDespawn(4000);
-                }
+        EnterEvadeMode();
+        m_creature->GetMotionMaster()->Clear(false);
+        m_creature->GetMotionMaster()->MovePoint(POINT_HENDEL_RETREAT, hendelRetreatX, hendelRetreatY, hendelRetreatZ, FORCED_MOVEMENT_RUN);
+    }
+
+    bool ReachedRetreatPoint() const
+    {
+        return m_creature->IsWithinDist3d(hendelRetreatX, hendelRetreatY, hendelRetreatZ, 2.0f);
+    }
+
+    void MovementInform(uint32 type, uint32 point) override
+    {
+        if (m_phase == RETREAT && type == POINT_MOTION_TYPE && point == POINT_HENDEL_RETREAT && ReachedRetreatPoint())
+            m_retreatTimer = 0;
+    }
+
+    void FinishRetreat()
+    {
+        m_phase = OUTRO;
+        m_creature->GetMotionMaster()->Clear(false);
+        m_creature->GetMotionMaster()->MoveIdle();
+        m_creature->SetUInt32Value(UNIT_NPC_EMOTESTATE, EMOTE_STATE_STUN);
+        DoScriptText(EMOTE_SURRENDER, m_creature);
         SpawnOutro();
     }
 
@@ -1038,7 +1088,7 @@ struct npc_private_hendelAI : public ScriptedAI
 
     void DamageTaken(Unit*, uint32& damage, DamageEffectType, SpellEntry const*) override
     {
-        if (m_phase == OUTRO || m_phase == COMPLETE)
+        if (m_phase == RETREAT || m_phase == OUTRO || m_phase == COMPLETE)
         {
             damage = 0;
             return;
@@ -1055,7 +1105,7 @@ struct npc_private_hendelAI : public ScriptedAI
 
     void UpdateAI(uint32 diff) override
     {
-        if ((m_phase == FIGHT || m_phase == OUTRO) && m_outroFailed)
+        if ((m_phase == FIGHT || m_phase == RETREAT || m_phase == OUTRO) && m_outroFailed)
         {
             AbortRound();
             return;
@@ -1063,7 +1113,7 @@ struct npc_private_hendelAI : public ScriptedAI
         if (m_phase == FIGHT && m_creature->IsAlive() &&
             uint64(m_creature->GetHealth()) * 100 <= uint64(m_creature->GetMaxHealth()) * 20)
             Surrender();
-        if (m_phase == FIGHT || m_phase == OUTRO)
+        if (m_phase == FIGHT || m_phase == RETREAT || m_phase == OUTRO)
         {
             if (m_playerTimer <= diff)
             {
@@ -1076,6 +1126,16 @@ struct npc_private_hendelAI : public ScriptedAI
             }
             else
                 m_playerTimer -= diff;
+        }
+        if (m_phase == RETREAT)
+        {
+            if (m_retreatTimer > diff)
+                m_retreatTimer -= diff;
+            else if (ReachedRetreatPoint())
+                FinishRetreat();
+            else
+                AbortRound();
+            return;
         }
         if (m_phase == OUTRO)
         {
@@ -1102,7 +1162,7 @@ struct npc_private_hendelAI : public ScriptedAI
         }
         if (m_phase != FIGHT || !m_creature->SelectHostileTarget() || !m_creature->GetVictim())
             return;
-        if (m_creature->GetMapId() == 1 && m_creature->GetDbGuid() == 31274 &&
+        if (m_creature->GetMapId() == 1 && m_creature->GetDbGuid() == SPAWN_HENDEL &&
             !m_creature->GetBeneficiaryPlayer() && CanExecuteCombatAction())
         {
             if (m_rendTimer <= diff)
