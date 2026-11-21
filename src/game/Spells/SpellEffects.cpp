@@ -895,33 +895,6 @@ void Spell::EffectDummy(SpellEffectIndex eff_idx)
 
                     return;
                 }
-                case 23138:                                 // Gate of Shazzrah
-                {
-                    if (!unitTarget || m_scriptValue > 0)
-                        return;
-                    m_scriptValue = 1; // mark as executed
-
-                    std::vector<Unit*> possibleTargets;
-                    possibleTargets.reserve(m_UniqueTargetInfo.size());
-                    for (TargetList::const_iterator itr = m_UniqueTargetInfo.begin(); itr != m_UniqueTargetInfo.end(); ++itr)
-                    {
-                        // Skip Non-Players
-                        if (!itr->targetGUID.IsPlayer())
-                            continue;
-
-                        if (Unit* target = m_caster->GetMap()->GetPlayer(itr->targetGUID))
-                            possibleTargets.push_back(target);
-                    }
-
-                    // Cast Siphon Soul channeling spell
-                    if (!possibleTargets.empty())
-                        possibleTargets[urand(0, possibleTargets.size() - 1)]->CastSpell(m_caster, 23139, TRIGGERED_NONE);
-
-                    if (m_caster->AI())
-                        m_caster->AI()->SendAIEvent(AI_EVENT_CUSTOM_A, m_caster, m_caster);
-
-                    return;
-                }
                 case 23173:                                 // Brood Affliction - TODO: Rework to use proper targeting
                 {
                     // This spell selects one brood affliction amongst five and apply it onto 15 targets
@@ -1698,6 +1671,11 @@ void Spell::EffectTeleportUnits(SpellEffectIndex eff_idx)
         unitTarget->NearTeleportTo(position.x, position.y, position.z, orientation, unitTarget == m_caster,
             m_spellInfo->EffectImplicitTargetA[eff_idx] == TARGET_LOCATION_DATABASE ||
             m_spellInfo->EffectImplicitTargetB[eff_idx] == TARGET_LOCATION_DATABASE);
+
+        // Gate of Shazzrah: relocation can fall back to the spawn point if the destination is unavailable.
+        if (m_spellInfo->Id == 23139 && unitTarget->AI() && unitTarget->IsInWorld() &&
+            unitTarget->GetPosition().GetDistance(position) == 0.0f)
+            unitTarget->AI()->SendAIEvent(AI_EVENT_CUSTOM_A, m_caster, unitTarget);
     }
     else if (unitTarget->IsPlayer())
     {
