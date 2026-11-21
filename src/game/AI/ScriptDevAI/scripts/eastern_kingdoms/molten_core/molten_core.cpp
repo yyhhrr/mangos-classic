@@ -38,6 +38,7 @@ struct EncounterSpawnGroup
 {
     uint32 encounter;
     uint32 groupId;
+    bool removeCorpsesOnReset = false;
 };
 
 constexpr EncounterSpawnGroup ENCOUNTER_SPAWN_GROUPS[] =
@@ -45,16 +46,18 @@ constexpr EncounterSpawnGroup ENCOUNTER_SPAWN_GROUPS[] =
     {TYPE_LUCIFRON, 4090000},
     {TYPE_GEHENNAS, 4090002},
     {TYPE_GARR, 4090001},
-    {TYPE_SULFURON, GROUP_SULFURON},
+    {TYPE_SULFURON, GROUP_SULFURON, true},
+    {TYPE_GOLEMAGG, GROUP_GOLEMAGG, true},
 };
 
-void ResetSulfuronGroup(CreatureGroup& group)
+void RestoreEncounterGroup(CreatureGroup& group, bool removeCorpses)
 {
     // A loaded corpse occupies its spawn slot until it is removed.
-    for (SpawnGroupDbGuids const& member : group.GetGroupEntry().DbGuids)
-        if (Creature* creature = group.GetMap().GetCreature(member.DbGuid))
-            if (!creature->IsAlive())
-                creature->RemoveCorpse();
+    if (removeCorpses)
+        for (SpawnGroupDbGuids const& member : group.GetGroupEntry().DbGuids)
+            if (Creature* creature = group.GetMap().GetCreature(member.DbGuid))
+                if (!creature->IsAlive())
+                    creature->RemoveCorpse();
 
     group.ClearRespawnTimes();
 }
@@ -228,12 +231,7 @@ void instance_molten_core::Update(uint32 /*diff*/)
             continue;
 
         if (group)
-        {
-            if (encounterGroup.encounter == TYPE_SULFURON)
-                ResetSulfuronGroup(*group);
-            else
-                group->ClearRespawnTimes();
-        }
+            RestoreEncounterGroup(*group, encounterGroup.removeCorpsesOnReset);
         SetData(encounterGroup.encounter, NOT_STARTED);
     }
 }
@@ -485,11 +483,11 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
         case TYPE_GEDDON:
         case TYPE_SHAZZRAH:
         case TYPE_SULFURON:
+        case TYPE_GOLEMAGG:
             if (GetData(uiType) == SPECIAL || (GetData(uiType) == DONE && uiData != SPECIAL))
                 return;
             [[fallthrough]];
         case TYPE_MAGMADAR:
-        case TYPE_GOLEMAGG:
             m_auiEncounter[uiType] = uiData;
             if (uiData == DONE)
             {
@@ -519,7 +517,7 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
         DoSpawnMajordomoIfCan(false);
 
     // Restore dead group members if the instance unloads during a pull.
-    bool const saveGroupReset = (uiType == TYPE_GEHENNAS || uiType == TYPE_GARR || uiType == TYPE_SULFURON) &&
+    bool const saveGroupReset = (uiType == TYPE_GEHENNAS || uiType == TYPE_GARR || uiType == TYPE_SULFURON || uiType == TYPE_GOLEMAGG) &&
                                 (uiData == IN_PROGRESS || uiData == NOT_STARTED);
     if (uiData == DONE || uiData == SPECIAL || saveGroupReset)
     {
@@ -673,10 +671,11 @@ void instance_molten_core::ApplyEventReset(uint32 eventId, std::string const& da
         m_auiEncounter[i] = states[i];
     m_strInstData = data;
 
-    if (eventId == TYPE_SULFURON)
-        if (SpawnGroup* group = instance->GetSpawnManager().GetSpawnGroup(GROUP_SULFURON))
-            if (CreatureGroup* creatures = group->GetCreatureGroup())
-                ResetSulfuronGroup(*creatures);
+    for (auto const& encounterGroup : ENCOUNTER_SPAWN_GROUPS)
+        if (encounterGroup.encounter == eventId && encounterGroup.removeCorpsesOnReset)
+            if (SpawnGroup* group = instance->GetSpawnManager().GetSpawnGroup(encounterGroup.groupId))
+                if (CreatureGroup* creatures = group->GetCreatureGroup())
+                    RestoreEncounterGroup(*creatures, true);
 
     if (eventId >= TYPE_MAGMADAR && eventId <= TYPE_SULFURON)
     {
