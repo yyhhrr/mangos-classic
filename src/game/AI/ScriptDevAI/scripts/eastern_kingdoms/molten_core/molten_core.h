@@ -42,6 +42,8 @@ enum
     NPC_FLAMEWAKER_HEALER       = 11663,                    // Majordomo
     NPC_FLAMEWAKER_ELITE        = 11664,                    // Majordomo
 
+    GROUP_SULFURON              = 4090003,
+
     GO_LAVA_STEAM               = 178107,
     GO_LAVA_SPLASH              = 178108,
     GO_CACHE_OF_THE_FIRE_LORD   = 179703,

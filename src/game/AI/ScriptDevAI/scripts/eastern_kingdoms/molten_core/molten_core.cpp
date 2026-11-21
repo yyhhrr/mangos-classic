@@ -45,7 +45,19 @@ constexpr EncounterSpawnGroup ENCOUNTER_SPAWN_GROUPS[] =
     {TYPE_LUCIFRON, 4090000},
     {TYPE_GEHENNAS, 4090002},
     {TYPE_GARR, 4090001},
+    {TYPE_SULFURON, GROUP_SULFURON},
 };
+
+void ResetSulfuronGroup(CreatureGroup& group)
+{
+    // A loaded corpse occupies its spawn slot until it is removed.
+    for (SpawnGroupDbGuids const& member : group.GetGroupEntry().DbGuids)
+        if (Creature* creature = group.GetMap().GetCreature(member.DbGuid))
+            if (!creature->IsAlive())
+                creature->RemoveCorpse();
+
+    group.ClearRespawnTimes();
+}
 
 constexpr size_t CORE_HOUND_PACK_SIZE = 5;
 constexpr auto CORE_HOUND_REVIVE_DELAY = std::chrono::seconds(10);
@@ -216,7 +228,12 @@ void instance_molten_core::Update(uint32 /*diff*/)
             continue;
 
         if (group)
-            group->ClearRespawnTimes();
+        {
+            if (encounterGroup.encounter == TYPE_SULFURON)
+                ResetSulfuronGroup(*group);
+            else
+                group->ClearRespawnTimes();
+        }
         SetData(encounterGroup.encounter, NOT_STARTED);
     }
 }
@@ -467,12 +484,12 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
         case TYPE_GARR:
         case TYPE_GEDDON:
         case TYPE_SHAZZRAH:
+        case TYPE_SULFURON:
             if (GetData(uiType) == SPECIAL || (GetData(uiType) == DONE && uiData != SPECIAL))
                 return;
             [[fallthrough]];
         case TYPE_MAGMADAR:
         case TYPE_GOLEMAGG:
-        case TYPE_SULFURON:
             m_auiEncounter[uiType] = uiData;
             if (uiData == DONE)
             {
@@ -502,7 +519,7 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
         DoSpawnMajordomoIfCan(false);
 
     // Restore dead group members if the instance unloads during a pull.
-    bool const saveGroupReset = (uiType == TYPE_GEHENNAS || uiType == TYPE_GARR) &&
+    bool const saveGroupReset = (uiType == TYPE_GEHENNAS || uiType == TYPE_GARR || uiType == TYPE_SULFURON) &&
                                 (uiData == IN_PROGRESS || uiData == NOT_STARTED);
     if (uiData == DONE || uiData == SPECIAL || saveGroupReset)
     {
@@ -655,6 +672,11 @@ void instance_molten_core::ApplyEventReset(uint32 eventId, std::string const& da
     for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
         m_auiEncounter[i] = states[i];
     m_strInstData = data;
+
+    if (eventId == TYPE_SULFURON)
+        if (SpawnGroup* group = instance->GetSpawnManager().GetSpawnGroup(GROUP_SULFURON))
+            if (CreatureGroup* creatures = group->GetCreatureGroup())
+                ResetSulfuronGroup(*creatures);
 
     if (eventId >= TYPE_MAGMADAR && eventId <= TYPE_SULFURON)
     {
