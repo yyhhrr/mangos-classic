@@ -465,12 +465,12 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
             break;
         case TYPE_GEHENNAS:
         case TYPE_GARR:
+        case TYPE_GEDDON:
             if (GetData(uiType) == SPECIAL || (GetData(uiType) == DONE && uiData != SPECIAL))
                 return;
             [[fallthrough]];
         case TYPE_MAGMADAR:
         case TYPE_SHAZZRAH:
-        case TYPE_GEDDON:
         case TYPE_GOLEMAGG:
         case TYPE_SULFURON:
             m_auiEncounter[uiType] = uiData;

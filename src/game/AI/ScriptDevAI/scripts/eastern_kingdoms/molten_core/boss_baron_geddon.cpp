@@ -17,7 +17,6 @@
 /* ScriptData
 SDName: Boss_Baron_Geddon
 SD%Complete: 100
-SDComment: Armaggedon is not working properly (core issue)
 SDCategory: Molten Core
 EndScriptData
 
@@ -26,6 +25,8 @@ EndScriptData
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "molten_core.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
+#include "Spells/Scripts/SpellScript.h"
+#include "Spells/SpellAuras.h"
 
 enum
 {
@@ -51,9 +52,9 @@ struct boss_baron_geddonAI : public CombatAI
     boss_baron_geddonAI(Creature* creature) : CombatAI(creature, GEDDON_ACTION_MAX), m_instance(static_cast<ScriptedInstance*>(creature->GetInstanceData()))
     {
         AddTimerlessCombatAction(GEDDON_ARMAGEDDON, true);
-        AddCombatAction(GEDDON_INFERNO, 45000u);
-        AddCombatAction(GEDDON_IGNITE_MANA, 30000u);
-        AddCombatAction(GEDDON_LIVING_BOMB, 35000u);
+        AddCombatAction(GEDDON_INFERNO, 13000u, 15000u);
+        AddCombatAction(GEDDON_IGNITE_MANA, 7000u, 19000u);
+        AddCombatAction(GEDDON_LIVING_BOMB, 11000u, 16000u);
         Reset();
     }
 
@@ -79,17 +80,23 @@ struct boss_baron_geddonAI : public CombatAI
 
     void ExecuteAction(uint32 action) override
     {
+        if (m_creature->HasAura(SPELL_ARMAGEDDON) ||
+            (action != GEDDON_ARMAGEDDON && m_creature->HasAura(SPELL_INFERNO)))
+            return;
+
         switch (action)
         {
             case GEDDON_ARMAGEDDON:
             {
                 if (m_creature->GetHealthPercent() <= 2.0f)
                 {
-                    if (DoCastSpellIfCan(nullptr, SPELL_ARMAGEDDON) == CAST_OK)
+                    // Both spells pacify and root. End Inferno before starting Armageddon.
+                    m_creature->RemoveAurasDueToSpell(SPELL_INFERNO);
+                    if (DoCastSpellIfCan(m_creature, SPELL_ARMAGEDDON) == CAST_OK && m_creature->HasAura(SPELL_ARMAGEDDON))
                     {
+                        m_creature->StopMoving();
                         DoScriptText(EMOTE_SERVICE, m_creature);
                         SetActionReadyStatus(action, false);
-                        return;
                     }
                 }
                 break;
@@ -97,23 +104,35 @@ struct boss_baron_geddonAI : public CombatAI
             case GEDDON_INFERNO:
             {
                 if (DoCastSpellIfCan(nullptr, SPELL_INFERNO) == CAST_OK)
-                    ResetCombatAction(action, 45000);
+                    ResetCombatAction(action, urand(21000, 26000));
                 break;
             }
             case GEDDON_IGNITE_MANA:
             {
                 if (DoCastSpellIfCan(nullptr, SPELL_IGNITE_MANA) == CAST_OK)
-                    ResetCombatAction(action, 30000);
+                    ResetCombatAction(action, urand(27000, 32000));
                 break;
             }
             case GEDDON_LIVING_BOMB:
             {
                 if (Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, SPELL_LIVING_BOMB, SELECT_FLAG_PLAYER))
                     if (DoCastSpellIfCan(target, SPELL_LIVING_BOMB) == CAST_OK)
-                        ResetCombatAction(action, 35000);
+                        ResetCombatAction(action, urand(11000, 16000));
                 break;
             }
         }
+    }
+};
+
+struct BaronGeddonLivingBomb : public AuraScript
+{
+    void OnPeriodicTrigger(Aura* aura, PeriodicTriggerData& data) const override
+    {
+        Unit* target = aura->GetTarget();
+        Unit* geddon = aura->GetCaster();
+        // The original caster can be dead when an already armed bomb expires.
+        if (target->GetMapId() != 409 || !geddon || geddon->GetEntry() != NPC_GEDDON || !target->IsInMap(geddon))
+            data.spellInfo = nullptr;
     }
 };
 
@@ -123,4 +142,6 @@ void AddSC_boss_baron_geddon()
     pNewScript->Name = "boss_baron_geddon";
     pNewScript->GetAI = &GetNewAIInstance<boss_baron_geddonAI>;
     pNewScript->RegisterSelf();
+
+    RegisterSpellScript<BaronGeddonLivingBomb>("spell_baron_geddon_living_bomb");
 }
