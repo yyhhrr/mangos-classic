@@ -5,6 +5,8 @@
 #ifndef DEF_MOLTEN_CORE_H
 #define DEF_MOLTEN_CORE_H
 
+#include <array>
+
 enum
 {
     MAX_ENCOUNTER               = 10,
@@ -103,14 +105,24 @@ class instance_molten_core : public ScriptedInstance
         bool CanSpawnCreatureGroup(uint32 groupId) const override;
 
         void OnCreatureCreate(Creature* pCreature) override;
+        void OnCreatureEnterCombat(Creature* creature) override;
+        void OnCreatureEvade(Creature* creature) override;
         void OnObjectCreate(GameObject* pGo) override;
         void OnPlayerEnter(Player* pPlayer) override;
 
         bool QueueCoreHoundPack(Creature const& hound);
+        bool IsMajordomoAdd(ObjectGuid guid) const;
+        int32 RecordMajordomoAddDeath(ObjectGuid guid);
+        void RemoveMajordomoAdds();
+        bool CanStartRagnarosIntro(Creature const& actor) const;
+        bool StartRagnarosIntro(Creature const& actor);
+        void FinishRagnarosIntro() { m_ragnarosIntro = false; }
 
         void SetData(uint32 uiType, uint32 uiData) override;
         uint32 GetData(uint32 uiType) const override;
         bool GetBossLootReward(uint32 bossEntry, BossLootReward& reward) const override;
+        bool GetGameObjectLootSnapshot(uint32 entry, std::string& snapshot) const override;
+        void OnGameObjectLootSnapshot(uint32 entry, std::string const& snapshot, bool exhausted) override;
 
         std::vector<InstanceEventReset> GetResettableEvents() const override;
         bool GetEventResetData(uint32 eventId, std::string& data) const override;
@@ -125,6 +137,9 @@ class instance_molten_core : public ScriptedInstance
     protected:
         void DoSpawnMajordomoIfCan(bool bByPlayerEnter);
         void SpawnMajordomo(Unit* summoner, bool initialSummon, uint8 summonPos);
+        void UpdateMajordomo(uint32 diff);
+        void RestoreMajordomoCache();
+        std::string SerializeProgress(uint32 resetEvent = MAX_ENCOUNTER) const;
         void RestoreResetRune(GameObject* go, uint32 eventId);
         void RestoreResetRuneObjects(uint32 eventId);
         void RemoveResetActors(bool majordomo, bool ragnaros);
@@ -134,6 +149,16 @@ class instance_molten_core : public ScriptedInstance
         std::string m_strInstData;
         uint32 m_auiEncounter[MAX_ENCOUNTER];
         std::set<uint32> m_resetRuneEvents;
+        std::array<ObjectGuid, MAX_MAJORDOMO_ADDS> m_majordomoAdds;
+        std::set<ObjectGuid> m_deadMajordomoAdds;
+        ObjectGuid m_majordomoPullSource;
+        ObjectGuid m_majordomoPullTarget;
+        uint32 m_majordomoRetry = 0;
+        bool m_ragnarosIntro = false;
+        bool m_restoreMajordomoCache = false;
+        uint64 m_majordomoCacheUntil = 0;
+        uint64 m_majordomoCacheLootUntil = 0;
+        std::string m_majordomoCacheLoot;
 
         bool m_coreHoundPacksLoaded = false;
         std::unordered_map<uint32, std::vector<uint32>> m_coreHoundPacks;

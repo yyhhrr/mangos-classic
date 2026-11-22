@@ -25,8 +25,8 @@ EndScriptData
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "molten_core.h"
-#include "Entities/TemporarySpawn.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
+#include "Spells/Scripts/SpellScript.h"
 
 enum
 {
@@ -46,7 +46,7 @@ enum
     SPELL_TELEPORT_TARGET    = 20534,                       // Teleport Victim
     SPELL_HATE_TO_ZERO       = 20538,                       // Threat reset after each teleport
     SPELL_IMMUNE_POLY        = 21087,                       // Cast onto Flamewaker Healers when half the adds are dead
-    SPELL_SEPARATION_ANXIETY = 21094,                       // Aura cast on himself by Majordomo Executus, if adds move out of range, they will cast spell 21095 on themselves
+    SPELL_SEPARATION_ANXIETY = 21094,                       // Applies to the encounter adds; they enrage if they move too far away
     SPELL_ENCOURAGEMENT      = 21086,                       // Cast onto all remaining adds every time one is killed
     SPELL_CHAMPION           = 21090,                       // Cast onto the last remaining add
 
@@ -76,8 +76,8 @@ enum
 enum MajordomoActions
 {
     MAJORDOMO_REFLECTION_SHIELD,
-    MAJORDOMO_TELEPORT_RANDOM,
     MAJORDOMO_TELEPORT_TARGET,
+    MAJORDOMO_TELEPORT_RANDOM,
     MAJORDOMO_AEGIS,
     MAJORDOMO_ACTION_MAX,
     MAJORDOMO_OUTRO,
@@ -87,174 +87,114 @@ struct boss_majordomoAI : public CombatAI
 {
     boss_majordomoAI(Creature* creature) : CombatAI(creature, MAJORDOMO_ACTION_MAX), m_instance(static_cast<instance_molten_core*>(creature->GetInstanceData()))
     {
-        m_bHasEncounterFinished = false;
         AddCombatAction(MAJORDOMO_REFLECTION_SHIELD, 15000u);
-        AddCombatAction(MAJORDOMO_TELEPORT_RANDOM, 15000u);
-        AddCombatAction(MAJORDOMO_TELEPORT_TARGET, 30000u);
+        AddCombatAction(MAJORDOMO_TELEPORT_TARGET, 15000u);
+        AddCombatAction(MAJORDOMO_TELEPORT_RANDOM, 30000u);
         AddCombatAction(MAJORDOMO_AEGIS, 5000u);
         AddCustomAction(MAJORDOMO_OUTRO, true, [&]() { HandleOutro(); });
-        SetDeathPrevention(true);
+        SetDeathPrevention(!m_instance || m_instance->GetData(TYPE_MAJORDOMO) != DONE);
         AddOnKillText(SAY_SLAY_1);
         AddOnKillSound(SAY_SLAY_SOUND);
-        Reset();
     }
 
     instance_molten_core* m_instance;
 
     ObjectGuid m_ragnarosGuid;
-    bool m_bHasEncounterFinished;
-    uint8 m_addsKilled;
-    uint8 m_speechStage;
-    GuidList m_luiMajordomoAddsGUIDs;
+    uint8 m_speechStage = 0;
 
-    void Reset() override
+    void Aggro(Unit* /*who*/) override
     {
-        m_addsKilled = 0;
-        m_speechStage = 0;
-    }
-
-    void Aggro(Unit* who) override
-    {
-        if (who->GetTypeId() == TYPEID_UNIT && who->GetEntry() == NPC_RAGNAROS)
+        if (m_instance && m_instance->GetData(TYPE_MAJORDOMO) == DONE)
             return;
 
         DoScriptText(SAY_AGGRO, m_creature);
-        // Majordomo Executus has a 100 yard aura to keep track of the distance of each of his adds, the Flamewaker Healers will enrage if moved out of it
-        DoCastSpellIfCan(nullptr, SPELL_SEPARATION_ANXIETY, CAST_TRIGGERED | CAST_AURA_NOT_PRESENT);
-
+        DoCastSpellIfCan(nullptr, SPELL_SEPARATION_ANXIETY, CAST_TRIGGERED);
         DoCastSpellIfCan(nullptr, SPELL_AEGIS, CAST_TRIGGERED | CAST_AURA_NOT_PRESENT);
-
-        if (m_instance)
-            m_instance->SetData(TYPE_MAJORDOMO, IN_PROGRESS);
     }
 
-    void JustReachedHome() override
+    void Surrender()
     {
-        if (!m_bHasEncounterFinished)                       // Normal reached home, FAIL
-        {
-            if (m_instance)
-                m_instance->SetData(TYPE_MAJORDOMO, FAIL);
-        }
-        else                                                // Finished the encounter, DONE
-        {
-            // Exit combat
-            SetCombatScriptStatus(false);
-            m_creature->RemoveAllAurasOnEvade();
-            m_creature->CombatStop(true);
-            m_creature->SetLootRecipient(nullptr);
+        m_instance->SetData(TYPE_MAJORDOMO, DONE);
+        SetDeathPrevention(false);
+        m_creature->SetImmuneToPlayer(true);
+        m_creature->SetFactionTemporary(FACTION_MAJORDOMO_FRIENDLY, TEMPFACTION_RESTORE_RESPAWN);
+        m_creature->RemoveAllAurasOnEvade();
+        m_creature->CombatStop(true);
+        m_creature->SetLootRecipient(nullptr);
+        m_creature->SetActiveObjectState(true);
+        m_creature->GetMotionMaster()->MoveTargetedHome();
+        m_speechStage = 1;
+        ResetTimer(MAJORDOMO_OUTRO, 0);
+    }
 
-            // Set friendly
-            m_creature->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PLAYER);
-            m_creature->SetFactionTemporary(FACTION_MAJORDOMO_FRIENDLY, TEMPFACTION_RESTORE_RESPAWN);
+    void RestoreLairPosition()
+    {
+        auto const& lair = m_aMajordomoLocations[1];
+        m_creature->GetMotionMaster()->MoveIdle();
+        m_creature->SetRespawnCoord(lair.m_fx, lair.m_fy, lair.m_fz, lair.m_fo);
+        if (!m_creature->IsWithinDist3d(lair.m_fx, lair.m_fy, lair.m_fz, 1.0f))
+            m_creature->NearTeleportTo(lair.m_fx, lair.m_fy, lair.m_fz, lair.m_fo);
+        m_creature->SetFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
+        m_creature->SetActiveObjectState(false);
+    }
 
-            // Reset orientation
-            m_creature->SetFacingTo(m_aMajordomoLocations[0].m_fo);
-
-            // Start his speech
-            ResetTimer(MAJORDOMO_OUTRO, 0); // at next tick
-            m_speechStage = 1;
-
-            m_instance->SetData(TYPE_MAJORDOMO, DONE);
-        }
+    void CancelSummonEvent()
+    {
+        m_speechStage = 0;
+        m_instance->FinishRagnarosIntro();
+        StopLavaEffects();
+        RestoreLairPosition();
     }
 
     void StartSummonEvent(Player* player)
     {
-        m_creature->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
-
-        // Prevent possible exploits with double summoning
-        if (m_creature->GetMap()->GetCreature(m_ragnarosGuid))
+        if (!m_instance || !m_instance->StartRagnarosIntro(*m_creature))
             return;
 
+        m_creature->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
+        m_creature->SetActiveObjectState(true);
         DoScriptText(SAY_SUMMON_0, m_creature, player);
-
         ResetTimer(MAJORDOMO_OUTRO, 5000);
         m_speechStage = 10;
     }
 
-    void JustRespawned() override
+    void StopLavaEffects()
     {
-        // Encounter finished, need special treatment
-        if (m_bHasEncounterFinished)
-        {
-            // Relocate here
-            debug_log("SD2: boss_majordomo_executus: Relocate to Ragnaros' Lair on respawn");
-            m_creature->CastSpell(nullptr, SPELL_TELEPORT_SELF, TRIGGERED_OLD_TRIGGERED);
-            m_creature->SetActiveObjectState(false);
-        }
+        for (uint32 entry : {GO_LAVA_SPLASH, GO_LAVA_STEAM})
+            if (GameObject* effect = m_instance->GetSingleGameObjectFromStorage(entry, true))
+                effect->SetLootState(GO_JUST_DEACTIVATED);
     }
 
     void JustSummoned(Creature* summoned) override
     {
-        if (summoned->GetEntry() == NPC_FLAMEWAKER_HEALER || summoned->GetEntry() == NPC_FLAMEWAKER_ELITE)
-        {
-            m_luiMajordomoAddsGUIDs.push_back(summoned->GetObjectGuid());
-            summoned->SetRespawnDelay(2 * HOUR);
-        }
-        else if (summoned->GetEntry() == NPC_RAGNAROS)
-        {
-            m_ragnarosGuid = summoned->GetObjectGuid();
-            summoned->CastSpell(summoned, SPELL_RAGNA_EMERGE, TRIGGERED_NONE);
-            if (GameObject* lavaSplash = m_instance->GetSingleGameObjectFromStorage(GO_LAVA_SPLASH))
-                lavaSplash->SetLootState(GO_JUST_DEACTIVATED);
-            if (GameObject* lavaSteam = m_instance->GetSingleGameObjectFromStorage(GO_LAVA_STEAM))
-                lavaSteam->SetLootState(GO_JUST_DEACTIVATED);
-        }
-    }
-
-    void CorpseRemoved(uint32& respawnDelay) override
-    {
-        respawnDelay = urand(2 * HOUR, 3 * HOUR);
-
-        if (m_bHasEncounterFinished)
-        {
-            // Needed for proper respawn handling
-            debug_log("SD2: boss_majordomo_executus: Set active");
-            m_creature->SetActiveObjectState(true);
-        }
+        if (summoned->GetEntry() != NPC_RAGNAROS)
+            return;
+        m_ragnarosGuid = summoned->GetObjectGuid();
+        summoned->CastSpell(summoned, SPELL_RAGNA_EMERGE, TRIGGERED_NONE);
+        StopLavaEffects();
     }
 
     void SummonedCreatureJustDied(Creature* summoned) override
     {
-        if (summoned->GetEntry() == NPC_FLAMEWAKER_HEALER || summoned->GetEntry() == NPC_FLAMEWAKER_ELITE)
+        if (!m_instance)
+            return;
+        int32 const remaining = m_instance->RecordMajordomoAddDeath(summoned->GetObjectGuid());
+        if (remaining < 0)
+            return;
+        if (remaining == 0)
         {
-            m_addsKilled += 1;
-
-            // Yell if only one add is alive and buff it
-            if (m_addsKilled == m_luiMajordomoAddsGUIDs.size() - 1)
-            {
-                DoScriptText(SAY_LAST_ADD, m_creature);
-                DoCastSpellIfCan(nullptr, SPELL_CHAMPION);
-            }
-            // All adds are killed, retreat
-            else if (m_addsKilled == m_luiMajordomoAddsGUIDs.size())
-            {
-                m_bHasEncounterFinished = true;
-                m_creature->GetMotionMaster()->MoveTargetedHome();
-                SetCombatScriptStatus(true);
-                return;
-            }
-
-            // If 4 adds (half of them) are dead, make all remaining healers immune to polymorph via aura
-            if (m_addsKilled >= MAX_MAJORDOMO_ADDS / 2)
-                DoCastSpellIfCan(nullptr, SPELL_IMMUNE_POLY);
-
-            // Buff the remaining adds
-            DoCastSpellIfCan(nullptr, SPELL_ENCOURAGEMENT);
-        }
-    }
-
-    // Unsummon Majordomo adds
-    void UnsummonMajordomoAdds()
-    {
-        for (GuidList::const_iterator itr = m_luiMajordomoAddsGUIDs.begin(); itr != m_luiMajordomoAddsGUIDs.end(); ++itr)
-        {
-            if (Creature* add = m_creature->GetMap()->GetCreature(*itr))
-                if (add->IsTemporarySummon())
-                    static_cast<TemporarySpawn*>(add)->UnSummon();
+            Surrender();
+            return;
         }
 
-        m_luiMajordomoAddsGUIDs.clear();
+        if (remaining == MAX_MAJORDOMO_ADDS / 2)
+            m_creature->CastSpell(nullptr, SPELL_IMMUNE_POLY, TRIGGERED_OLD_TRIGGERED);
+        if (remaining == 1)
+        {
+            DoScriptText(SAY_LAST_ADD, m_creature);
+            m_creature->CastSpell(nullptr, SPELL_CHAMPION, TRIGGERED_OLD_TRIGGERED);
+        }
+        m_creature->CastSpell(nullptr, SPELL_ENCOURAGEMENT, TRIGGERED_OLD_TRIGGERED);
     }
 
     void HandleOutro()
@@ -281,26 +221,24 @@ struct boss_majordomoAI : public CombatAI
                 break;
             case 4:
                 DoCastSpellIfCan(m_creature, SPELL_TELEPORT_SELF);
-                // TODO - when should they be unsummoned?
-                // TODO - also unclear how this should be handled, as of range issues
                 timer = 900;
                 ++m_speechStage;
                 break;
             case 5:
-                // Majordomo is away now, remove his adds
-                UnsummonMajordomoAdds();
                 m_speechStage = 0;
+                m_instance->RemoveMajordomoAdds();
+                RestoreLairPosition();
                 break;
 
                 // Ragnaros Summon Event
             case 10:
                 DoScriptText(SAY_SUMMON_1, m_creature);
-                if (GameObject* lavaSplash = m_instance->GetSingleGameObjectFromStorage(GO_LAVA_SPLASH))
+                if (GameObject* lavaSplash = m_instance->GetSingleGameObjectFromStorage(GO_LAVA_SPLASH, true))
                 {
                     lavaSplash->SetRespawnTime(900);
                     lavaSplash->Refresh();
                 }
-                if (GameObject* lavaSteam = m_instance->GetSingleGameObjectFromStorage(GO_LAVA_STEAM))
+                if (GameObject* lavaSteam = m_instance->GetSingleGameObjectFromStorage(GO_LAVA_STEAM, true))
                 {
                     lavaSteam->SetRespawnTime(900);
                     lavaSteam->Refresh();
@@ -317,17 +255,19 @@ struct boss_majordomoAI : public CombatAI
                 break;
             case 12:
                 // Reset orientation
-                if (GameObject* pLavaSteam = m_instance->GetSingleGameObjectFromStorage(GO_LAVA_STEAM))
+                if (GameObject* pLavaSteam = m_instance->GetSingleGameObjectFromStorage(GO_LAVA_STEAM, true))
                     m_creature->SetFacingToObject(pLavaSteam);
                 DoScriptText(SAY_SUMMON_MAJ, m_creature);
                 ++m_speechStage;
                 timer = 8000;
                 break;
             case 13:
-                // Summon Ragnaros and make sure it faces Majordomo Executus
-                if (m_instance)
-                    if (GameObject* pGo = m_instance->GetSingleGameObjectFromStorage(GO_LAVA_STEAM))
-                        m_creature->SummonCreature(NPC_RAGNAROS, 838.3082f, -831.4665f, -232.1853f, 2.199115f, TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 2 * HOUR * IN_MILLISECONDS);
+                if (!m_creature->SummonCreature(NPC_RAGNAROS, 838.3082f, -831.4665f, -232.1853f, 2.199115f,
+                                                TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 2 * HOUR * IN_MILLISECONDS))
+                {
+                    CancelSummonEvent();
+                    return;
+                }
                 ++m_speechStage;
                 timer = 8700;
                 break;
@@ -352,8 +292,14 @@ struct boss_majordomoAI : public CombatAI
                 timer = 16500;
                 break;
             case 17:
-                if (Creature* ragnaros = m_creature->GetMap()->GetCreature(m_ragnarosGuid))
-                    ragnaros->CastSpell(m_creature, SPELL_ELEMENTAL_FIRE, TRIGGERED_NONE);
+                if (Creature* ragnaros = m_creature->GetMap()->GetCreature(m_ragnarosGuid); ragnaros && ragnaros->IsAlive())
+                {
+                    m_instance->FinishRagnarosIntro();
+                    m_creature->SetActiveObjectState(false);
+                    ragnaros->CastSpell(m_creature, SPELL_ELEMENTAL_FIRE, TRIGGERED_OLD_TRIGGERED);
+                }
+                else
+                    CancelSummonEvent();
                 // Rest of summoning speech is handled by Ragnaros, as Majordomo will be dead
                 m_speechStage = 0;
                 break;
@@ -372,25 +318,19 @@ struct boss_majordomoAI : public CombatAI
                     ResetCombatAction(action, 30000);
                 break;
             }
-            case MAJORDOMO_TELEPORT_RANDOM:
-            {
-                if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_TELEPORT_TARGET) == CAST_OK)
-                {
-                    DoCastSpellIfCan(nullptr, SPELL_HATE_TO_ZERO);
-                    ResetCombatAction(action, urand(25000, 30000));
-                }
-                break;
-            }
             case MAJORDOMO_TELEPORT_TARGET:
             {
-                if (Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0))
-                {
+                Unit* target = m_creature->GetVictim();
+                if (target && target->IsPlayer() && DoCastSpellIfCan(target, SPELL_TELEPORT_TARGET) == CAST_OK)
+                    ResetCombatAction(action, urand(25000, 30000));
+                break;
+            }
+            case MAJORDOMO_TELEPORT_RANDOM:
+            {
+                if (Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, SPELL_TELEPORT_RANDOM,
+                                                                   SELECT_FLAG_PLAYER | SELECT_FLAG_SKIP_TANK))
                     if (DoCastSpellIfCan(target, SPELL_TELEPORT_RANDOM) == CAST_OK)
-                    {
-                        DoCastSpellIfCan(nullptr, SPELL_HATE_TO_ZERO);
                         ResetCombatAction(action, urand(25000, 30000));
-                    }
-                }
                 break;
             }
             case MAJORDOMO_AEGIS:
@@ -400,6 +340,25 @@ struct boss_majordomoAI : public CombatAI
                 break;
             }
         }
+    }
+
+    void SpellHitTarget(Unit* target, SpellEntry const* spell, SpellMissInfo miss) override
+    {
+        if (miss == SPELL_MISS_NONE && target->IsPlayer() &&
+            (spell->Id == SPELL_TELEPORT_TARGET || spell->Id == SPELL_TELEPORT_RANDOM))
+            m_creature->CastSpell(nullptr, SPELL_HATE_TO_ZERO, TRIGGERED_OLD_TRIGGERED);
+    }
+};
+
+struct MajordomoAddSpell : public SpellScript
+{
+    bool OnCheckTarget(Spell const* spell, Unit* target, SpellEffectIndex /*effect*/) const override
+    {
+        Unit* caster = spell->GetCaster();
+        if (caster->GetEntry() != NPC_MAJORDOMO)
+            return true;
+        auto* instance = dynamic_cast<instance_molten_core*>(caster->GetInstanceData());
+        return instance && target->IsAlive() && instance->IsMajordomoAdd(target->GetObjectGuid());
     }
 };
 
@@ -412,7 +371,7 @@ bool GossipHello_boss_majordomo(Player* player, Creature* creature)
 {
     if (instance_molten_core* pInstance = (instance_molten_core*)creature->GetInstanceData())
     {
-        if (pInstance->GetData(TYPE_RAGNAROS) == NOT_STARTED || pInstance->GetData(TYPE_RAGNAROS) == FAIL)
+        if (pInstance->CanStartRagnarosIntro(*creature))
         {
             player->ADD_GOSSIP_ITEM_ID(GOSSIP_ICON_CHAT, GOSSIP_ITEM_SUMMON_1, GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF + 1);
             player->SEND_GOSSIP_MENU(TEXT_ID_SUMMON_1, creature->GetObjectGuid());
@@ -423,6 +382,12 @@ bool GossipHello_boss_majordomo(Player* player, Creature* creature)
 
 bool GossipSelect_boss_majordomo(Player* player, Creature* creature, uint32 /*sender*/, uint32 uiAction)
 {
+    auto* instance = static_cast<instance_molten_core*>(creature->GetInstanceData());
+    if (!instance || !instance->CanStartRagnarosIntro(*creature))
+    {
+        player->CLOSE_GOSSIP_MENU();
+        return true;
+    }
     switch (uiAction)
     {
         case GOSSIP_ACTION_INFO_DEF + 1:
@@ -451,4 +416,5 @@ void AddSC_boss_majordomo()
     pNewScript->pGossipSelect = &GossipSelect_boss_majordomo;
     pNewScript->GetAI = &GetAI_boss_majordomo;
     pNewScript->RegisterSelf();
+    RegisterSpellScript<MajordomoAddSpell>("spell_majordomo_encounter_adds");
 }

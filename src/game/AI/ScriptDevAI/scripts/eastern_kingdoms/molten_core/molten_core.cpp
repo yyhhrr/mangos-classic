@@ -27,7 +27,9 @@ EndScriptData
 #include "molten_core.h"
 #include "AI/EventAI/CreatureEventAI.h"
 #include "Entities/CreatureLinkingMgr.h"
+#include "Entities/TemporarySpawn.h"
 #include "Globals/ObjectMgr.h"
+#include "Loot/LootMgr.h"
 #include "Maps/MapPersistentStateMgr.h"
 #include "Maps/SpawnManager.h"
 #include <array>
@@ -215,9 +217,12 @@ void instance_molten_core::Initialize()
     memset(&m_auiEncounter, 0, sizeof(m_auiEncounter));
 }
 
-void instance_molten_core::Update(uint32 /*diff*/)
+void instance_molten_core::Update(uint32 diff)
 {
     UpdateCoreHoundPacks();
+    UpdateMajordomo(diff);
+    if (m_restoreMajordomoCache)
+        RestoreMajordomoCache();
 
     for (auto const& encounterGroup : ENCOUNTER_SPAWN_GROUPS)
     {
@@ -413,6 +418,29 @@ void instance_molten_core::OnCreatureCreate(Creature* pCreature)
     }
 }
 
+void instance_molten_core::OnCreatureEnterCombat(Creature* creature)
+{
+    if (GetData(TYPE_MAJORDOMO) != NOT_STARTED)
+        return;
+    if (creature != GetSingleCreatureFromStorage(NPC_MAJORDOMO, true) && !IsMajordomoAdd(creature->GetObjectGuid()))
+        return;
+
+    SetData(TYPE_MAJORDOMO, IN_PROGRESS);
+    m_majordomoPullSource = creature->GetObjectGuid();
+    Unit* target = creature->GetVictim();
+    if (!target)
+        target = creature->SelectAttackingTarget(ATTACKING_TARGET_TOPAGGRO, 0);
+    if (target)
+        m_majordomoPullTarget = target->GetObjectGuid();
+}
+
+void instance_molten_core::OnCreatureEvade(Creature* creature)
+{
+    if (creature->GetEntry() == NPC_MAJORDOMO && GetData(TYPE_MAJORDOMO) == IN_PROGRESS &&
+        creature == GetSingleCreatureFromStorage(NPC_MAJORDOMO, true))
+        SetData(TYPE_MAJORDOMO, FAIL);
+}
+
 void instance_molten_core::OnObjectCreate(GameObject* pGo)
 {
     switch (pGo->GetEntry())
@@ -458,6 +486,9 @@ void instance_molten_core::OnObjectCreate(GameObject* pGo)
 
         // Majordomo event chest
         case GO_CACHE_OF_THE_FIRE_LORD:
+            m_goEntryGuidStore[pGo->GetEntry()] = pGo->GetObjectGuid();
+            m_restoreMajordomoCache = true;
+            break;
         // Ragnaros GOs
         case GO_LAVA_STEAM:
         case GO_LAVA_SPLASH:
@@ -503,11 +534,21 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
             }
             break;
         case TYPE_MAJORDOMO:
+            if (m_auiEncounter[uiType] == DONE)
+                return;
             m_auiEncounter[uiType] = uiData;
             if (uiData == DONE)
-                DoRespawnGameObject(GO_CACHE_OF_THE_FIRE_LORD, HOUR);
+            {
+                m_majordomoPullSource.Clear();
+                m_majordomoPullTarget.Clear();
+                m_majordomoCacheUntil = uint64(time(nullptr)) + HOUR;
+                m_majordomoCacheLootUntil = 0;
+                m_restoreMajordomoCache = true;
+            }
             break;
         case TYPE_RAGNAROS:
+            if (m_auiEncounter[uiType] == DONE)
+                return;
             m_auiEncounter[uiType] = uiData;
             break;
     }
@@ -523,13 +564,7 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
     {
         OUT_SAVE_INST_DATA;
 
-        std::ostringstream saveStream;
-        saveStream << m_auiEncounter[0] << " " << m_auiEncounter[1] << " " << m_auiEncounter[2] << " "
-                   << m_auiEncounter[3] << " " << m_auiEncounter[4] << " " << m_auiEncounter[5] << " "
-                   << m_auiEncounter[6] << " " << m_auiEncounter[7] << " " << m_auiEncounter[8] << " "
-                   << m_auiEncounter[9];
-
-        m_strInstData = saveStream.str();
+        m_strInstData = SerializeProgress();
 
         SaveToDB();
         OUT_SAVE_INST_DATA_COMPLETE;
@@ -575,15 +610,90 @@ bool instance_molten_core::GetEventResetData(uint32 eventId, std::string& data) 
 {
     if (eventId >= MAX_ENCOUNTER)
         return false;
+    data = SerializeProgress(eventId);
+    return true;
+}
+
+std::string instance_molten_core::SerializeProgress(uint32 resetEvent) const
+{
     std::ostringstream stream;
     for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
     {
         if (i)
             stream << ' ';
-        stream << (i == eventId ? uint32(NOT_STARTED) : m_auiEncounter[i]);
+        stream << (i == resetEvent ? uint32(NOT_STARTED) : m_auiEncounter[i]);
     }
-    data = stream.str();
+    if (resetEvent != TYPE_MAJORDOMO && m_majordomoCacheUntil)
+        stream << " MC1 " << m_majordomoCacheUntil << ' ' << m_majordomoCacheLootUntil << ' '
+               << (m_majordomoCacheLoot.empty() ? "-" : m_majordomoCacheLoot);
+    return stream.str();
+}
+
+bool instance_molten_core::GetGameObjectLootSnapshot(uint32 entry, std::string& snapshot) const
+{
+    uint64 const now = time(nullptr);
+    if (entry != GO_CACHE_OF_THE_FIRE_LORD || GetData(TYPE_MAJORDOMO) != DONE ||
+        m_majordomoCacheUntil <= now || (m_majordomoCacheLootUntil && m_majordomoCacheLootUntil <= now))
+        return false;
+    snapshot = m_majordomoCacheLoot;
     return true;
+}
+
+void instance_molten_core::OnGameObjectLootSnapshot(uint32 entry, std::string const& snapshot, bool exhausted)
+{
+    if (entry != GO_CACHE_OF_THE_FIRE_LORD || !m_majordomoCacheUntil)
+        return;
+    if (exhausted)
+    {
+        m_majordomoCacheUntil = 0;
+        m_majordomoCacheLootUntil = 0;
+        m_majordomoCacheLoot.clear();
+    }
+    else
+    {
+        uint64 deadline = m_majordomoCacheUntil;
+        if (GameObject* cache = GetSingleGameObjectFromStorage(entry, true))
+        {
+            uint64 const now = time(nullptr);
+            uint32 const despawn = cache->GetChestDespawnRemainingMS();
+            if (despawn)
+                deadline = std::min(deadline, now + (despawn + IN_MILLISECONDS - 1) / IN_MILLISECONDS);
+            if (deadline == m_majordomoCacheUntil && deadline > now)
+                cache->RestoreChestDespawnRemainingMS(uint32(m_majordomoCacheUntil - now) * IN_MILLISECONDS);
+        }
+        if (deadline == m_majordomoCacheUntil)
+            deadline = 0;
+        if (snapshot == m_majordomoCacheLoot && deadline == m_majordomoCacheLootUntil)
+            return;
+        m_majordomoCacheLootUntil = deadline;
+        m_majordomoCacheLoot = snapshot;
+    }
+
+    m_strInstData = SerializeProgress();
+    SaveToDB();
+}
+
+void instance_molten_core::RestoreMajordomoCache()
+{
+    m_restoreMajordomoCache = false;
+    uint64 const now = time(nullptr);
+    uint64 const deadline = m_majordomoCacheLootUntil ? m_majordomoCacheLootUntil : m_majordomoCacheUntil;
+    if (GetData(TYPE_MAJORDOMO) != DONE || deadline <= now)
+        return;
+
+    GameObject* cache = GetSingleGameObjectFromStorage(GO_CACHE_OF_THE_FIRE_LORD, true);
+    if (!cache)
+        return;
+    uint32 const remaining = uint32(deadline - now);
+    DoRespawnGameObject(cache->GetObjectGuid(), remaining);
+    if (cache->IsSpawned() && !cache->m_loot && !m_majordomoCacheLoot.empty())
+    {
+        cache->m_loot = new Loot(cache, m_majordomoCacheLoot);
+        if (cache->GetLootState() == GO_ACTIVATED)
+            cache->RestoreChestDespawnRemainingMS(remaining * IN_MILLISECONDS);
+        else
+            OnGameObjectLootSnapshot(GO_CACHE_OF_THE_FIRE_LORD, m_majordomoCacheLoot, true);
+    }
 }
 
 void instance_molten_core::RestoreResetRune(GameObject* go, uint32 eventId)
@@ -632,6 +742,16 @@ void instance_molten_core::RestoreResetRuneObjects(uint32 eventId)
 
 void instance_molten_core::RemoveResetActors(bool majordomo, bool ragnaros)
 {
+    if (majordomo)
+    {
+        m_majordomoAdds = {};
+        m_deadMajordomoAdds.clear();
+        m_majordomoPullSource.Clear();
+        m_majordomoPullTarget.Clear();
+        m_majordomoRetry = 0;
+        m_ragnarosIntro = false;
+    }
+
     std::vector<ObjectGuid> actors;
     auto& objects = instance->GetObjectsStore();
     for (auto itr = objects.begin<Creature>(); itr != objects.end<Creature>(); ++itr)
@@ -651,7 +771,7 @@ void instance_molten_core::RemoveResetActors(bool majordomo, bool ragnaros)
             auto stored = m_npcEntryGuidStore.find(creature->GetEntry());
             if (stored != m_npcEntryGuidStore.end() && stored->second == guid)
                 m_npcEntryGuidStore.erase(stored);
-            creature->ForcedDespawn();
+            static_cast<TemporarySpawn*>(creature)->UnSummon();
         }
 }
 
@@ -664,9 +784,6 @@ void instance_molten_core::ApplyEventReset(uint32 eventId, std::string const& da
     for (uint32& state : states)
         if (!(stream >> state))
             return;
-    stream >> std::ws;
-    if (!stream.eof())
-        return;
     for (uint32 i = 0; i < MAX_ENCOUNTER; ++i)
         m_auiEncounter[i] = states[i];
     m_strInstData = data;
@@ -691,48 +808,48 @@ void instance_molten_core::ApplyEventReset(uint32 eventId, std::string const& da
         bool resetRagnarosScene = eventId == TYPE_RAGNAROS || GetData(TYPE_RAGNAROS) != DONE;
         RemoveResetActors(true, resetRagnarosScene);
         if (eventId == TYPE_MAJORDOMO)
+        {
+            m_majordomoCacheUntil = 0;
+            m_majordomoCacheLootUntil = 0;
+            m_majordomoCacheLoot.clear();
             ResetEventRewardGameObject(GO_CACHE_OF_THE_FIRE_LORD);
+        }
         if (resetRagnarosScene)
         {
             ResetEventRewardGameObject(GO_LAVA_STEAM);
             ResetEventRewardGameObject(GO_LAVA_SPLASH);
         }
-        // A new actor also clears Majordomo AI's private completed flag and
-        // any old summon dialogue/Ragnaros GUID. Static bosses use RSP later.
-        if (GetData(TYPE_MAJORDOMO) == DONE)
-        {
-            if (Player* player = GetPlayerInMap())
-                SpawnMajordomo(player, false, 1);
-        }
-        else
-            DoSpawnMajordomoIfCan(true);
+        DoSpawnMajordomoIfCan(true);
     }
 }
 
 // Handle Majordomo summon here
 void instance_molten_core::DoSpawnMajordomoIfCan(bool bByPlayerEnter)
 {
-    // If both Majordomo and Ragnaros events are finished, return
-    if (m_auiEncounter[TYPE_MAJORDOMO] == DONE && m_auiEncounter[TYPE_RAGNAROS] == DONE)
+    bool const defeated = GetData(TYPE_MAJORDOMO) == DONE;
+    if (defeated && (GetData(TYPE_RAGNAROS) == DONE || m_ragnarosIntro))
+        return;
+    Creature* actor = GetSingleCreatureFromStorage(NPC_MAJORDOMO, true);
+    if (actor && actor->IsAlive())
         return;
 
-    // If already spawned return
-    if (GetSingleCreatureFromStorage(NPC_MAJORDOMO, true))
-        return;
-
-    // Check if all rune bosses are done
-    for (uint8 i = TYPE_MAGMADAR; i < TYPE_MAJORDOMO; ++i)
+    if (defeated)
     {
-        if (m_auiEncounter[i] != SPECIAL)
+        Creature* ragnaros = GetSingleCreatureFromStorage(NPC_RAGNAROS, true);
+        if (ragnaros && ragnaros->IsAlive())
             return;
     }
+    else
+        for (auto const& rune : m_aMoltenCoreRunes)
+            if (GetData(rune.m_uiType) != SPECIAL)
+                return;
 
-    Player* pPlayer = GetPlayerInMap();
-    if (!pPlayer)
-        return;
-
-    uint8 uiSummonPos = m_auiEncounter[TYPE_MAJORDOMO] == DONE ? 1 : 0;
-    SpawnMajordomo(pPlayer, !bByPlayerEnter, uiSummonPos);
+    if (Player* player = GetPlayerInMap())
+    {
+        if (actor && actor->IsTemporarySummon())
+            static_cast<TemporarySpawn*>(actor)->UnSummon();
+        SpawnMajordomo(player, !bByPlayerEnter, defeated ? 1 : 0);
+    }
 }
 
 void instance_molten_core::SpawnMajordomo(Unit* summoner, bool initialSummon, uint8 summonPos)
@@ -752,10 +869,133 @@ void instance_molten_core::SpawnMajordomo(Unit* summoner, bool initialSummon, ui
             if (initialSummon)
                 DoScriptText(SAY_MAJORDOMO_SPAWN, pMajordomo);
 
-            for (auto& m_aBosspawnLoc : m_aBosspawnLocs)
-                pMajordomo->SummonCreature(m_aBosspawnLoc.m_spawnEntry, m_aBosspawnLoc.m_fx, m_aBosspawnLoc.m_fy, m_aBosspawnLoc.m_fz, m_aBosspawnLoc.m_fo, TEMPSPAWN_MANUAL_DESPAWN, DAY * IN_MILLISECONDS);
+            for (size_t i = 0; i < m_majordomoAdds.size(); ++i)
+            {
+                auto const& spawn = m_aBosspawnLocs[i];
+                Creature* add = pMajordomo->SummonCreature(spawn.m_spawnEntry, spawn.m_fx, spawn.m_fy, spawn.m_fz, spawn.m_fo, TEMPSPAWN_MANUAL_DESPAWN, 0);
+                if (!add)
+                {
+                    RemoveResetActors(true, false);
+                    SetData(TYPE_MAJORDOMO, FAIL);
+                    m_majordomoRetry = 5000;
+                    return;
+                }
+                m_majordomoAdds[i] = add->GetObjectGuid();
+                add->SetRespawnDelay(DAY);
+            }
         }
     }
+}
+
+void instance_molten_core::UpdateMajordomo(uint32 diff)
+{
+    if (GetData(TYPE_MAJORDOMO) == DONE)
+    {
+        if (GetData(TYPE_RAGNAROS) == IN_PROGRESS)
+        {
+            Creature* ragnaros = GetSingleCreatureFromStorage(NPC_RAGNAROS, true);
+            if (!ragnaros || !ragnaros->IsAlive())
+                SetData(TYPE_RAGNAROS, FAIL);
+        }
+        if (m_ragnarosIntro)
+        {
+            Creature* actor = GetSingleCreatureFromStorage(NPC_MAJORDOMO, true);
+            if (!actor || !actor->IsAlive())
+                FinishRagnarosIntro();
+        }
+        DoSpawnMajordomoIfCan(true);
+        return;
+    }
+
+    if (GetData(TYPE_MAJORDOMO) == FAIL)
+    {
+        if (m_majordomoRetry > diff)
+        {
+            m_majordomoRetry -= diff;
+            return;
+        }
+        bool const hadActor = GetSingleCreatureFromStorage(NPC_MAJORDOMO, true) != nullptr;
+        RemoveResetActors(true, false);
+        SetData(TYPE_MAJORDOMO, NOT_STARTED);
+        if (Player* player = GetPlayerInMap())
+        {
+            if (hadActor)
+                SpawnMajordomo(player, false, 0);
+            else
+                DoSpawnMajordomoIfCan(true);
+        }
+        return;
+    }
+
+    if (!m_majordomoPullSource)
+        return;
+    Creature* source = instance->GetCreature(m_majordomoPullSource);
+    Unit* target = instance->GetUnit(m_majordomoPullTarget);
+    if (source && !target)
+        target = source->GetVictim();
+    if (source && !target)
+        target = source->SelectAttackingTarget(ATTACKING_TARGET_TOPAGGRO, 0);
+    m_majordomoPullSource.Clear();
+    m_majordomoPullTarget.Clear();
+    if (!target || !target->IsAlive())
+    {
+        SetData(TYPE_MAJORDOMO, FAIL);
+        return;
+    }
+
+    auto engage = [target](Creature* actor)
+    {
+        if (actor && actor->IsAlive() && !actor->IsInCombat() && actor->AI())
+            actor->AI()->AttackStart(target);
+    };
+    engage(GetSingleCreatureFromStorage(NPC_MAJORDOMO, true));
+    for (ObjectGuid guid : m_majordomoAdds)
+        engage(instance->GetCreature(guid));
+}
+
+bool instance_molten_core::IsMajordomoAdd(ObjectGuid guid) const
+{
+    return !guid.IsEmpty() && std::find(m_majordomoAdds.begin(), m_majordomoAdds.end(), guid) != m_majordomoAdds.end();
+}
+
+int32 instance_molten_core::RecordMajordomoAddDeath(ObjectGuid guid)
+{
+    if (GetData(TYPE_MAJORDOMO) != IN_PROGRESS || !IsMajordomoAdd(guid) ||
+        !std::all_of(m_majordomoAdds.begin(), m_majordomoAdds.end(), [](ObjectGuid add) { return !add.IsEmpty(); }) ||
+        !m_deadMajordomoAdds.insert(guid).second)
+        return -1;
+    return int32(m_majordomoAdds.size() - m_deadMajordomoAdds.size());
+}
+
+void instance_molten_core::RemoveMajordomoAdds()
+{
+    for (ObjectGuid guid : m_majordomoAdds)
+        if (Creature* add = instance->GetCreature(guid))
+            static_cast<TemporarySpawn*>(add)->UnSummon();
+    m_majordomoAdds = {};
+    m_deadMajordomoAdds.clear();
+}
+
+bool instance_molten_core::CanStartRagnarosIntro(Creature const& actor) const
+{
+    if (GetData(TYPE_MAJORDOMO) != DONE || GetData(TYPE_RAGNAROS) == DONE ||
+        GetData(TYPE_RAGNAROS) == IN_PROGRESS || m_ragnarosIntro ||
+        &actor != GetSingleCreatureFromStorage(NPC_MAJORDOMO, true) ||
+        !actor.HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP))
+        return false;
+
+    auto const& lair = m_aMajordomoLocations[1];
+    Creature* ragnaros = GetSingleCreatureFromStorage(NPC_RAGNAROS, true);
+    return actor.IsAlive() && actor.IsWithinDist3d(lair.m_fx, lair.m_fy, lair.m_fz, 8.0f) &&
+           (!ragnaros || !ragnaros->IsAlive());
+}
+
+bool instance_molten_core::StartRagnarosIntro(Creature const& actor)
+{
+    if (!CanStartRagnarosIntro(actor))
+        return false;
+    m_ragnarosIntro = true;
+    return true;
 }
 
 void instance_molten_core::Load(const char* chrIn)
@@ -785,6 +1025,20 @@ void instance_molten_core::Load(const char* chrIn)
             i = NOT_STARTED;
     }
 
+    std::string version, loot;
+    uint64 until, lootUntil;
+    uint64 const now = time(nullptr);
+    if (GetData(TYPE_MAJORDOMO) == DONE && (loadStream >> version >> until >> lootUntil >> loot) &&
+        version == "MC1" && until > now && until - now <= HOUR &&
+        (!lootUntil || (lootUntil > now && lootUntil <= until)))
+    {
+        m_majordomoCacheUntil = until;
+        m_majordomoCacheLootUntil = lootUntil;
+        if (loot != "-")
+            m_majordomoCacheLoot = loot;
+    }
+    m_strInstData = SerializeProgress();
+
     OUT_LOAD_INST_DATA_COMPLETE;
 }
 
@@ -802,7 +1056,8 @@ void instance_molten_core::ExecuteChatCommand(ChatHandler* handler, char* args)
     if (val == "spawnmajordomo")
     {
         uint32 summonPos;
-        handler->ExtractUInt32(&args, summonPos);
+        if (!handler->ExtractUInt32(&args, summonPos))
+            return;
 
         if (summonPos > 1)
         {
@@ -810,6 +1065,11 @@ void instance_molten_core::ExecuteChatCommand(ChatHandler* handler, char* args)
             return;
         }
 
+        if (GetSingleCreatureFromStorage(NPC_MAJORDOMO, true))
+        {
+            handler->SendSysMessage("Majordomo Executus is already present in this instance.");
+            return;
+        }
         SpawnMajordomo(handler->GetSession()->GetPlayer(), true, summonPos);
     }
 }
