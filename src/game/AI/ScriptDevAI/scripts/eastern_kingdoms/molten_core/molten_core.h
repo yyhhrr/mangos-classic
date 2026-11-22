@@ -117,6 +117,8 @@ class instance_molten_core : public ScriptedInstance
         bool CanStartRagnarosIntro(Creature const& actor) const;
         bool StartRagnarosIntro(Creature const& actor);
         void FinishRagnarosIntro() { m_ragnarosIntro = false; }
+        Creature* SummonRagnaros(Unit* summoner);
+        void CompleteRagnarosIntro();
 
         void SetData(uint32 uiType, uint32 uiData) override;
         uint32 GetData(uint32 uiType) const override;
@@ -138,8 +140,10 @@ class instance_molten_core : public ScriptedInstance
         void DoSpawnMajordomoIfCan(bool bByPlayerEnter);
         void SpawnMajordomo(Unit* summoner, bool initialSummon, uint8 summonPos);
         void UpdateMajordomo(uint32 diff);
+        void UpdateRagnaros();
         void RestoreMajordomoCache();
         std::string SerializeProgress(uint32 resetEvent = MAX_ENCOUNTER) const;
+        void SaveProgress();
         void RestoreResetRune(GameObject* go, uint32 eventId);
         void RestoreResetRuneObjects(uint32 eventId);
         void RemoveResetActors(bool majordomo, bool ragnaros);
@@ -155,6 +159,9 @@ class instance_molten_core : public ScriptedInstance
         ObjectGuid m_majordomoPullTarget;
         uint32 m_majordomoRetry = 0;
         bool m_ragnarosIntro = false;
+        bool m_ragnarosIntroFinished = false;
+        bool m_majordomoReplay = false;
+        uint64 m_ragnarosDeadline = 0;
         bool m_restoreMajordomoCache = false;
         uint64 m_majordomoCacheUntil = 0;
         uint64 m_majordomoCacheLootUntil = 0;

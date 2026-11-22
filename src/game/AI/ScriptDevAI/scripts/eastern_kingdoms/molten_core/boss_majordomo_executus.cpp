@@ -262,8 +262,7 @@ struct boss_majordomoAI : public CombatAI
                 timer = 8000;
                 break;
             case 13:
-                if (!m_creature->SummonCreature(NPC_RAGNAROS, 838.3082f, -831.4665f, -232.1853f, 2.199115f,
-                                                TEMPSPAWN_TIMED_OOC_OR_DEAD_DESPAWN, 2 * HOUR * IN_MILLISECONDS))
+                if (!m_instance->SummonRagnaros(m_creature))
                 {
                     CancelSummonEvent();
                     return;

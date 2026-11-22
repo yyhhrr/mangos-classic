@@ -220,6 +220,7 @@ void instance_molten_core::Initialize()
 void instance_molten_core::Update(uint32 diff)
 {
     UpdateCoreHoundPacks();
+    UpdateRagnaros();
     UpdateMajordomo(diff);
     if (m_restoreMajordomoCache)
         RestoreMajordomoCache();
@@ -541,15 +542,24 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
             {
                 m_majordomoPullSource.Clear();
                 m_majordomoPullTarget.Clear();
-                m_majordomoCacheUntil = uint64(time(nullptr)) + HOUR;
-                m_majordomoCacheLootUntil = 0;
-                m_restoreMajordomoCache = true;
+                if (!m_majordomoReplay)
+                {
+                    m_majordomoCacheUntil = uint64(time(nullptr)) + HOUR;
+                    m_majordomoCacheLootUntil = 0;
+                    m_restoreMajordomoCache = true;
+                }
+                m_majordomoReplay = false;
             }
             break;
         case TYPE_RAGNAROS:
             if (m_auiEncounter[uiType] == DONE)
                 return;
             m_auiEncounter[uiType] = uiData;
+            if (uiData == DONE)
+            {
+                m_ragnarosDeadline = 0;
+                m_ragnarosIntroFinished = false;
+            }
             break;
     }
 
@@ -564,9 +574,7 @@ void instance_molten_core::SetData(uint32 uiType, uint32 uiData)
     {
         OUT_SAVE_INST_DATA;
 
-        m_strInstData = SerializeProgress();
-
-        SaveToDB();
+        SaveProgress();
         OUT_SAVE_INST_DATA_COMPLETE;
     }
 }
@@ -577,7 +585,7 @@ bool instance_molten_core::GetBossLootReward(uint32 bossEntry, BossLootReward& r
         return false;
 
     reward.gameObjectEntry = GO_CACHE_OF_THE_FIRE_LORD;
-    reward.completed = GetData(TYPE_MAJORDOMO) == DONE;
+    reward.completed = GetData(TYPE_MAJORDOMO) == DONE || m_majordomoReplay;
     return true;
 }
 
@@ -626,7 +634,19 @@ std::string instance_molten_core::SerializeProgress(uint32 resetEvent) const
     if (resetEvent != TYPE_MAJORDOMO && m_majordomoCacheUntil)
         stream << " MC1 " << m_majordomoCacheUntil << ' ' << m_majordomoCacheLootUntil << ' '
                << (m_majordomoCacheLoot.empty() ? "-" : m_majordomoCacheLoot);
+    if (resetEvent != TYPE_MAJORDOMO && (m_majordomoReplay || (resetEvent != TYPE_RAGNAROS && m_ragnarosDeadline)))
+    {
+        bool const resetRagnaros = resetEvent == TYPE_RAGNAROS;
+        stream << " RG1 " << (resetRagnaros ? 0 : m_ragnarosDeadline) << ' '
+               << (!resetRagnaros && m_ragnarosIntroFinished) << ' ' << m_majordomoReplay;
+    }
     return stream.str();
+}
+
+void instance_molten_core::SaveProgress()
+{
+    m_strInstData = SerializeProgress();
+    SaveToDB();
 }
 
 bool instance_molten_core::GetGameObjectLootSnapshot(uint32 entry, std::string& snapshot) const
@@ -669,8 +689,7 @@ void instance_molten_core::OnGameObjectLootSnapshot(uint32 entry, std::string co
         m_majordomoCacheLoot = snapshot;
     }
 
-    m_strInstData = SerializeProgress();
-    SaveToDB();
+    SaveProgress();
 }
 
 void instance_molten_core::RestoreMajordomoCache()
@@ -809,6 +828,7 @@ void instance_molten_core::ApplyEventReset(uint32 eventId, std::string const& da
         RemoveResetActors(true, resetRagnarosScene);
         if (eventId == TYPE_MAJORDOMO)
         {
+            m_majordomoReplay = false;
             m_majordomoCacheUntil = 0;
             m_majordomoCacheLootUntil = 0;
             m_majordomoCacheLoot.clear();
@@ -816,6 +836,8 @@ void instance_molten_core::ApplyEventReset(uint32 eventId, std::string const& da
         }
         if (resetRagnarosScene)
         {
+            m_ragnarosDeadline = 0;
+            m_ragnarosIntroFinished = false;
             ResetEventRewardGameObject(GO_LAVA_STEAM);
             ResetEventRewardGameObject(GO_LAVA_SPLASH);
         }
@@ -827,7 +849,8 @@ void instance_molten_core::ApplyEventReset(uint32 eventId, std::string const& da
 void instance_molten_core::DoSpawnMajordomoIfCan(bool bByPlayerEnter)
 {
     bool const defeated = GetData(TYPE_MAJORDOMO) == DONE;
-    if (defeated && (GetData(TYPE_RAGNAROS) == DONE || m_ragnarosIntro))
+    if (defeated && (GetData(TYPE_RAGNAROS) == DONE || m_ragnarosIntro || m_ragnarosIntroFinished ||
+                     (m_ragnarosDeadline && uint64(time(nullptr)) >= m_ragnarosDeadline)))
         return;
     Creature* actor = GetSingleCreatureFromStorage(NPC_MAJORDOMO, true);
     if (actor && actor->IsAlive())
@@ -839,7 +862,7 @@ void instance_molten_core::DoSpawnMajordomoIfCan(bool bByPlayerEnter)
         if (ragnaros && ragnaros->IsAlive())
             return;
     }
-    else
+    else if (!m_majordomoReplay)
         for (auto const& rune : m_aMoltenCoreRunes)
             if (GetData(rune.m_uiType) != SPECIAL)
                 return;
@@ -850,6 +873,62 @@ void instance_molten_core::DoSpawnMajordomoIfCan(bool bByPlayerEnter)
             static_cast<TemporarySpawn*>(actor)->UnSummon();
         SpawnMajordomo(player, !bByPlayerEnter, defeated ? 1 : 0);
     }
+}
+
+Creature* instance_molten_core::SummonRagnaros(Unit* summoner)
+{
+    if (GetData(TYPE_RAGNAROS) == DONE || (m_ragnarosDeadline && uint64(time(nullptr)) >= m_ragnarosDeadline))
+        return nullptr;
+    if (Creature* existing = GetSingleCreatureFromStorage(NPC_RAGNAROS, true); existing && existing->IsAlive())
+        return nullptr;
+
+    Creature* ragnaros = summoner->SummonCreature(NPC_RAGNAROS, 838.3082f, -831.4665f, -232.1853f, 2.199115f,
+                                                 TEMPSPAWN_DEAD_DESPAWN, 0);
+    if (ragnaros && !m_ragnarosDeadline)
+    {
+        m_ragnarosDeadline = uint64(time(nullptr)) + 2 * HOUR;
+        SaveProgress();
+    }
+    return ragnaros;
+}
+
+void instance_molten_core::CompleteRagnarosIntro()
+{
+    if (!m_ragnarosDeadline || m_ragnarosIntroFinished)
+        return;
+    m_ragnarosIntroFinished = true;
+    SaveProgress();
+}
+
+void instance_molten_core::UpdateRagnaros()
+{
+    if (!m_ragnarosDeadline || GetData(TYPE_RAGNAROS) == DONE)
+        return;
+
+    Creature* ragnaros = GetSingleCreatureFromStorage(NPC_RAGNAROS, true);
+    if (uint64(time(nullptr)) >= m_ragnarosDeadline)
+    {
+        // Let the active attempt finish. An evade or an unload cannot renew the deadline.
+        if (ragnaros && ragnaros->IsAlive() && ragnaros->IsInCombat())
+            return;
+
+        RemoveResetActors(true, true);
+        ResetEventRewardGameObject(GO_LAVA_STEAM);
+        ResetEventRewardGameObject(GO_LAVA_SPLASH);
+        m_ragnarosDeadline = 0;
+        m_ragnarosIntroFinished = false;
+        m_majordomoReplay = true;
+        m_auiEncounter[TYPE_MAJORDOMO] = NOT_STARTED;
+        m_auiEncounter[TYPE_RAGNAROS] = NOT_STARTED;
+        SaveProgress();
+        DoSpawnMajordomoIfCan(true);
+        return;
+    }
+
+    if (m_ragnarosIntroFinished && (!ragnaros || !ragnaros->IsAlive()))
+        if (Player* player = GetPlayerInMap())
+            if (Creature* restored = SummonRagnaros(player))
+                restored->AI()->ReceiveAIEvent(AI_EVENT_CUSTOM_A, player, player, 0);
 }
 
 void instance_molten_core::SpawnMajordomo(Unit* summoner, bool initialSummon, uint8 summonPos)
@@ -979,7 +1058,8 @@ void instance_molten_core::RemoveMajordomoAdds()
 bool instance_molten_core::CanStartRagnarosIntro(Creature const& actor) const
 {
     if (GetData(TYPE_MAJORDOMO) != DONE || GetData(TYPE_RAGNAROS) == DONE ||
-        GetData(TYPE_RAGNAROS) == IN_PROGRESS || m_ragnarosIntro ||
+        GetData(TYPE_RAGNAROS) == IN_PROGRESS || m_ragnarosIntro || m_ragnarosIntroFinished ||
+        (m_ragnarosDeadline && uint64(time(nullptr)) >= m_ragnarosDeadline) ||
         &actor != GetSingleCreatureFromStorage(NPC_MAJORDOMO, true) ||
         !actor.HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP))
         return false;
@@ -1025,17 +1105,40 @@ void instance_molten_core::Load(const char* chrIn)
             i = NOT_STARTED;
     }
 
-    std::string version, loot;
-    uint64 until, lootUntil;
+    std::string version;
     uint64 const now = time(nullptr);
-    if (GetData(TYPE_MAJORDOMO) == DONE && (loadStream >> version >> until >> lootUntil >> loot) &&
-        version == "MC1" && until > now && until - now <= HOUR &&
-        (!lootUntil || (lootUntil > now && lootUntil <= until)))
+    while (loadStream >> version)
     {
-        m_majordomoCacheUntil = until;
-        m_majordomoCacheLootUntil = lootUntil;
-        if (loot != "-")
-            m_majordomoCacheLoot = loot;
+        if (version == "MC1")
+        {
+            std::string loot;
+            uint64 until, lootUntil;
+            if (!(loadStream >> until >> lootUntil >> loot))
+                break;
+            if (GetData(TYPE_MAJORDOMO) == DONE && until > now && until - now <= HOUR &&
+                (!lootUntil || (lootUntil > now && lootUntil <= until)))
+            {
+                m_majordomoCacheUntil = until;
+                m_majordomoCacheLootUntil = lootUntil;
+                if (loot != "-")
+                    m_majordomoCacheLoot = loot;
+            }
+        }
+        else if (version == "RG1")
+        {
+            uint64 deadline;
+            bool introFinished, replay;
+            if (!(loadStream >> deadline >> introFinished >> replay))
+                break;
+            m_majordomoReplay = replay && GetData(TYPE_MAJORDOMO) != DONE;
+            if (GetData(TYPE_MAJORDOMO) == DONE && GetData(TYPE_RAGNAROS) != DONE && deadline <= now + 2 * HOUR)
+            {
+                m_ragnarosDeadline = deadline;
+                m_ragnarosIntroFinished = deadline && introFinished;
+            }
+        }
+        else
+            break;
     }
     m_strInstData = SerializeProgress();
 
