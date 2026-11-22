@@ -731,6 +731,13 @@ void instance_molten_core::RestoreResetRune(GameObject* go, uint32 eventId)
         go->SetLootState(GO_READY);
         GameObjectData const* spawn = sObjectMgr.GetGOData(go->GetDbGuid());
         go->SetGoState(spawn ? GOState(spawn->goState) : GO_STATE_READY);
+        if (go->GetEntry() == rune.m_uiRuneEntry && go->IsInWorld())
+        {
+            if (GameObject* circle = go->GetLinkedTrap())
+                circle->SetLootState(GO_READY);
+            else if (GameObject* circle = go->SummonLinkedTrapIfAny())
+                go->SetLinkedTrap(circle);
+        }
         break;
     }
 }
