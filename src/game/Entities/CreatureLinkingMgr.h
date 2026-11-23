@@ -73,12 +73,13 @@ enum CreatureLinkingFlags
     // Dynamic behaviour, out of combat
     FLAG_FOLLOW                     = 0x0200,
     FLAG_DESPAWN_ON_DESPAWN         = 0x2000,
+    FLAG_REGROUP_BEFORE_PATROL      = 0x8000,
 
     // Passive behaviour
     FLAG_CANT_SPAWN_IF_BOSS_DEAD    = 0x0400,
     FLAG_CANT_SPAWN_IF_BOSS_ALIVE   = 0x0800,
 
-    LINKING_FLAG_INVALID            = 0x8000,               // TODO adjust when other flags are implemented
+    LINKING_FLAG_INVALID            = 0x10000,              // Stored flags are 16-bit
 };
 
 // Structure holding the information for an entry
@@ -164,6 +165,7 @@ class CreatureLinkingHolder
 
         // This function lets a slave refollow his master
         bool TryFollowMaster(Creature* pCreature);
+        bool HasRegroupingFollowers(Creature const& leader) const;
 
     private:
         // Structure associated to a master

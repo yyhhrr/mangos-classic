@@ -130,6 +130,7 @@ class WaypointMovementGenerator<Creature>
         bool m_pathFinished;
         bool m_speedChanged;
         ForcedMovement m_forcedMovement;
+        bool m_checkFollowerRegroup = false;
 
         ObjectGuid m_guid;
 };

@@ -750,6 +750,43 @@ bool CreatureLinkingHolder::CanSpawn(uint32 dbGuid, Map* _map, CreatureLinkingIn
     return true;                                            // local boss does not exist - spawn
 }
 
+bool CreatureLinkingHolder::HasRegroupingFollowers(Creature const& leader) const
+{
+    auto hasRegroupingFollowers = [this, &leader](HolderMap const& holder, uint32 leaderId)
+    {
+        constexpr uint16 regroupFlags = FLAG_FOLLOW | FLAG_REGROUP_BEFORE_PATROL;
+        constexpr float regroupTolerance = 2.0f;
+
+        auto const [begin, end] = holder.equal_range(leaderId);
+        for (auto itr = begin; itr != end; ++itr)
+        {
+            auto const& link = itr->second;
+            if ((link.linkingFlag & regroupFlags) != regroupFlags)
+                continue;
+
+            for (auto const& [guid, objectGuid] : link.linkedGuids)
+            {
+                Creature const* follower = guid ? leader.GetMap()->GetCreature(guid) : leader.GetMap()->GetCreature(objectGuid);
+                if (!follower || !follower->IsInWorld() || !follower->IsAlive() || follower->IsControlledByPlayer() ||
+                    !IsSlaveInRangeOfMaster(follower, &leader, link.searchRange))
+                    continue;
+
+                if (follower->IsInCombat() || follower->GetCombatManager().IsEvadingHome())
+                    return true;
+
+                // Allow a follower to rejoin at its normal distance from the leader.
+                float const formationDistance = std::sqrt(follower->GetRespawnPosition().GetDistance(leader.GetRespawnPosition()));
+                if (!leader.IsWithinDistInMap(follower, formationDistance + regroupTolerance))
+                    return true;
+            }
+        }
+        return false;
+    };
+
+    return hasRegroupingFollowers(m_holderGuidMap, leader.GetDbGuid()) ||
+           hasRegroupingFollowers(m_holderMap, leader.GetEntry());
+}
+
 // This function lets a slave refollow his master
 bool CreatureLinkingHolder::TryFollowMaster(Creature* pCreature)
 {

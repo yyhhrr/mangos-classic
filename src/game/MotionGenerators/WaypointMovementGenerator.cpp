@@ -20,6 +20,7 @@
 #include "Globals/ObjectMgr.h"
 #include "Entities/Player.h"
 #include "Entities/Creature.h"
+#include "Entities/CreatureLinkingMgr.h"
 #include "Entities/TemporarySpawn.h"
 #include "AI/BaseAI/CreatureAI.h"
 #include "WaypointManager.h"
@@ -159,6 +160,7 @@ void WaypointMovementGenerator<Creature>::Interrupt(Creature& creature)
 void WaypointMovementGenerator<Creature>::Reset(Creature& creature)
 {
     creature.addUnitState(UNIT_STAT_ROAMING);
+    m_checkFollowerRegroup = creature.IsLinkingEventTrigger();
     if (!i_path || Stopped(creature))
         return;
     SendNextWayPointPath(creature);
@@ -310,6 +312,16 @@ void WaypointMovementGenerator<Creature>::SendNextWayPointPath(Creature& creatur
 {
     if (m_pathFinished)
         return;
+
+    if (m_checkFollowerRegroup)
+    {
+        if (creature.GetMap()->GetCreatureLinkingHolder()->HasRegroupingFollowers(creature))
+        {
+            Stop(250);
+            return;
+        }
+        m_checkFollowerRegroup = false;
+    }
 
     // make sure to reset spline index as its new path
     m_nodeIndexes.clear();
