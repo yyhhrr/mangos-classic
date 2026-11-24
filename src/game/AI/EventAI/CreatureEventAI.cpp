@@ -1912,10 +1912,33 @@ Unit* CreatureEventAI::GetTargetByType(uint32 target, Unit* actionInvoker, Unit*
                 isError = true;
             return resTarget;
         case TARGET_T_NEAREST_AOE_TARGET:
+        {
+            constexpr uint32 SPELL_INTIMIDATING_SHOUT = 19134;
+            constexpr uint32 NPC_SERGRA_DARKTHORN = 3338;
+            if (forSpellId == SPELL_INTIMIDATING_SHOUT && m_creature->GetEntry() == NPC_SERGRA_DARKTHORN)
+            {
+                // The first effect needs an explicit enemy. The second effect defines the area radius.
+                SpellEntry const* spellInfo = sSpellTemplate.LookupEntry<SpellEntry>(forSpellId);
+                float radius = spellInfo ? GetSpellRadius(sSpellRadiusStore.LookupEntry(spellInfo->EffectRadiusIndex[EFFECT_INDEX_1])) : 0.0f;
+                if (radius <= 0.0f)
+                {
+                    isError = true;
+                    return nullptr;
+                }
+
+                SelectAttackingTargetParams params{};
+                params.range.maxRange = uint32(radius);
+                resTarget = m_creature->SelectAttackingTarget(ATTACKING_TARGET_NEAREST_BY, 0, spellInfo, SELECT_FLAG_RANGE_AOE_RANGE | selectFlags, params);
+                if (!resTarget)
+                    isError = true;
+                return resTarget;
+            }
+
             resTarget = m_creature->SelectAttackingTarget(ATTACKING_TARGET_NEAREST_BY, 0, forSpellId, SELECT_FLAG_USE_EFFECT_RADIUS | selectFlags);
             if (!resTarget)
                 isError = true;
             return nullptr; // Only used to check if it exists
+        }
         case TARGET_T_HOSTILE_FARTHEST_AWAY:
             resTarget = m_creature->SelectAttackingTarget(ATTACKING_TARGET_FARTHEST_AWAY, 0, forSpellId, SELECT_FLAG_NOT_IN_MELEE_RANGE | selectFlags);
             if (!resTarget)
