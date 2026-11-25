@@ -3103,9 +3103,10 @@ void Aura::HandlePeriodicTriggerSpell(bool apply, bool /*Real*/)
         {
             case 18173:                                     // Burning Adrenaline (Main Target version)
             case 23620:                                     // Burning Adrenaline (Caster version)
-                // On aura removal, the target deals AoE damage to friendlies and kills himself/herself (prevent durability loss)
-                target->CastSpell(target, 23478, TRIGGERED_OLD_TRIGGERED, nullptr, this);
-                target->CastSpell(target, 23644, TRIGGERED_OLD_TRIGGERED, nullptr, this);
+                // Resolve friendly targets relative to the aura carrier, which causes the explosion.
+                target->CastSpell(nullptr, 23478, TRIGGERED_OLD_TRIGGERED, nullptr, this, target->GetObjectGuid());
+                if (m_removeMode != AURA_REMOVE_BY_DEATH && target->IsAlive())
+                    target->CastSpell(target, 23644, TRIGGERED_OLD_TRIGGERED, nullptr, this); // No durability loss.
                 return;
             default:
                 break;

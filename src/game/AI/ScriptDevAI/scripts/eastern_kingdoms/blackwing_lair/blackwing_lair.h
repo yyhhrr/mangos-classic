@@ -169,17 +169,20 @@ class instance_blackwing_lair : public ScriptedInstance
         void UpdateRazorgoreDefenderThreat();
         void StopRazorgoreDefenders(bool retreat);
         void RemoveRazorgoreDefender(Creature const& creature);
+        void SetEncounterDoorState(GameObject& door) const;
+        void UpdateEncounterDoor(uint32 entry);
+        void SaveEncounterData();
+        void UpdateScepterQuest();
 
         uint32 m_uiResetTimer;
         uint32 m_uiDefenseTimer;
-        uint32 m_uiScepterEpicTimer;
+        time_t m_scepterDeadline = 0;
         uint32 m_uiNefarianSpawnTimer;
         uint8 m_uiScepterQuestStep;
         uint8 m_uiDragonspawnCount;
         uint8 m_uiBlackwingDefCount;
         uint8 m_uiDeadDrakonidsCount;
 
-        bool m_bIsMainGateOpen;
         bool m_razorgoreOrbUnlocked = false;
 
         // Key by DB spawn so the same egg keeps its identity across grid reloads.

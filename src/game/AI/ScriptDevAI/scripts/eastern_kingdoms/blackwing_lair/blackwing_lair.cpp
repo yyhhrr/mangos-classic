@@ -27,17 +27,22 @@ EndScriptData
 #include "blackwing_lair.h"
 #include "Globals/ObjectMgr.h"
 #include "Maps/MapPersistentStateMgr.h"
+#include "World/World.h"
+
+namespace
+{
+constexpr time_t ScepterQuestDuration = 5 * HOUR;
+constexpr time_t ScepterWarningOffsets[] = { ScepterQuestDuration - 2, 3 * HOUR, HOUR, 30 * MINUTE, 0 };
+}
 
 instance_blackwing_lair::instance_blackwing_lair(Map* pMap) : ScriptedInstance(pMap),
     m_uiResetTimer(0),
     m_uiDefenseTimer(0),
-    m_uiScepterEpicTimer(0),
     m_uiNefarianSpawnTimer(0),
     m_uiScepterQuestStep(0),
     m_uiDragonspawnCount(0),
     m_uiBlackwingDefCount(0),
-    m_uiDeadDrakonidsCount(0),
-    m_bIsMainGateOpen(true)
+    m_uiDeadDrakonidsCount(0)
 {
     Initialize();
 }
@@ -58,12 +63,12 @@ void instance_blackwing_lair::Initialize()
 
 bool instance_blackwing_lair::IsEncounterInProgress() const
 {
-    if (GetData(TYPE_RAZORGORE) == SPECIAL)
+    if (GetData(TYPE_RAZORGORE) == SPECIAL || GetData(TYPE_NEFARIAN) == SPECIAL)
         return true;
 
-    for (uint32 i : m_auiEncounter)
+    for (uint32 boss = TYPE_RAZORGORE; boss <= TYPE_NEFARIAN; ++boss)
     {
-        if (i == IN_PROGRESS)
+        if (GetData(boss) == IN_PROGRESS)
             return true;
     }
     return false;
@@ -115,21 +120,17 @@ void instance_blackwing_lair::OnObjectCreate(GameObject* pGo)
     switch (pGo->GetEntry())
     {
         case GO_DOOR_RAZORGORE_ENTER:
+        case GO_DOOR_RAZORGORE_EXIT:
+        case GO_DOOR_VAELASTRASZ:
+            SetEncounterDoorState(*pGo);
+            break;
         case GO_DOOR_NEFARIAN:
             break;
         case GO_ORB_OF_DOMINATION:
             pGo->ApplyModFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT, !IsRazorgoreOrbAvailable());
             break;
-        case GO_DOOR_RAZORGORE_EXIT:
-            if (m_auiEncounter[TYPE_RAZORGORE] == DONE)
-                pGo->SetGoState(GO_STATE_ACTIVE);
-            break;
         case GO_DOOR_CHROMAGGUS_EXIT:
             if (m_auiEncounter[TYPE_CHROMAGGUS] == DONE)
-                pGo->SetGoState(GO_STATE_ACTIVE);
-            break;
-        case GO_DOOR_VAELASTRASZ:
-            if (m_auiEncounter[TYPE_VAELASTRASZ] == DONE)
                 pGo->SetGoState(GO_STATE_ACTIVE);
             break;
         case GO_DOOR_LASHLAYER:
@@ -156,6 +157,32 @@ void instance_blackwing_lair::OnObjectCreate(GameObject* pGo)
     m_goEntryGuidStore[pGo->GetEntry()] = pGo->GetObjectGuid();
 }
 
+void instance_blackwing_lair::SetEncounterDoorState(GameObject& door) const
+{
+    bool open;
+    switch (door.GetEntry())
+    {
+        case GO_DOOR_RAZORGORE_ENTER:
+            open = !IsEncounterInProgress();
+            break;
+        case GO_DOOR_RAZORGORE_EXIT:
+            open = GetData(TYPE_RAZORGORE) == DONE && GetData(TYPE_VAELASTRASZ) != IN_PROGRESS;
+            break;
+        case GO_DOOR_VAELASTRASZ:
+            open = GetData(TYPE_VAELASTRASZ) == DONE;
+            break;
+        default:
+            return;
+    }
+    door.SetGoState(open ? GO_STATE_ACTIVE : GO_STATE_READY);
+}
+
+void instance_blackwing_lair::UpdateEncounterDoor(uint32 entry)
+{
+    if (GameObject* door = GetSingleGameObjectFromStorage(entry))
+        SetEncounterDoorState(*door);
+}
+
 void instance_blackwing_lair::SetData(uint32 uiType, uint32 uiData)
 {
     const uint32 previousRazorgoreState = GetData(TYPE_RAZORGORE);
@@ -164,36 +191,13 @@ void instance_blackwing_lair::SetData(uint32 uiType, uint32 uiData)
         (uiData == DONE && previousRazorgoreState != SPECIAL)))
         return;
 
-    // Close de the main gate whenever an event starts (if it is not already open)
-    if (m_bIsMainGateOpen && (uiData == IN_PROGRESS || uiData == SPECIAL))
-    {
-        DoUseDoorOrButton(GO_DOOR_RAZORGORE_ENTER);
-        m_bIsMainGateOpen = false;
-    }
-    // If an encounter is failed or won, open the main gate only if it is currently closed and no other event is in progress
-    else if (!m_bIsMainGateOpen && (uiData == FAIL || uiData == DONE))
-    {
-        bool ShouldKeepGateClosed = false;
-        for (uint8 i = 0; i < TYPE_NEFARIAN; i++)
-        {
-            if (uiType != i && (m_auiEncounter[i] == IN_PROGRESS || m_auiEncounter[i] == SPECIAL))
-                ShouldKeepGateClosed = true;
-        }
-
-        if (!ShouldKeepGateClosed)
-        {
-            DoUseDoorOrButton(GO_DOOR_RAZORGORE_ENTER);
-            m_bIsMainGateOpen = true;
-        }
-    }
-
     switch (uiType)
     {
         case TYPE_RAZORGORE:
             m_auiEncounter[uiType] = uiData;
             if (uiData == DONE)
             {
-                DoUseDoorOrButton(GO_DOOR_RAZORGORE_EXIT);
+                UpdateEncounterDoor(GO_DOOR_RAZORGORE_EXIT);
                 if (Creature* razorgore = GetSingleCreatureFromStorage(NPC_RAZORGORE, true))
                     razorgore->SetActiveObjectState(false);
             }
@@ -235,12 +239,11 @@ void instance_blackwing_lair::SetData(uint32 uiType, uint32 uiData)
             }
             break;
         case TYPE_VAELASTRASZ:
+            if (GetData(uiType) == uiData || GetData(uiType) == DONE)
+                return;
             m_auiEncounter[uiType] = uiData;
-            // Prevent the players from running back to the first room; use if the encounter is not special
-            if (uiData != SPECIAL)
-                DoUseDoorOrButton(GO_DOOR_RAZORGORE_EXIT);
-            if (uiData == DONE)
-                DoUseDoorOrButton(GO_DOOR_VAELASTRASZ);
+            UpdateEncounterDoor(GO_DOOR_RAZORGORE_EXIT);
+            UpdateEncounterDoor(GO_DOOR_VAELASTRASZ);
             break;
         case TYPE_LASHLAYER:
             m_auiEncounter[uiType] = uiData;
@@ -259,8 +262,16 @@ void instance_blackwing_lair::SetData(uint32 uiType, uint32 uiData)
             break;
         case TYPE_NEFARIAN:
             // If epic quest for Scepter of the Shifting Sands is in progress when Nefarian is defeated mark it as complete
-            if (uiData == DONE && GetData(TYPE_QUEST_SCEPTER) == IN_PROGRESS)
-                SetData(TYPE_QUEST_SCEPTER, DONE);
+            if (uiData == DONE)
+            {
+                UpdateScepterQuest();
+                if (GetData(TYPE_QUEST_SCEPTER) == IN_PROGRESS)
+                {
+                    // Save quest success with the kill in the same snapshot.
+                    m_auiEncounter[TYPE_QUEST_SCEPTER] = DONE;
+                    m_scepterDeadline = 0;
+                }
+            }
 
             // Don't store the same thing twice
             if (m_auiEncounter[uiType] == uiData)
@@ -281,16 +292,16 @@ void instance_blackwing_lair::SetData(uint32 uiType, uint32 uiData)
             DoUseDoorOrButton(GO_DOOR_NEFARIAN);
             break;
         case TYPE_QUEST_SCEPTER:
+            if (uiData == IN_PROGRESS && GetData(uiType) != NOT_STARTED)
+                return;
             m_auiEncounter[uiType] = uiData;
-            // Start 5 hours timer (various steps are handled in Update()
             if (uiData == IN_PROGRESS)
             {
-                m_uiScepterEpicTimer = 2000;
+                m_scepterDeadline = sWorld.GetGameTime() + ScepterQuestDuration;
                 m_uiScepterQuestStep = 0;
             }
-            // Stop timer
-            if (uiData == DONE)
-                m_uiScepterEpicTimer = 0;
+            else
+                m_scepterDeadline = 0;
             break;
         case TYPE_CHROMA_LBREATH:
         case TYPE_CHROMA_RBREATH:
@@ -300,22 +311,30 @@ void instance_blackwing_lair::SetData(uint32 uiType, uint32 uiData)
             break;
     }
 
-    if (uiData >= DONE && (uiType != TYPE_RAZORGORE || uiData == DONE))
-    {
-        OUT_SAVE_INST_DATA;
+    if (uiType <= TYPE_NEFARIAN)
+        UpdateEncounterDoor(GO_DOOR_RAZORGORE_ENTER);
 
-        std::ostringstream saveStream;
-        saveStream << (GetData(TYPE_RAZORGORE) == DONE ? DONE : NOT_STARTED) << " " << m_auiEncounter[1] << " " << m_auiEncounter[2] << " "
-                   << m_auiEncounter[3] << " " << m_auiEncounter[4] << " " << m_auiEncounter[5] << " "
-                   << m_auiEncounter[6] << " " << m_auiEncounter[7] << " " << m_auiEncounter[8] << " "
-                   << m_auiEncounter[9] << " " << m_auiEncounter[10]<< " " << m_auiEncounter[11] << " "
-                   << m_auiEncounter[12];
+    if (uiType == TYPE_VAELASTRASZ || uiType == TYPE_QUEST_SCEPTER ||
+        (uiData >= DONE && (uiType != TYPE_RAZORGORE || uiData == DONE)))
+        SaveEncounterData();
+}
 
-        m_strInstData = saveStream.str();
+void instance_blackwing_lair::SaveEncounterData()
+{
+    OUT_SAVE_INST_DATA;
 
-        SaveToDB();
-        OUT_SAVE_INST_DATA_COMPLETE;
-    }
+    // An interrupted Vaelastrasz fight resumes at the hostile retry.
+    const uint32 vaelState = GetData(TYPE_VAELASTRASZ);
+    std::ostringstream saveStream;
+    saveStream << (GetData(TYPE_RAZORGORE) == DONE ? DONE : NOT_STARTED) << ' '
+               << (vaelState == IN_PROGRESS ? FAIL : vaelState);
+    for (uint32 i = TYPE_LASHLAYER; i < MAX_ENCOUNTER; ++i)
+        saveStream << ' ' << m_auiEncounter[i];
+    saveStream << ' ' << m_scepterDeadline;
+    m_strInstData = saveStream.str();
+
+    SaveToDB();
+    OUT_SAVE_INST_DATA_COMPLETE;
 }
 
 void instance_blackwing_lair::Load(const char* chrIn)
@@ -334,10 +353,30 @@ void instance_blackwing_lair::Load(const char* chrIn)
                >> m_auiEncounter[8] >> m_auiEncounter[9] >> m_auiEncounter[10]>> m_auiEncounter[11]
                >> m_auiEncounter[12];
 
-    for (uint32& i : m_auiEncounter)
+    if (GetData(TYPE_VAELASTRASZ) == IN_PROGRESS)
+        m_auiEncounter[TYPE_VAELASTRASZ] = FAIL;
+
+    // The in-memory phase transition timer is unavailable after a reload.
+    if (GetData(TYPE_NEFARIAN) == SPECIAL)
+        m_auiEncounter[TYPE_NEFARIAN] = NOT_STARTED;
+
+    for (uint32 boss = TYPE_RAZORGORE; boss <= TYPE_NEFARIAN; ++boss)
     {
-        if (i == IN_PROGRESS)
-            i = NOT_STARTED;
+        if (GetData(boss) == IN_PROGRESS)
+            m_auiEncounter[boss] = NOT_STARTED;
+    }
+
+    // Legacy SPECIAL is safe to resume as the ready-to-talk state.
+    if (GetData(TYPE_RAZORGORE) != DONE && GetData(TYPE_VAELASTRASZ) != DONE)
+        m_auiEncounter[TYPE_VAELASTRASZ] = NOT_STARTED;
+
+    if (GetData(TYPE_QUEST_SCEPTER) == IN_PROGRESS)
+    {
+        loadStream >> m_scepterDeadline;
+        const time_t now = sWorld.GetGameTime();
+        while (m_uiScepterQuestStep < std::size(ScepterWarningOffsets) - 1 && m_scepterDeadline &&
+               now >= m_scepterDeadline - ScepterWarningOffsets[m_uiScepterQuestStep])
+            ++m_uiScepterQuestStep;
     }
 
     if (GetData(TYPE_RAZORGORE) != DONE)
@@ -639,6 +678,11 @@ void instance_blackwing_lair::OnCreatureRespawn(Creature* creature)
 
     switch (creature->GetEntry())
     {
+        case NPC_VAELASTRASZ:
+            // The saved kill also covers spawns with a missing or expired respawn timestamp.
+            if (creature->IsAlive() && GetData(TYPE_VAELASTRASZ) == DONE)
+                creature->ForcedDespawn(1, true);
+            break;
         case NPC_GRETHOK_CONTROLLER:
             m_razorgoreOrbUnlocked = false;
             DoToggleGameObjectFlags(GO_ORB_OF_DOMINATION, GO_FLAG_NO_INTERACT, true);
@@ -677,65 +721,59 @@ bool instance_blackwing_lair::CheckConditionCriteriaMeet(Player const* pPlayer, 
     return false;
 }
 
+void instance_blackwing_lair::UpdateScepterQuest()
+{
+    if (GetData(TYPE_QUEST_SCEPTER) != IN_PROGRESS)
+        return;
+
+    const time_t now = sWorld.GetGameTime();
+    if (!m_scepterDeadline)
+    {
+        // Legacy saves carried the quest state but had no timestamp to recover.
+        m_scepterDeadline = now + ScepterQuestDuration;
+        SaveEncounterData();
+    }
+
+    if (now >= m_scepterDeadline)
+    {
+        SetData(TYPE_QUEST_SCEPTER, FAIL);
+        if (GetData(TYPE_NEFARIAN) == NOT_STARTED)
+        {
+            DoOrSimulateScriptTextForThisInstance(EMOTE_REDSHARD_TAUNT_2, NPC_LORD_VICTOR_NEFARIUS);
+            DoOrSimulateScriptTextForThisInstance(YELL_REDSHARD_TAUNT_7, NPC_LORD_VICTOR_NEFARIUS);
+        }
+        return;
+    }
+
+    if (now < m_scepterDeadline - ScepterWarningOffsets[m_uiScepterQuestStep])
+        return;
+
+    switch (m_uiScepterQuestStep++)
+    {
+        case 0:
+            DoOrSimulateScriptTextForThisInstance(YELL_REDSHARD_TAUNT_1, NPC_LORD_VICTOR_NEFARIUS);
+            break;
+        case 1:
+            if (urand(0, 1))
+                DoOrSimulateScriptTextForThisInstance(YELL_REDSHARD_TAUNT_3, NPC_LORD_VICTOR_NEFARIUS);
+            else
+            {
+                DoOrSimulateScriptTextForThisInstance(YELL_REDSHARD_TAUNT_2, NPC_LORD_VICTOR_NEFARIUS);
+                DoOrSimulateScriptTextForThisInstance(EMOTE_REDSHARD_TAUNT_1, NPC_LORD_VICTOR_NEFARIUS);
+            }
+            break;
+        case 2:
+            DoOrSimulateScriptTextForThisInstance(urand(0, 1) ? YELL_REDSHARD_TAUNT_5 : YELL_REDSHARD_TAUNT_4, NPC_LORD_VICTOR_NEFARIUS);
+            break;
+        case 3:
+            DoOrSimulateScriptTextForThisInstance(YELL_REDSHARD_TAUNT_6, NPC_LORD_VICTOR_NEFARIUS);
+            break;
+    }
+}
+
 void instance_blackwing_lair::Update(uint32 uiDiff)
 {
-    // Scepter of the Shifting Sand epic quest line
-    if (m_uiScepterEpicTimer)
-    {
-        if (m_uiScepterEpicTimer <= uiDiff)
-        {
-            switch (m_uiScepterQuestStep)
-            {
-                case 0:     // On quest acceptance
-                    DoOrSimulateScriptTextForThisInstance(YELL_REDSHARD_TAUNT_1, NPC_LORD_VICTOR_NEFARIUS);
-                    m_uiScepterEpicTimer = 2 * HOUR * IN_MILLISECONDS;
-                    break;
-                case 1:     // 2 hours time mark
-                    switch (urand(0, 1))
-                    {
-                        case 0:
-                            DoOrSimulateScriptTextForThisInstance(YELL_REDSHARD_TAUNT_2, NPC_LORD_VICTOR_NEFARIUS);
-                            DoOrSimulateScriptTextForThisInstance(EMOTE_REDSHARD_TAUNT_1, NPC_LORD_VICTOR_NEFARIUS);
-                            break;
-                        case 1:
-                            DoOrSimulateScriptTextForThisInstance(YELL_REDSHARD_TAUNT_3, NPC_LORD_VICTOR_NEFARIUS);
-                            break;
-                    }
-                    m_uiScepterEpicTimer = 2 * HOUR * IN_MILLISECONDS;
-                    break;
-                case 2:     // 1 hour left
-                    switch (urand(0, 1))
-                    {
-                        case 0:
-                            DoOrSimulateScriptTextForThisInstance(YELL_REDSHARD_TAUNT_4, NPC_LORD_VICTOR_NEFARIUS);
-                            break;
-                        case 1:
-                            DoOrSimulateScriptTextForThisInstance(YELL_REDSHARD_TAUNT_5, NPC_LORD_VICTOR_NEFARIUS);
-                            break;
-                    }
-                    m_uiScepterEpicTimer = 30 * MINUTE * IN_MILLISECONDS;
-                    break;
-                case 3:     // 30 min left
-                    DoOrSimulateScriptTextForThisInstance(YELL_REDSHARD_TAUNT_6, NPC_LORD_VICTOR_NEFARIUS);
-                    m_uiScepterEpicTimer = 30 * MINUTE * IN_MILLISECONDS;
-                    break;
-                case 4:     // Failure
-                    SetData(TYPE_QUEST_SCEPTER, FAIL);
-                    if (GetData(TYPE_NEFARIAN) == NOT_STARTED)
-                    {
-                        DoOrSimulateScriptTextForThisInstance(EMOTE_REDSHARD_TAUNT_2, NPC_LORD_VICTOR_NEFARIUS);
-                        DoOrSimulateScriptTextForThisInstance(YELL_REDSHARD_TAUNT_7, NPC_LORD_VICTOR_NEFARIUS);
-                    }
-                default:    // Something weird happened: stop timer and fail the event
-                    m_uiScepterEpicTimer = 0;
-                    SetData(TYPE_QUEST_SCEPTER, FAIL);
-                    break;
-            }
-            m_uiScepterQuestStep++;
-        }
-        else
-            m_uiScepterEpicTimer -= uiDiff;
-    }
+    UpdateScepterQuest();
     // Spawn Nefarian
     if (m_uiNefarianSpawnTimer)
     {

@@ -8148,6 +8148,8 @@ bool Spell::OnCheckTarget(Unit* target, SpellEffectIndex eff) const
             if (target->getClass() != CLASS_HUNTER)
                 return false;
             break;
+        case 23478:                                         // Burning Adrenaline explosion
+            return target != m_trueCaster;
         case 24150:                                         // Hive'Zara Stinger - Stinger Charge Primer
             return m_caster && target->IsPlayer() && !m_caster->CanReachWithMeleeAttack(target);
         case 25754:                                         // Moam - Drain Mana

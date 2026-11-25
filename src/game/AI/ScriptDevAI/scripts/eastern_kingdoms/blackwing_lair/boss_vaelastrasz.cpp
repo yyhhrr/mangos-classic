@@ -80,7 +80,7 @@ enum VaelaastraszActions
 
 struct boss_vaelastraszAI : public CombatAI
 {
-    boss_vaelastraszAI(Creature* creature) : CombatAI(creature, VAEL_ACTION_MAX), m_instance(static_cast<ScriptedInstance*>(creature->GetInstanceData()))
+    boss_vaelastraszAI(Creature* creature) : CombatAI(creature, VAEL_ACTION_MAX), m_instance(static_cast<instance_blackwing_lair*>(creature->GetInstanceData()))
     {
         AddTimerlessCombatAction(VAEL_LOW_HP_YELL, true);
         AddCombatAction(VAEL_BURNING_ADRENALINE_TANK, 45000u);
@@ -92,48 +92,82 @@ struct boss_vaelastraszAI : public CombatAI
         AddCustomAction(VAEL_INTRO, true, [&]() { HandleIntro(); });
         AddCustomAction(VAEL_SPEECH, true, [&]() { HandleSpeech(); });
         Reset();
-
-        // Set stand state to dead before the intro event
-        m_creature->SetStandState(UNIT_STAND_STATE_DEAD);
     }
 
-    ScriptedInstance* m_instance;
+    instance_blackwing_lair* m_instance;
 
     ObjectGuid m_nefariusGuid;
-    uint8 m_uiIntroPhase;
-
-    uint8 m_uiSpeechNum;
+    uint8 m_uiIntroPhase = 0;
+    uint8 m_uiSpeechNum = 0;
+    bool m_introInProgress = false;
+    bool m_speechInProgress = false;
 
     void Reset() override
     {
         CombatAI::Reset();
 
-        m_uiIntroPhase                   = 0;
-        m_uiSpeechNum                    = 0;
+        m_uiIntroPhase = 0;
+        m_uiSpeechNum = 0;
+        if (m_introInProgress || m_speechInProgress)
+            m_creature->SetActiveObjectState(false);
+        m_introInProgress = false;
+        m_speechInProgress = false;
+
+        if (!m_creature->IsAlive())
+            return;
 
         // Creature should have only 30% of hp
-        m_creature->SetHealth(uint32(m_creature->GetMaxHealth()*.3));
+        m_creature->SetHealthPercent(30.0f);
+        const uint32 state = m_instance ? m_instance->GetData(TYPE_VAELASTRASZ) : NOT_STARTED;
+        const bool hostile = state == IN_PROGRESS || state == FAIL;
+        m_creature->SetStandState(hostile ? UNIT_STAND_STATE_STAND : UNIT_STAND_STATE_DEAD);
+        m_creature->SetImmuneToPlayer(!hostile);
+        if (hostile)
+            m_creature->SetFactionTemporary(FACTION_HOSTILE, TEMPFACTION_RESTORE_RESPAWN);
+        UpdateInteraction();
+    }
+
+    bool CanStartSpeech(Player const& player) const
+    {
+        return player.IsAlive() && m_creature->IsAlive() && IsReadyToSpeak();
+    }
+
+    bool IsReadyToSpeak() const
+    {
+        return m_instance && m_instance->GetData(TYPE_RAZORGORE) == DONE &&
+            m_instance->GetData(TYPE_VAELASTRASZ) == SPECIAL && !m_speechInProgress;
+    }
+
+    void UpdateInteraction()
+    {
+        m_creature->ApplyModFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP | UNIT_NPC_FLAG_QUESTGIVER, IsReadyToSpeak());
     }
 
     void BeginIntro()
     {
-        // Start Intro delayed
-        ResetTimer(VAEL_INTRO, 1000);
+        if (!m_instance || m_instance->GetData(TYPE_RAZORGORE) != DONE ||
+            m_instance->GetData(TYPE_VAELASTRASZ) != NOT_STARTED || !m_creature->IsAlive() || m_introInProgress)
+            return;
 
-        if (m_instance)
-            m_instance->SetData(TYPE_VAELASTRASZ, SPECIAL);
+        m_introInProgress = true;
+        m_creature->SetActiveObjectState(true);
+        ResetTimer(VAEL_INTRO, 1000);
     }
 
-    void BeginSpeech(Player* target)
+    void BeginSpeech(Player const& player)
     {
-        // 10 seconds
+        if (!CanStartSpeech(player))
+            return;
+
+        m_speechInProgress = true;
+        UpdateInteraction();
+        m_creature->SetActiveObjectState(true);
         DoScriptText(SAY_LINE_1, m_creature);
 
         // Make boss stand
         m_creature->SetStandState(UNIT_STAND_STATE_STAND);
 
         ResetTimer(VAEL_SPEECH, 10000);
-        m_uiSpeechNum = 0;
     }
 
     void KilledUnit(Unit* pVictim) override
@@ -149,19 +183,22 @@ struct boss_vaelastraszAI : public CombatAI
         if (m_instance)
             m_instance->SetData(TYPE_VAELASTRASZ, IN_PROGRESS);
 
+        if (!m_speechInProgress)
+            m_creature->SetInCombatWithZone();
+
         // Buff players on aggro
         DoCastSpellIfCan(nullptr, SPELL_ESSENCE_OF_THE_RED);
     }
 
     void JustDied(Unit* /*killer*/) override
     {
-        if (m_instance)
+        if (m_instance && m_instance->GetData(TYPE_VAELASTRASZ) == IN_PROGRESS)
             m_instance->SetData(TYPE_VAELASTRASZ, DONE);
     }
 
     void JustReachedHome() override
     {
-        if (m_instance)
+        if (m_instance && m_instance->GetData(TYPE_VAELASTRASZ) == IN_PROGRESS)
             m_instance->SetData(TYPE_VAELASTRASZ, FAIL);
     }
 
@@ -235,10 +272,11 @@ struct boss_vaelastraszAI : public CombatAI
                 if (Creature* nefarius = m_creature->GetMap()->GetCreature(m_nefariusGuid))
                     nefarius->CastSpell(m_creature, SPELL_RED_LIGHTNING, TRIGGERED_NONE);
 
-                // Set npc flags now
-                m_creature->SetFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
-                m_creature->SetFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_QUESTGIVER);
                 m_creature->RemoveAurasDueToSpell(SPELL_NEFARIUS_CORRUPTION);
+                m_instance->SetData(TYPE_VAELASTRASZ, SPECIAL);
+                UpdateInteraction();
+                m_introInProgress = false;
+                m_creature->SetActiveObjectState(false);
                 break;
         }
         ++m_uiIntroPhase;
@@ -265,12 +303,22 @@ struct boss_vaelastraszAI : public CombatAI
                 break;
             case 2:
                 m_creature->SetFactionTemporary(FACTION_HOSTILE, TEMPFACTION_RESTORE_RESPAWN);
+                m_creature->SetImmuneToPlayer(false);
                 m_creature->SetInCombatWithZone();
                 AttackClosestEnemy();
+                if (m_instance->GetData(TYPE_VAELASTRASZ) == SPECIAL)
+                    m_instance->SetData(TYPE_VAELASTRASZ, FAIL);
+                m_speechInProgress = false;
+                m_creature->SetActiveObjectState(false);
                 break;
         }
         if (timer)
             ResetTimer(VAEL_SPEECH, timer);
+    }
+
+    static bool HasBurningAdrenaline(Unit const& target)
+    {
+        return target.HasAura(SPELL_BURNING_ADRENALINE) || target.HasAura(SPELL_BURNING_ADRENALINE_TANK);
     }
 
     void ExecuteAction(uint32 action) override
@@ -288,15 +336,24 @@ struct boss_vaelastraszAI : public CombatAI
             }
             case VAEL_BURNING_ADRENALINE_TANK:
             {
-                if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_BURNING_ADRENALINE_TANK) == CAST_OK)
+                Unit* target = m_creature->GetVictim();
+                if (target && (HasBurningAdrenaline(*target) ||
+                    DoCastSpellIfCan(target, SPELL_BURNING_ADRENALINE_TANK) == CAST_OK))
                     ResetCombatAction(action, 45000);
                 break;
             }
             case VAEL_BURNING_ADRENALINE_TARGET:
             {
-                if (Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, SPELL_BURNING_ADRENALINE, SELECT_FLAG_PLAYER | SELECT_FLAG_POWER_MANA))
-                    if (DoCastSpellIfCan(target, SPELL_BURNING_ADRENALINE) == CAST_OK)
-                        ResetCombatAction(action, 15000);
+                std::vector<Unit*> targets;
+                m_creature->SelectAttackingTargets(targets, ATTACKING_TARGET_ALL_SUITABLE, 0, SPELL_BURNING_ADRENALINE,
+                    SELECT_FLAG_PLAYER | SELECT_FLAG_POWER_MANA | SELECT_FLAG_SKIP_TANK);
+                targets.erase(std::remove_if(targets.begin(), targets.end(), [](Unit const* target)
+                {
+                    return !target->IsAlive() || HasBurningAdrenaline(*target);
+                }), targets.end());
+
+                if (targets.empty() || DoCastSpellIfCan(targets[urand(0, targets.size() - 1)], SPELL_BURNING_ADRENALINE) == CAST_OK)
+                    ResetCombatAction(action, 15000);
                 break;
             }
             case VAEL_FLAME_BREATH:
@@ -329,6 +386,13 @@ struct boss_vaelastraszAI : public CombatAI
 
 bool GossipSelect_boss_vaelastrasz(Player* pPlayer, Creature* creature, uint32 /*uiSender*/, uint32 uiAction)
 {
+    auto* ai = dynamic_cast<boss_vaelastraszAI*>(creature->AI());
+    if (!ai || !ai->CanStartSpeech(*pPlayer))
+    {
+        pPlayer->CLOSE_GOSSIP_MENU();
+        return true;
+    }
+
     switch (uiAction)
     {
         case GOSSIP_ACTION_INFO_DEF + 1:
@@ -337,8 +401,7 @@ bool GossipSelect_boss_vaelastrasz(Player* pPlayer, Creature* creature, uint32 /
             break;
         case GOSSIP_ACTION_INFO_DEF + 2:
             pPlayer->CLOSE_GOSSIP_MENU();
-            if (boss_vaelastraszAI* pVaelAI = dynamic_cast<boss_vaelastraszAI*>(creature->AI()))
-                pVaelAI->BeginSpeech(pPlayer);
+            ai->BeginSpeech(*pPlayer);
             break;
     }
 
@@ -347,6 +410,10 @@ bool GossipSelect_boss_vaelastrasz(Player* pPlayer, Creature* creature, uint32 /
 
 bool GossipHello_boss_vaelastrasz(Player* pPlayer, Creature* creature)
 {
+    auto* ai = dynamic_cast<boss_vaelastraszAI*>(creature->AI());
+    if (!ai || !ai->CanStartSpeech(*pPlayer))
+        return true;
+
     if (creature->isQuestGiver())
         pPlayer->PrepareQuestMenu(creature->GetObjectGuid());
 
@@ -356,12 +423,13 @@ bool GossipHello_boss_vaelastrasz(Player* pPlayer, Creature* creature)
     return true;
 }
 
-bool QuestAccept_boss_vaelastrasz(Player* pPlayer, Creature* /*creature*/, const Quest* pQuest)
+bool QuestAccept_boss_vaelastrasz(Player* pPlayer, Creature* creature, const Quest* pQuest)
 {
     if (pQuest->GetQuestId() == QUEST_NEFARIUS_CORRUPTION)
     {
-        if (instance_blackwing_lair* pInstance = (instance_blackwing_lair*)pPlayer->GetInstanceData())
-            pInstance->SetData(TYPE_QUEST_SCEPTER, IN_PROGRESS);
+        if (auto* ai = dynamic_cast<boss_vaelastraszAI*>(creature->AI()))
+            if (ai->CanStartSpeech(*pPlayer))
+                ai->m_instance->SetData(TYPE_QUEST_SCEPTER, IN_PROGRESS);
     }
 
     return true;
