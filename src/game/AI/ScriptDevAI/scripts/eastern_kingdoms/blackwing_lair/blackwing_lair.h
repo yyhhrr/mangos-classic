@@ -5,6 +5,9 @@
 #ifndef DEF_BLACKWING_LAIR
 #define DEF_BLACKWING_LAIR
 
+#include <unordered_map>
+#include <unordered_set>
+
 enum
 {
     MAX_ENCOUNTER               = 13,
@@ -22,8 +25,6 @@ enum
     TYPE_CHROMA_RBREATH         = 10,
     TYPE_NEFA_LTUNNEL           = 11,                       // Not real events: used to store the two random drakonids selection for the instance lifetime
     TYPE_NEFA_RTUNNEL           = 12,
-
-    DATA_DRAGON_EGG             = 1,                        // track the used eggs
 
     NPC_RAZORGORE               = 12435,
     NPC_VAELASTRASZ             = 13020,
@@ -132,14 +133,19 @@ class instance_blackwing_lair : public ScriptedInstance
         void OnObjectCreate(GameObject* pGo) override;
 
         void OnCreatureEnterCombat(Creature* pCreature) override;
+        bool OnCreatureLethalDamage(Creature& creature) override;
         void OnCreatureDeath(Creature* pCreature) override;
 
         void OnCreatureRespawn(Creature* creature) override;
+        void OnCreatureDespawn(Creature* creature) override;
 
         void SetData(uint32 uiType, uint32 uiData) override;
         uint32 GetData(uint32 uiType) const override;
 
-        void SetData64(uint32 uiData, uint64 uiGuid) override;
+        bool IsRazorgoreOrbAvailable() const;
+        bool CanDestroyRazorgoreEgg(Unit const& caster, GameObject const& egg) const;
+        bool RazorgoreEggDestroyed(Unit& caster, GameObject& egg);
+        void OnRazorgorePossessionEnded(Creature& razorgore, ObjectGuid controller);
 
         const char* Save() const override { return m_strInstData.c_str(); }
         void Load(const char* chrIn) override;
@@ -156,6 +162,13 @@ class instance_blackwing_lair : public ScriptedInstance
         uint32 m_auiEncounter[MAX_ENCOUNTER];
 
         void CleanupNefarianStage(bool fullCleanup);
+        void ResetRazorgore();
+        void ResetRazorgoreEggs(MapPersistentState& state);
+        void FinishRazorgoreEggPhase(Creature& razorgore);
+        void EngageRazorgore(Creature& razorgore, ObjectGuid controller);
+        void UpdateRazorgoreDefenderThreat();
+        void StopRazorgoreDefenders(bool retreat);
+        void RemoveRazorgoreDefender(Creature const& creature);
 
         uint32 m_uiResetTimer;
         uint32 m_uiDefenseTimer;
@@ -167,11 +180,14 @@ class instance_blackwing_lair : public ScriptedInstance
         uint8 m_uiDeadDrakonidsCount;
 
         bool m_bIsMainGateOpen;
+        bool m_razorgoreOrbUnlocked = false;
 
-        GuidList m_lDragonEggsGuids;
+        // Key by DB spawn so the same egg keeps its identity across grid reloads.
+        std::unordered_map<uint32, ObjectGuid> m_razorgoreEggs;
+        std::unordered_set<uint32> m_destroyedRazorgoreEggs;
+        GuidSet m_razorgoreGuards;
+        GuidSet m_razorgoreDefenders;
         GuidList m_lDrakonidBonesGuids;
-        GuidList m_lDefendersGuids;
-        GuidList m_lUsedEggsGuids;
         GuidList m_lDrakonidSpawnerGuids;
         GuidList m_drakonids;
         GuidVector m_vGeneratorGuids;

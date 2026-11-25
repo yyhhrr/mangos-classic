@@ -522,16 +522,10 @@ Unit* ThreatManager::getHostileTarget()
 
 float ThreatManager::getThreat(Unit* victim, bool alsoSearchOfflineList)
 {
-    float threat = 0.0f;
     HostileReference* ref = iThreatContainer.getReferenceByTarget(victim);
     if (!ref && alsoSearchOfflineList)
         ref = iThreatOfflineContainer.getReferenceByTarget(victim);
-    if (ref)
-        threat = ref->getThreat();
-    else if (alsoSearchOfflineList)
-        threat = iThreatOfflineContainer.getReferenceByTarget(victim)->getThreat();
-
-    return threat;
+    return ref ? ref->getThreat() : 0.0f;
 }
 
 float ThreatManager::GetHighestThreat()

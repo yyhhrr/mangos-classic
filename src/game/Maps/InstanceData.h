@@ -127,6 +127,9 @@ class InstanceData
         // called on creature evade
         virtual void OnCreatureEvade(Creature* /*creature*/) {}
 
+        // Return true to handle lethal damage without killing the creature.
+        virtual bool OnCreatureLethalDamage(Creature& /*creature*/) { return false; }
+
         // called on creature death
         virtual void OnCreatureDeath(Creature* /*creature*/) {}
 

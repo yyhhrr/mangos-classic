@@ -767,7 +767,8 @@ void Spell::EffectDummy(SpellEffectIndex eff_idx)
                 case 20037:                                 // Explode Orb Effect
                 {
                     if (unitTarget)
-                        unitTarget->CastSpell(unitTarget, 20038, TRIGGERED_OLD_TRIGGERED);
+                        // Explosion excludes its caster, so let the area effects select the targets.
+                        unitTarget->CastSpell(nullptr, 20038, TRIGGERED_OLD_TRIGGERED | TRIGGERED_IGNORE_HIT_CALCULATION);
 
                     return;
                 }

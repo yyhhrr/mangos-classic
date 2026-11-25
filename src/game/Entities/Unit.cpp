@@ -1009,6 +1009,11 @@ uint32 Unit::DealDamage(Unit* dealer, Unit* victim, uint32 damage, CleanDamage c
 
     if (health <= damage)
     {
+        if (victim->IsCreature())
+            if (InstanceData* mapInstance = victim->GetInstanceData())
+                if (mapInstance->OnCreatureLethalDamage(*static_cast<Creature*>(victim)))
+                    return 0;
+
         if (damagetype != INSTAKILL && victim->IsAlive())
             if (UnitAI* ai = victim->AI(); ai && ai->HandleLethalDamage(dealer))
                 return 0;

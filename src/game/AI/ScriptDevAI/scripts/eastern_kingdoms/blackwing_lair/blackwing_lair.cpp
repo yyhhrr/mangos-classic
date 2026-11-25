@@ -25,6 +25,8 @@ EndScriptData
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "blackwing_lair.h"
+#include "Globals/ObjectMgr.h"
+#include "Maps/MapPersistentStateMgr.h"
 
 instance_blackwing_lair::instance_blackwing_lair(Map* pMap) : ScriptedInstance(pMap),
     m_uiResetTimer(0),
@@ -43,10 +45,22 @@ instance_blackwing_lair::instance_blackwing_lair(Map* pMap) : ScriptedInstance(p
 void instance_blackwing_lair::Initialize()
 {
     memset(&m_auiEncounter, 0, sizeof(m_auiEncounter));
+
+    auto findEggs = [this](GameObjectDataPair const& spawn)
+    {
+        if (spawn.second.mapid == instance->GetId() && spawn.second.id == GO_BLACK_DRAGON_EGG &&
+            spawn.second.spawntimesecsmin >= 0 && spawn.second.IsNotPartOfPoolOrEvent())
+            m_razorgoreEggs.try_emplace(spawn.first);
+        return false;
+    };
+    sObjectMgr.DoGOData(findEggs);
 }
 
 bool instance_blackwing_lair::IsEncounterInProgress() const
 {
+    if (GetData(TYPE_RAZORGORE) == SPECIAL)
+        return true;
+
     for (uint32 i : m_auiEncounter)
     {
         if (i == IN_PROGRESS)
@@ -60,18 +74,12 @@ void instance_blackwing_lair::OnCreatureCreate(Creature* pCreature)
     switch (pCreature->GetEntry())
     {
         case NPC_MONSTER_GENERATOR:
-            m_vGeneratorGuids.push_back(pCreature->GetObjectGuid());
+            if (std::find(m_vGeneratorGuids.begin(), m_vGeneratorGuids.end(), pCreature->GetObjectGuid()) == m_vGeneratorGuids.end())
+                m_vGeneratorGuids.push_back(pCreature->GetObjectGuid());
             break;
-        case NPC_BLACKWING_LEGIONNAIRE:
-        case NPC_BLACKWING_MAGE:
-        case NPC_DRAGONSPAWN:
-            // Increase the NPC counter depending on dragonspawn or not
-            if (pCreature->GetEntry() == NPC_DRAGONSPAWN)
-                m_uiDragonspawnCount++;
-            else
-                m_uiBlackwingDefCount++;
-            // Egg room defenders attack players and Razorgore on spawn
-            m_lDefendersGuids.push_back(pCreature->GetObjectGuid());
+        case NPC_GRETHOK_CONTROLLER:
+        case NPC_BLACKWING_GUARDSMAN:
+            m_razorgoreGuards.insert(pCreature->GetObjectGuid());
             break;
         // Nefarian encounter
         case NPC_BLACK_SPAWNER:
@@ -107,8 +115,10 @@ void instance_blackwing_lair::OnObjectCreate(GameObject* pGo)
     switch (pGo->GetEntry())
     {
         case GO_DOOR_RAZORGORE_ENTER:
-        case GO_ORB_OF_DOMINATION:
         case GO_DOOR_NEFARIAN:
+            break;
+        case GO_ORB_OF_DOMINATION:
+            pGo->ApplyModFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT, !IsRazorgoreOrbAvailable());
             break;
         case GO_DOOR_RAZORGORE_EXIT:
             if (m_auiEncounter[TYPE_RAZORGORE] == DONE)
@@ -127,7 +137,9 @@ void instance_blackwing_lair::OnObjectCreate(GameObject* pGo)
                 pGo->SetGoState(GO_STATE_ACTIVE);
             break;
         case GO_BLACK_DRAGON_EGG:
-            m_lDragonEggsGuids.push_back(pGo->GetObjectGuid());
+            pGo->SetFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
+            if (auto egg = m_razorgoreEggs.find(pGo->GetDbGuid()); egg != m_razorgoreEggs.end())
+                egg->second = pGo->GetObjectGuid();
             return;
         case GO_DRAKONID_BONES:
             m_lDrakonidBonesGuids.push_back(pGo->GetObjectGuid());
@@ -146,6 +158,12 @@ void instance_blackwing_lair::OnObjectCreate(GameObject* pGo)
 
 void instance_blackwing_lair::SetData(uint32 uiType, uint32 uiData)
 {
+    const uint32 previousRazorgoreState = GetData(TYPE_RAZORGORE);
+    if (uiType == TYPE_RAZORGORE &&
+        (previousRazorgoreState == uiData || previousRazorgoreState == DONE ||
+        (uiData == DONE && previousRazorgoreState != SPECIAL)))
+        return;
+
     // Close de the main gate whenever an event starts (if it is not already open)
     if (m_bIsMainGateOpen && (uiData == IN_PROGRESS || uiData == SPECIAL))
     {
@@ -174,37 +192,46 @@ void instance_blackwing_lair::SetData(uint32 uiType, uint32 uiData)
         case TYPE_RAZORGORE:
             m_auiEncounter[uiType] = uiData;
             if (uiData == DONE)
+            {
                 DoUseDoorOrButton(GO_DOOR_RAZORGORE_EXIT);
+                if (Creature* razorgore = GetSingleCreatureFromStorage(NPC_RAZORGORE, true))
+                    razorgore->SetActiveObjectState(false);
+            }
+            else if (uiData == IN_PROGRESS)
+            {
+                m_uiDefenseTimer = 40000;
+                if (Creature* razorgore = GetSingleCreatureFromStorage(NPC_RAZORGORE, true))
+                    razorgore->SetActiveObjectState(true);
+            }
             else if (uiData == FAIL)
             {
                 m_uiResetTimer = 30000;
+                m_uiDefenseTimer = 0;
+                m_razorgoreOrbUnlocked = false;
+                DoToggleGameObjectFlags(GO_ORB_OF_DOMINATION, GO_FLAG_NO_INTERACT, true);
 
-                if (Creature* razorgore = GetSingleCreatureFromStorage(NPC_RAZORGORE))
+                if (Creature* razorgore = GetSingleCreatureFromStorage(NPC_RAZORGORE, true))
                 {
-                    DoScriptText(SAY_RAZORGORE_DEATH, razorgore);
-                    razorgore->CastSpell(nullptr, SPELL_FIREBALL, TRIGGERED_OLD_TRIGGERED);
+                    razorgore->RemoveAurasDueToSpell(SPELL_POSSESS);
+                    if (previousRazorgoreState != SPECIAL)
+                    {
+                        DoScriptText(SAY_RAZORGORE_DEATH, razorgore);
+                        razorgore->CastSpell(nullptr, SPELL_FIREBALL, TRIGGERED_OLD_TRIGGERED);
+                    }
+                    razorgore->AI()->SetReactState(REACT_PASSIVE);
+                    razorgore->CombatStop(true);
+                    razorgore->GetMotionMaster()->Clear();
                     razorgore->ForcedDespawn(5000);
                 }
 
-                // Reset the Orb of Domination and the eggs
-                DoToggleGameObjectFlags(GO_ORB_OF_DOMINATION, GO_FLAG_NO_INTERACT, true);
                 if (Creature* pOrb = GetSingleCreatureFromStorage(NPC_BLACKWING_ORB_TRIGGER))
-                {
                     if (pOrb->IsAlive())
                         pOrb->AI()->EnterEvadeMode();
-                }
 
-                // Reset defenders
-                for (GuidList::const_iterator itr = m_lDefendersGuids.begin(); itr != m_lDefendersGuids.end(); ++itr)
-                {
-                    if (Creature* pDefender = instance->GetCreature(*itr))
-                        pDefender->ForcedDespawn();
-                }
-
-                m_lUsedEggsGuids.clear();
-                m_lDefendersGuids.clear();
-                m_uiBlackwingDefCount = 0;
-                m_uiDragonspawnCount = 0;
+                StopRazorgoreDefenders(false);
+                for (ObjectGuid guid : m_razorgoreGuards)
+                    if (Creature* guard = instance->GetCreature(guid))
+                        guard->ForcedDespawn();
             }
             break;
         case TYPE_VAELASTRASZ:
@@ -273,12 +300,12 @@ void instance_blackwing_lair::SetData(uint32 uiType, uint32 uiData)
             break;
     }
 
-    if (uiData >= DONE)
+    if (uiData >= DONE && (uiType != TYPE_RAZORGORE || uiData == DONE))
     {
         OUT_SAVE_INST_DATA;
 
         std::ostringstream saveStream;
-        saveStream << m_auiEncounter[0] << " " << m_auiEncounter[1] << " " << m_auiEncounter[2] << " "
+        saveStream << (GetData(TYPE_RAZORGORE) == DONE ? DONE : NOT_STARTED) << " " << m_auiEncounter[1] << " " << m_auiEncounter[2] << " "
                    << m_auiEncounter[3] << " " << m_auiEncounter[4] << " " << m_auiEncounter[5] << " "
                    << m_auiEncounter[6] << " " << m_auiEncounter[7] << " " << m_auiEncounter[8] << " "
                    << m_auiEncounter[9] << " " << m_auiEncounter[10]<< " " << m_auiEncounter[11] << " "
@@ -313,6 +340,28 @@ void instance_blackwing_lair::Load(const char* chrIn)
             i = NOT_STARTED;
     }
 
+    if (GetData(TYPE_RAZORGORE) != DONE)
+    {
+        m_auiEncounter[TYPE_RAZORGORE] = NOT_STARTED;
+        if (auto* state = sMapPersistentStateMgr.GetPersistentState(instance->GetId(), instance->GetInstanceId()))
+        {
+            // Load runs before Map attaches the persistent state or loads spawn grids.
+            state->SetUsedByMapState(instance);
+            ResetRazorgoreEggs(*state);
+
+            // A restart can preserve respawn delays from an interrupted attempt.
+            auto resetGuards = [this, state](CreatureDataPair const& spawn)
+            {
+                if (spawn.second.mapid == instance->GetId() &&
+                    (spawn.second.id == NPC_RAZORGORE || spawn.second.id == NPC_GRETHOK_CONTROLLER || spawn.second.id == NPC_BLACKWING_GUARDSMAN) &&
+                    state->GetCreatureRespawnTime(spawn.first))
+                    state->SaveCreatureRespawnTime(spawn.first, 0);
+                return false;
+            };
+            sObjectMgr.DoCreatureData(resetGuards);
+        }
+    }
+
     OUT_LOAD_INST_DATA_COMPLETE;
 }
 
@@ -324,56 +373,197 @@ uint32 instance_blackwing_lair::GetData(uint32 uiType) const
     return 0;
 }
 
-void instance_blackwing_lair::SetData64(uint32 uiData, uint64 uiGuid)
+bool instance_blackwing_lair::IsRazorgoreOrbAvailable() const
 {
-    if (uiData == DATA_DRAGON_EGG)
+    return GetData(TYPE_RAZORGORE) == IN_PROGRESS && m_razorgoreOrbUnlocked;
+}
+
+bool instance_blackwing_lair::CanDestroyRazorgoreEgg(Unit const& caster, GameObject const& egg) const
+{
+    if (!IsRazorgoreOrbAvailable() || !caster.IsCreature() || !caster.IsAlive() || caster.GetEntry() != NPC_RAZORGORE ||
+        !caster.HasCharmer() || !caster.HasAura(SPELL_POSSESS) ||
+        egg.GetEntry() != GO_BLACK_DRAGON_EGG || !egg.IsSpawned())
+        return false;
+
+    auto spawn = m_razorgoreEggs.find(egg.GetDbGuid());
+    return spawn != m_razorgoreEggs.end() && spawn->second == egg.GetObjectGuid() &&
+        m_destroyedRazorgoreEggs.find(spawn->first) == m_destroyedRazorgoreEggs.end();
+}
+
+bool instance_blackwing_lair::RazorgoreEggDestroyed(Unit& caster, GameObject& egg)
+{
+    if (!CanDestroyRazorgoreEgg(caster, egg) || egg.GetLootState() != GO_ACTIVATED)
+        return false;
+
+    m_destroyedRazorgoreEggs.insert(egg.GetDbGuid());
+    if (m_destroyedRazorgoreEggs.size() == m_razorgoreEggs.size())
+        FinishRazorgoreEggPhase(static_cast<Creature&>(caster));
+    return true;
+}
+
+void instance_blackwing_lair::FinishRazorgoreEggPhase(Creature& razorgore)
+{
+    Unit const* charmer = razorgore.GetCharmer();
+    ObjectGuid const controller = charmer ? charmer->GetObjectGuid() : ObjectGuid();
+    SetData(TYPE_RAZORGORE, SPECIAL);
+    m_uiDefenseTimer = 0;
+    m_razorgoreOrbUnlocked = false;
+    DoToggleGameObjectFlags(GO_ORB_OF_DOMINATION, GO_FLAG_NO_INTERACT, true);
+
+    if (Creature* troops = GetSingleCreatureFromStorage(NPC_NEFARIANS_TROOPS))
     {
-        if (GameObject* pEgg = instance->GetGameObject(ObjectGuid(uiGuid)))
-            m_lUsedEggsGuids.push_back(pEgg->GetObjectGuid());
+        DoScriptText(EMOTE_ORB_SHUT_OFF, troops);
+        DoScriptText(EMOTE_TROOPS_FLEE, troops);
+    }
 
-        // If all eggs are destroyed, then allow Razorgore to be attacked
-        if (m_lUsedEggsGuids.size() == m_lDragonEggsGuids.size())
+    StopRazorgoreDefenders(true);
+    razorgore.RemoveAurasDueToSpell(SPELL_POSSESS);
+    razorgore.AI()->SendAIEvent(AI_EVENT_CUSTOM_A, &razorgore, &razorgore);
+    EngageRazorgore(razorgore, controller);
+}
+
+void instance_blackwing_lair::EngageRazorgore(Creature& razorgore, ObjectGuid controller)
+{
+    razorgore.AttackStop(true, true);
+    razorgore.DeleteThreatList();
+    razorgore.AI()->SetCombatMovement(true);
+    if (Player* player = instance->GetPlayer(controller); player && player->IsAlive() && razorgore.CanAttack(player))
+    {
+        razorgore.AI()->AttackStart(player);
+        razorgore.AddThreat(player, 1000000.0f);
+    }
+    razorgore.SetInCombatWithZone(true);
+}
+
+void instance_blackwing_lair::OnRazorgorePossessionEnded(Creature& razorgore, ObjectGuid controller)
+{
+    // The last egg and a wipe each own their own transition.
+    if (!IsRazorgoreOrbAvailable() || !razorgore.IsAlive() || razorgore.HasCharmer())
+        return;
+
+    for (ObjectGuid guid : m_razorgoreDefenders)
+        if (Creature* defender = instance->GetCreature(guid))
+            defender->getThreatManager().modifyThreatPercent(&razorgore, -100);
+
+    EngageRazorgore(razorgore, controller);
+}
+
+void instance_blackwing_lair::UpdateRazorgoreDefenderThreat()
+{
+    Creature* razorgore = GetSingleCreatureFromStorage(NPC_RAZORGORE, true);
+    if (!razorgore || !razorgore->HasAura(SPELL_POSSESS))
+        return;
+
+    Unit* controller = razorgore->GetCharmer();
+    if (!controller || !controller->IsPlayer() || !controller->IsAlive())
+        return;
+
+    for (ObjectGuid guid : m_razorgoreDefenders)
+    {
+        Creature* defender = instance->GetCreature(guid);
+        if (!defender || !defender->CanAttack(controller))
+            continue;
+
+        ThreatManager& threat = defender->getThreatManager();
+        float const razorgoreThreat = threat.getThreat(razorgore, true);
+        if (razorgoreThreat > 0.0f && threat.getThreat(controller, true) != razorgoreThreat)
         {
-            SetData(TYPE_RAZORGORE, SPECIAL);
-            DoToggleGameObjectFlags(GO_ORB_OF_DOMINATION, GO_FLAG_NO_INTERACT, true);
-
-            // Emote for the start of the second phase
-            if (Creature* pTrigger = GetSingleCreatureFromStorage(NPC_NEFARIANS_TROOPS))
-            {
-                DoScriptText(EMOTE_ORB_SHUT_OFF, pTrigger);
-                DoScriptText(EMOTE_TROOPS_FLEE, pTrigger);
-            }
-
-            // Break mind control and set max health
-            if (Creature* razorgore = GetSingleCreatureFromStorage(NPC_RAZORGORE))
-            {
-                // need to remove mc here so he gets his proper AI
-                razorgore->RemoveAurasDueToSpell(SPELL_POSSESS);
-                razorgore->AI()->SendAIEvent(AI_EVENT_CUSTOM_A, razorgore, razorgore);
-            }
-
-            // All defenders evade and despawn
-            for (GuidList::const_iterator itr = m_lDefendersGuids.begin(); itr != m_lDefendersGuids.end(); ++itr)
-            {
-                if (Creature* pDefender = instance->GetCreature(*itr))
-                {
-                    pDefender->AI()->EnterEvadeMode();
-                    pDefender->ForcedDespawn(10000);
-                }
-            }
-            m_uiBlackwingDefCount = 0;
-            m_uiDragonspawnCount = 0;
+            // Mirror only the controller's entry. Tanks retain their earned threat.
+            threat.modifyThreatPercent(controller, -100);
+            threat.addThreatDirectly(controller, razorgoreThreat, false);
         }
     }
 }
 
+void instance_blackwing_lair::StopRazorgoreDefenders(bool retreat)
+{
+    GuidSet defenders;
+    defenders.swap(m_razorgoreDefenders);
+    m_uiBlackwingDefCount = 0;
+    m_uiDragonspawnCount = 0;
+
+    for (ObjectGuid guid : defenders)
+    {
+        Creature* defender = instance->GetCreature(guid);
+        if (!defender || !defender->IsAlive())
+            continue;
+
+        defender->AI()->SetReactState(REACT_PASSIVE);
+        defender->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PACIFIED | UNIT_FLAG_SILENCED |
+            UNIT_FLAG_IMMUNE_TO_PLAYER | UNIT_FLAG_IMMUNE_TO_NPC);
+        defender->CombatStop(true);
+        // Cancel delayed spell events as well as casts still in progress.
+        defender->m_events.KillAllEvents(false);
+        if (retreat)
+        {
+            defender->GetMotionMaster()->Clear();
+            defender->GetMotionMaster()->MovePoint(0, -7555.55f, -1025.16f, 408.4914f);
+        }
+        defender->ForcedDespawn(retreat ? 10000 : 0);
+    }
+}
+
+void instance_blackwing_lair::RemoveRazorgoreDefender(Creature const& creature)
+{
+    if (!m_razorgoreDefenders.erase(creature.GetObjectGuid()))
+        return;
+
+    if (creature.GetEntry() == NPC_DRAGONSPAWN)
+        --m_uiDragonspawnCount;
+    else
+        --m_uiBlackwingDefCount;
+}
+
+void instance_blackwing_lair::ResetRazorgoreEggs(MapPersistentState& state)
+{
+    m_destroyedRazorgoreEggs.clear();
+    for (auto const& [dbGuid, guid] : m_razorgoreEggs)
+    {
+        if (state.GetGORespawnTime(dbGuid))
+            state.SaveGORespawnTime(dbGuid, 0);
+        if (GameObject* egg = instance->GetGameObject(guid))
+        {
+            if (!egg->IsSpawned())
+                egg->Respawn();
+            else if (egg->GetLootState() != GO_READY)
+            {
+                egg->RemoveFlag(GAMEOBJECT_FLAGS, GO_FLAG_IN_USE);
+                egg->SetGoState(GO_STATE_READY);
+                egg->SetLootState(GO_READY);
+            }
+        }
+    }
+}
+
+void instance_blackwing_lair::ResetRazorgore()
+{
+    ResetRazorgoreEggs(*instance->GetPersistentState());
+    if (Creature* razorgore = GetSingleCreatureFromStorage(NPC_RAZORGORE, true))
+    {
+        if (!razorgore->IsAlive())
+            razorgore->Respawn();
+        razorgore->SetActiveObjectState(false);
+    }
+    for (ObjectGuid guid : m_razorgoreGuards)
+        if (Creature* guard = instance->GetCreature(guid); guard && !guard->IsAlive())
+            guard->Respawn();
+
+    SetData(TYPE_RAZORGORE, NOT_STARTED);
+}
+
 void instance_blackwing_lair::OnCreatureEnterCombat(Creature* pCreature)
 {
-    if (pCreature->GetEntry() == NPC_GRETHOK_CONTROLLER)
-    {
+    if (pCreature->GetEntry() == NPC_GRETHOK_CONTROLLER && GetData(TYPE_RAZORGORE) == NOT_STARTED)
         SetData(TYPE_RAZORGORE, IN_PROGRESS);
-        m_uiDefenseTimer = 40000;
-    }
+}
+
+bool instance_blackwing_lair::OnCreatureLethalDamage(Creature& creature)
+{
+    if (creature.GetEntry() != NPC_RAZORGORE || GetData(TYPE_RAZORGORE) == SPECIAL)
+        return false;
+
+    SetData(TYPE_RAZORGORE, FAIL);
+    return true;
 }
 
 void instance_blackwing_lair::OnCreatureDeath(Creature* pCreature)
@@ -381,8 +571,13 @@ void instance_blackwing_lair::OnCreatureDeath(Creature* pCreature)
     switch (pCreature->GetEntry())
     {
         case NPC_GRETHOK_CONTROLLER:
-            // Allow orb to be used
-            DoToggleGameObjectFlags(GO_ORB_OF_DOMINATION, GO_FLAG_NO_INTERACT, false);
+            if (GetData(TYPE_RAZORGORE) == NOT_STARTED)
+                SetData(TYPE_RAZORGORE, IN_PROGRESS);
+            if (GetData(TYPE_RAZORGORE) == IN_PROGRESS)
+            {
+                m_razorgoreOrbUnlocked = true;
+                DoToggleGameObjectFlags(GO_ORB_OF_DOMINATION, GO_FLAG_NO_INTERACT, false);
+            }
 
             if (Creature* pOrbTrigger = GetSingleCreatureFromStorage(NPC_BLACKWING_ORB_TRIGGER))
                 pOrbTrigger->InterruptNonMeleeSpells(false);
@@ -397,10 +592,8 @@ void instance_blackwing_lair::OnCreatureDeath(Creature* pCreature)
             break;
         case NPC_BLACKWING_LEGIONNAIRE:
         case NPC_BLACKWING_MAGE:
-            m_uiBlackwingDefCount--;
-            break;
         case NPC_DRAGONSPAWN:
-            m_uiDragonspawnCount--;
+            RemoveRazorgoreDefender(*pCreature);
             break;
         case NPC_BLUE_DRAKONID:
         case NPC_GREEN_DRAKONID:
@@ -420,18 +613,35 @@ void instance_blackwing_lair::OnCreatureRespawn(Creature* creature)
 {
     if (creature->GetSpawnerGuid().GetEntry() == NPC_MONSTER_GENERATOR)
     {
+        if (GetData(TYPE_RAZORGORE) != IN_PROGRESS)
+        {
+            creature->ForcedDespawn(1);
+            return;
+        }
+
+        if (m_razorgoreDefenders.insert(creature->GetObjectGuid()).second)
+        {
+            if (creature->GetEntry() == NPC_DRAGONSPAWN)
+                ++m_uiDragonspawnCount;
+            else
+                ++m_uiBlackwingDefCount;
+        }
         creature->SetNoLoot(true);
         creature->SetCorpseDelay(5);
         creature->SetInCombatWithZone();
+        if (Creature* razorgore = GetSingleCreatureFromStorage(NPC_RAZORGORE, true))
+        {
+            creature->AI()->AttackStart(razorgore);
+            creature->AddThreat(razorgore, 10.0f);
+        }
         return;
     }
 
     switch (creature->GetEntry())
     {
         case NPC_GRETHOK_CONTROLLER:
-            if (Creature* razorgore = GetSingleCreatureFromStorage(NPC_RAZORGORE))
-                if (GetData(TYPE_RAZORGORE) == FAIL)
-                    razorgore->Respawn();
+            m_razorgoreOrbUnlocked = false;
+            DoToggleGameObjectFlags(GO_ORB_OF_DOMINATION, GO_FLAG_NO_INTERACT, true);
             break;
         case NPC_BLACKWING_LEGIONNAIRE:
         case NPC_BLACKWING_MAGE:
@@ -445,6 +655,11 @@ void instance_blackwing_lair::OnCreatureRespawn(Creature* creature)
             creature->SetInCombatWithZone();
             break;
     }
+}
+
+void instance_blackwing_lair::OnCreatureDespawn(Creature* creature)
+{
+    RemoveRazorgoreDefender(*creature);
 }
 
 bool instance_blackwing_lair::CheckConditionCriteriaMeet(Player const* pPlayer, uint32 uiInstanceConditionId, WorldObject const* pConditionSource, uint32 conditionSourceType) const
@@ -548,75 +763,52 @@ void instance_blackwing_lair::Update(uint32 uiDiff)
     {
         if (m_uiResetTimer <= uiDiff)
         {
-            // Respawn Razorgore
-            if (Creature* pRazorgore = GetSingleCreatureFromStorage(NPC_RAZORGORE))
-            {
-                if (!pRazorgore->IsAlive())
-                    pRazorgore->Respawn();
-            }
-
-            // Respawn the Dragon Eggs
-            for (GuidList::const_iterator itr = m_lDragonEggsGuids.begin(); itr != m_lDragonEggsGuids.end(); ++itr)
-            {
-                if (GameObject* pEgg = instance->GetGameObject(*itr))
-                {
-                    if (!pEgg->IsSpawned())
-                        pEgg->Respawn();
-                }
-            }
-
             m_uiResetTimer = 0;
+            ResetRazorgore();
         }
         else
             m_uiResetTimer -= uiDiff;
     }
 
-    if (GetData(TYPE_RAZORGORE) != IN_PROGRESS)
+    uint32 const razorgoreState = GetData(TYPE_RAZORGORE);
+    if ((razorgoreState == IN_PROGRESS || razorgoreState == SPECIAL) && !GetPlayerInMap(true, false))
+    {
+        SetData(TYPE_RAZORGORE, FAIL);
+        return;
+    }
+
+    if (razorgoreState != IN_PROGRESS)
         return;
 
-    if (m_uiDefenseTimer < uiDiff)
+    if (m_uiDefenseTimer <= uiDiff)
     {
         // Randomize generators
         std::shuffle(m_vGeneratorGuids.begin(), m_vGeneratorGuids.end(), *GetRandomGenerator());
 
         // Spawn the defenders
-        for (uint8 i = 0; i < MAX_EGGS_DEFENDERS; ++i)
+        std::size_t const generators = std::min(m_vGeneratorGuids.size(), std::size_t(MAX_EGGS_DEFENDERS));
+        for (std::size_t i = 0; i < generators; ++i)
         {
+            bool const canSpawnOrc = m_uiBlackwingDefCount < MAX_BLACKWING_DEFENDER;
+            bool const canSpawnDragon = m_uiDragonspawnCount < MAX_DRAGONSPAWN;
+            if (!canSpawnOrc && !canSpawnDragon)
+                break;
+
             Creature* pGenerator = instance->GetCreature(m_vGeneratorGuids[i]);
             if (!pGenerator)
                 continue;
 
-            // Defenders are spawned randomly, 4 at a time
-            // There can be up to 12 Dragonspawns spawned and 40 Orcs (either mage or legionnaire)
-            // If one of the cap is reached, only the remaining type of NPC is spawned until the second cap is also reached
-
-            uint32 uiSpellId = 0;                                                   // Hold the spell summoning the NPC defender for that generator
-            uint8 uiMaxRange = (m_uiDragonspawnCount < MAX_DRAGONSPAWN ? 3 : 1);    // If all dragonspawns are already spawned, don't roll for them below
-
-            switch (urand(0, uiMaxRange))
-            {
-                case 0:
-                    if (m_uiBlackwingDefCount < MAX_BLACKWING_DEFENDER)
-                        uiSpellId = SPELL_SUMMON_LEGIONNAIRE;
-                    break;
-                case 1:
-                    if (m_uiBlackwingDefCount < MAX_BLACKWING_DEFENDER)
-                        uiSpellId = SPELL_SUMMON_MAGE;
-                    break;
-                case 2:
-                case 3:
-                    uiSpellId = SPELL_SUMMON_DRAGONSPAWN;
-                    break;
-            }
-
-            if (uiSpellId != 0)
-                pGenerator->CastSpell(nullptr, uiSpellId, TRIGGERED_NONE);
+            uint32 const roll = urand(canSpawnOrc ? 0 : 2, canSpawnDragon ? 3 : 1);
+            uint32 const summonSpells[] = {SPELL_SUMMON_LEGIONNAIRE, SPELL_SUMMON_MAGE, SPELL_SUMMON_DRAGONSPAWN, SPELL_SUMMON_DRAGONSPAWN};
+            pGenerator->CastSpell(nullptr, summonSpells[roll], TRIGGERED_NONE);
         }
 
         m_uiDefenseTimer = 15000;
     }
     else
         m_uiDefenseTimer -= uiDiff;
+
+    UpdateRazorgoreDefenderThreat();
 }
 
 void instance_blackwing_lair::InitiateBreath(uint32 uiEventId)

@@ -17,7 +17,7 @@
 /* ScriptData
 SDName: Boss_Razorgore
 SD%Complete: 95
-SDComment: Threat management after Mind Control is released needs core support (boss should have aggro on its previous controller and its previous victim should have threat transfered from boss to controlling player)
+SDComment:
 SDCategory: Blackwing Lair
 EndScriptData
 
@@ -26,6 +26,7 @@ EndScriptData
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "blackwing_lair.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
+#include "MotionGenerators/MovementGenerator.h"
 
 enum
 {
@@ -34,8 +35,6 @@ enum
     SAY_EGGS_BROKEN_3           = -1469024,
 
     SPELL_POSSESS_VISUAL        = 23014,                    // visual effect and increase the damage taken
-    SPELL_DESTROY_EGG           = 19873,
-    // SPELL_POSSESS               = 19832,                    // actual possess spell
     SPELL_DRAGON_ORB            = 23021,                    // shrink - not in sniff
     SPELL_MIND_EXHAUSTION       = 23958,
 
@@ -43,8 +42,11 @@ enum
     SPELL_WARSTOMP              = 24375,
     SPELL_FIREBALL_VOLLEY       = 22425,
     SPELL_CONFLAGRATION         = 23023,
+    SPELL_SUMMON_PLAYER         = 25104,
 
     SPELL_DOUBLE_ATTACK         = 18943,
+    // Run before the core's 10-second unreachable-target evade.
+    SUMMON_UNREACHABLE_DELAY    = 8000,
 };
 
 enum RazorgoreActions
@@ -64,7 +66,6 @@ struct boss_razorgoreAI : public CombatAI
         AddCombatAction(RAZORGORE_FIREBALL_VOLLEY, 15000, 20000);
         AddCombatAction(RAZORGORE_WAR_STOMP, 30000u);
         AddCombatAction(RAZORGORE_CLEAVE, 4000, 8000);
-        SetDeathPrevention(true);
         m_creature->SetWalk(false);
         if (m_instance)
         {
@@ -76,11 +77,15 @@ struct boss_razorgoreAI : public CombatAI
     }
 
     instance_blackwing_lair* m_instance;
+    ObjectGuid m_unreachableVictim;
+    uint32 m_unreachableTimer = SUMMON_UNREACHABLE_DELAY;
 
     void Reset() override
     {
         CombatAI::Reset();
-        SetDeathPrevention(true);
+        SetReactState(REACT_AGGRESSIVE);
+        m_unreachableVictim.Clear();
+        m_unreachableTimer = SUMMON_UNREACHABLE_DELAY;
 
         DoCastSpellIfCan(nullptr, SPELL_DOUBLE_ATTACK, CAST_AURA_NOT_PRESENT | CAST_TRIGGERED);
     }
@@ -94,22 +99,53 @@ struct boss_razorgoreAI : public CombatAI
     {
         if (eventType == AI_EVENT_CUSTOM_A)
         {
-            SetDeathPrevention(false);
             SetMeleeEnabled(true);
             m_creature->RemoveAurasDueToSpell(SPELL_POSSESS_VISUAL);
             m_creature->CastSpell(nullptr, SPELL_WARMING_FLAMES, TRIGGERED_OLD_TRIGGERED);
         }
     }
 
-    void JustPreventedDeath(Unit* attacker) override
-    {
-        m_instance->SetData(TYPE_RAZORGORE, FAIL);
-    }
-
     void JustReachedHome() override
     {
-        if (m_instance)
+        if (m_instance && (m_instance->GetData(TYPE_RAZORGORE) == IN_PROGRESS ||
+            m_instance->GetData(TYPE_RAZORGORE) == SPECIAL))
             m_instance->SetData(TYPE_RAZORGORE, FAIL);
+    }
+
+    void UpdateAI(uint32 diff) override
+    {
+        CombatAI::UpdateAI(diff);
+
+        Unit* victim = m_creature->GetVictim();
+        auto const* motion = m_creature->GetMotionMaster();
+        if (!m_instance || m_instance->GetData(TYPE_RAZORGORE) != SPECIAL || !victim || !victim->IsPlayer() ||
+            motion->GetCurrentMovementGeneratorType() != CHASE_MOTION_TYPE || motion->GetCurrent()->IsReachable())
+        {
+            m_unreachableVictim.Clear();
+            m_unreachableTimer = SUMMON_UNREACHABLE_DELAY;
+            return;
+        }
+
+        if (m_unreachableVictim != victim->GetObjectGuid())
+        {
+            m_unreachableVictim = victim->GetObjectGuid();
+            m_unreachableTimer = SUMMON_UNREACHABLE_DELAY;
+            return;
+        }
+
+        if (m_unreachableTimer > diff)
+        {
+            m_unreachableTimer -= diff;
+            return;
+        }
+
+        if (DoCastSpellIfCan(victim, SPELL_SUMMON_PLAYER, CAST_TRIGGERED) == CAST_OK)
+        {
+            m_creature->GetCombatManager().StopEvade();
+            m_unreachableTimer = SUMMON_UNREACHABLE_DELAY;
+        }
+        else
+            m_unreachableTimer = IN_MILLISECONDS;
     }
 
     void ExecuteAction(uint32 action) override
@@ -219,35 +255,37 @@ bool ProcessEventIdRazorgorePossess(uint32 eventId, Object* source, Object* targ
         return true;
 
     Player* player = static_cast<Player*>(source);
-    if (Creature* trigger = static_cast<ScriptedInstance*>(player->GetMap()->GetInstanceData())->GetSingleCreatureFromStorage(NPC_BLACKWING_ORB_TRIGGER))
-        trigger->CastSpell(nullptr, SPELL_POSSESS_VISUAL, TRIGGERED_OLD_TRIGGERED);
-    
+    if (auto* instance = dynamic_cast<instance_blackwing_lair*>(player->GetInstanceData()))
+        if (Creature* trigger = instance->GetSingleCreatureFromStorage(NPC_BLACKWING_ORB_TRIGGER))
+            trigger->CastSpell(nullptr, SPELL_POSSESS_VISUAL, TRIGGERED_OLD_TRIGGERED);
+
     return true;
 }
 
 struct DestroyEgg : public SpellScript
 {
-    void OnEffectExecute(Spell* spell, SpellEffectIndex effIdx) const override
+    bool OnCheckTarget(Spell const* spell, GameObject* target, SpellEffectIndex /*effIdx*/) const override
+    {
+        Unit* caster = spell->GetCaster();
+        auto* instance = dynamic_cast<instance_blackwing_lair*>(target->GetInstanceData());
+        return caster && instance && target->GetLootState() == GO_READY && instance->CanDestroyRazorgoreEgg(*caster, *target);
+    }
+
+    void OnHit(Spell* spell, SpellMissInfo /*missInfo*/) const override
     {
         GameObject* target = spell->GetGOTarget();
         Unit* razorgore = spell->GetCaster();
         if (!target || !razorgore)
             return;
 
-        if (ScriptedInstance* pInstance = static_cast<ScriptedInstance*>(target->GetInstanceData()))
-        {
-            if (urand(0, 1))
-            {
-                switch (urand(0, 2))
-                {
-                    case 0: DoScriptText(SAY_EGGS_BROKEN_1, razorgore); break;
-                    case 1: DoScriptText(SAY_EGGS_BROKEN_2, razorgore); break;
-                    case 2: DoScriptText(SAY_EGGS_BROKEN_3, razorgore); break;
-                }
-            }
+        auto* instance = dynamic_cast<instance_blackwing_lair*>(target->GetInstanceData());
+        if (!instance || !instance->RazorgoreEggDestroyed(*razorgore, *target))
+            return;
 
-            // Store the eggs which are destroyed, in order to count them for the second phase
-            pInstance->SetData64(DATA_DRAGON_EGG, target->GetObjectGuid());
+        if (urand(0, 1))
+        {
+            int32 const lines[] = {SAY_EGGS_BROKEN_1, SAY_EGGS_BROKEN_2, SAY_EGGS_BROKEN_3};
+            DoScriptText(lines[urand(0, 2)], razorgore);
         }
     }
 };
@@ -259,13 +297,27 @@ struct ExplosionRazorgore : public SpellScript
         if (target->IsPlayer())
             return true;
 
-        static std::set<uint32> validEntries = { NPC_GRETHOK_CONTROLLER, NPC_BLACKWING_GUARDSMAN, NPC_BLACKWING_LEGIONNAIRE , NPC_BLACKWING_MAGE , NPC_DRAGONSPAWN, NPC_RAZORGORE };
+        static std::set<uint32> const validEntries = {NPC_GRETHOK_CONTROLLER, NPC_BLACKWING_GUARDSMAN, NPC_BLACKWING_LEGIONNAIRE, NPC_BLACKWING_MAGE, NPC_DRAGONSPAWN};
         return validEntries.find(target->GetEntry()) != validEntries.end();
     }
 };
 
-struct PossessRazorgore : public AuraScript
+struct PossessRazorgore : public SpellScript, public AuraScript
 {
+    SpellCastResult OnCheckCast(Spell* spell, bool /*strict*/) const override
+    {
+        Unit* caster = spell->GetCaster();
+        if (!caster || !caster->IsPlayer() || !caster->IsAlive() || caster->HasAura(SPELL_MIND_EXHAUSTION))
+            return SPELL_FAILED_BAD_TARGETS;
+
+        auto* instance = dynamic_cast<instance_blackwing_lair*>(caster->GetInstanceData());
+        if (!instance || !instance->IsRazorgoreOrbAvailable())
+            return SPELL_FAILED_BAD_TARGETS;
+
+        Creature* razorgore = instance->GetSingleCreatureFromStorage(NPC_RAZORGORE, true);
+        return razorgore && razorgore->IsAlive() && !razorgore->HasCharmer() ? SPELL_CAST_OK : SPELL_FAILED_BAD_TARGETS;
+    }
+
     void OnApply(Aura* aura, bool apply) const override
     {
         if (aura->GetEffIndex() == EFFECT_INDEX_0)
@@ -284,6 +336,9 @@ struct PossessRazorgore : public AuraScript
                 {
                     target->RemoveAurasDueToSpell(SPELL_POSSESS_VISUAL);
                     target->RemoveAurasDueToSpell(SPELL_DRAGON_ORB);
+                    if (target->IsCreature() && target->GetEntry() == NPC_RAZORGORE)
+                        if (auto* instance = dynamic_cast<instance_blackwing_lair*>(target->GetInstanceData()))
+                            instance->OnRazorgorePossessionEnded(static_cast<Creature&>(*target), aura->GetCasterGuid());
                 }
             }
         }
@@ -294,7 +349,8 @@ struct CalmDragonkin : public SpellScript
 {
     SpellCastResult OnCheckCast(Spell* spell, bool strict) const override
     {
-        if (spell->m_targets.getUnitTarget()->GetEntry() == NPC_RAZORGORE)
+        Unit* target = spell->m_targets.getUnitTarget();
+        if (!target || target->GetEntry() == NPC_RAZORGORE)
             return SPELL_FAILED_BAD_TARGETS;
 
         return SPELL_CAST_OK;
