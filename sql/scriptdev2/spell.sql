@@ -88,6 +88,7 @@ INSERT INTO spell_scripts(Id, ScriptName) VALUES
 (20786,'spell_destroy_karangs_banner'),
 (21050,'spell_melodious_rapture'),
 (21651,'spell_opening_capping'),
+(22247,'spell_bwl_suppression_aura'),
 (22858,'spell_retaliation_creature'),
 (22876,'spell_summon_netherwalker'),
 (23134,'spell_goblin_bomb'),

@@ -27,12 +27,21 @@ EndScriptData
 #include "blackwing_lair.h"
 #include "Globals/ObjectMgr.h"
 #include "Maps/MapPersistentStateMgr.h"
+#include "Spells/Scripts/SpellScript.h"
 #include "World/World.h"
 
 namespace
 {
 constexpr time_t ScepterQuestDuration = 5 * HOUR;
 constexpr time_t ScepterWarningOffsets[] = { ScepterQuestDuration - 2, 3 * HOUR, HOUR, 30 * MINUTE, 0 };
+
+void DisableSuppressionDevice(GameObject& device)
+{
+    device.SetFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
+    device.SetGoState(GO_STATE_ACTIVE_ALTERNATIVE);
+    // Exit GO_ACTIVATED so the core no longer processes a pending trap rearm.
+    device.SetLootState(GO_READY);
+}
 }
 
 instance_blackwing_lair::instance_blackwing_lair(Map* pMap) : ScriptedInstance(pMap),
@@ -122,6 +131,7 @@ void instance_blackwing_lair::OnObjectCreate(GameObject* pGo)
         case GO_DOOR_RAZORGORE_ENTER:
         case GO_DOOR_RAZORGORE_EXIT:
         case GO_DOOR_VAELASTRASZ:
+        case GO_DOOR_LASHLAYER:
             SetEncounterDoorState(*pGo);
             break;
         case GO_DOOR_NEFARIAN:
@@ -133,10 +143,6 @@ void instance_blackwing_lair::OnObjectCreate(GameObject* pGo)
             if (m_auiEncounter[TYPE_CHROMAGGUS] == DONE)
                 pGo->SetGoState(GO_STATE_ACTIVE);
             break;
-        case GO_DOOR_LASHLAYER:
-            if (m_auiEncounter[TYPE_LASHLAYER] == DONE)
-                pGo->SetGoState(GO_STATE_ACTIVE);
-            break;
         case GO_BLACK_DRAGON_EGG:
             pGo->SetFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
             if (auto egg = m_razorgoreEggs.find(pGo->GetDbGuid()); egg != m_razorgoreEggs.end())
@@ -145,16 +151,21 @@ void instance_blackwing_lair::OnObjectCreate(GameObject* pGo)
         case GO_DRAKONID_BONES:
             m_lDrakonidBonesGuids.push_back(pGo->GetObjectGuid());
             return;
-        case GO_SUPPRESSION_DEVICE:
-            // Do not spawn the Suppression Device GOs if Broodlord Lashlayer is dead
-            if (GetData(TYPE_LASHLAYER) == DONE)
-                pGo->SetLootState(GO_JUST_DEACTIVATED);
-            return;
-
         default:
             return;
     }
     m_goEntryGuidStore[pGo->GetEntry()] = pGo->GetObjectGuid();
+}
+
+void instance_blackwing_lair::OnObjectSpawn(GameObject* go)
+{
+    if (go->GetEntry() != GO_SUPPRESSION_DEVICE)
+        return;
+
+    if (GetData(TYPE_LASHLAYER) == DONE)
+        DisableSuppressionDevice(*go);
+    else
+        m_suppressionDevices.insert(go->GetObjectGuid());
 }
 
 void instance_blackwing_lair::SetEncounterDoorState(GameObject& door) const
@@ -170,6 +181,9 @@ void instance_blackwing_lair::SetEncounterDoorState(GameObject& door) const
             break;
         case GO_DOOR_VAELASTRASZ:
             open = GetData(TYPE_VAELASTRASZ) == DONE;
+            break;
+        case GO_DOOR_LASHLAYER:
+            open = GetData(TYPE_LASHLAYER) == DONE;
             break;
         default:
             return;
@@ -246,9 +260,18 @@ void instance_blackwing_lair::SetData(uint32 uiType, uint32 uiData)
             UpdateEncounterDoor(GO_DOOR_VAELASTRASZ);
             break;
         case TYPE_LASHLAYER:
+            if (GetData(TYPE_LASHLAYER) == DONE)
+                return;
+
             m_auiEncounter[uiType] = uiData;
+            UpdateEncounterDoor(GO_DOOR_LASHLAYER);
             if (uiData == DONE)
-                DoUseDoorOrButton(GO_DOOR_LASHLAYER);
+            {
+                for (ObjectGuid guid : m_suppressionDevices)
+                    if (GameObject* device = instance->GetGameObject(guid))
+                        DisableSuppressionDevice(*device);
+                m_suppressionDevices.clear();
+            }
             break;
         case TYPE_FIREMAW:
         case TYPE_EBONROC:
@@ -965,47 +988,40 @@ InstanceData* GetInstanceData_instance_blackwing_lair(Map* pMap)
 
 struct go_ai_suppression : public GameObjectAI
 {
-    go_ai_suppression(GameObject* go) : GameObjectAI(go), m_uiFumeTimer(urand(0, 5 * IN_MILLISECONDS)) {}
-
-    uint32 m_uiFumeTimer;
+    explicit go_ai_suppression(GameObject* go) : GameObjectAI(go),
+        m_instance(static_cast<instance_blackwing_lair*>(go->GetMap()->GetInstanceData())),
+        m_fumeTimer(urand(0, 5 * IN_MILLISECONDS)) {}
 
     void OnLootStateChange(Unit* /*user*/) override
     {
-        ScriptedInstance* pInstance = (ScriptedInstance*)m_go->GetMap()->GetInstanceData();
-        if (!pInstance)
+        if (!m_instance || m_go->GetLootState() != GO_ACTIVATED)
             return;
 
-        // As long as Broodlord Lashlayer is alive, the GO will rearm on a random timer from 30 sec to 2 min
-        // It will not rearm for the instance lifetime after Broodlord Lashlayer death
-        if (m_go->GetLootState() == GO_ACTIVATED)
+        if (m_instance->GetData(TYPE_LASHLAYER) == DONE)
+            DisableSuppressionDevice(*m_go);
+        else if (m_go->GetGoState() == GO_STATE_READY)
+            m_go->SetRespawnDelay(urand(30, 2 * MINUTE));
+    }
+
+    void UpdateAI(uint32 diff) override
+    {
+        if (m_fumeTimer > diff)
         {
-            if (pInstance->GetData(TYPE_LASHLAYER) != DONE)
-                m_go->SetRespawnTime(urand(30, 2 * MINUTE));
-            else
-                m_go->SetRespawnTime(7 * 24 * HOUR);
+            m_fumeTimer -= diff;
+            return;
+        }
+
+        m_fumeTimer = 5 * IN_MILLISECONDS;
+        if (m_go->IsSpawned() && m_go->GetLootState() == GO_READY && m_go->GetGoState() == GO_STATE_READY)
+        {
+            m_go->SendGameObjectCustomAnim(m_go->GetObjectGuid());
+            m_go->CastSpell(nullptr, nullptr, m_go->GetGOInfo()->trap.spellId, TRIGGERED_OLD_TRIGGERED);
         }
     }
 
-    // Visual effects for each GO is played on a 5 seconds timer. Sniff show that the GO should also be used (trap spell is cast)
-    // but we need core support for GO casting for that
-    void UpdateAI(const uint32 uiDiff) override
-    {
-        if (m_uiFumeTimer)
-        {
-            if (m_uiFumeTimer <= uiDiff)
-            {
-                // The loot state check may be removed in that case because it should probably be handled in the Gameobject::Use() code
-                if (m_go->GetLootState() == GO_READY)
-                {
-                    m_go->SendGameObjectCustomAnim(m_go->GetObjectGuid());
-                    m_go->CastSpell(nullptr, nullptr, m_go->GetGOInfo()->trap.spellId, TRIGGERED_OLD_TRIGGERED);
-                }
-                m_uiFumeTimer = 5 * IN_MILLISECONDS;
-            }
-            else
-                m_uiFumeTimer -= uiDiff;
-        }
-    }
+private:
+    instance_blackwing_lair* const m_instance;
+    uint32 m_fumeTimer;
 };
 
 
@@ -1013,6 +1029,14 @@ GameObjectAI* GetAI_go_suppression(GameObject* go)
 {
     return new go_ai_suppression(go);
 }
+
+struct SuppressionAura : public SpellScript
+{
+    bool OnCheckTarget(Spell const* /*spell*/, Unit* target, SpellEffectIndex /*eff*/) const override
+    {
+        return !target->HasStealthAura();
+    }
+};
 
 /*###################################################
 ## Chromaggus' breaths and Nefarian tunnels selection
@@ -1071,6 +1095,8 @@ void AddSC_instance_blackwing_lair()
     pNewScript->Name = "go_suppression";
     pNewScript->GetGameObjectAI = &GetAI_go_suppression;
     pNewScript->RegisterSelf();
+
+    RegisterSpellScript<SuppressionAura>("spell_bwl_suppression_aura");
 
     pNewScript = new Script;
     pNewScript->Name = "event_weekly_chromatic_selection";

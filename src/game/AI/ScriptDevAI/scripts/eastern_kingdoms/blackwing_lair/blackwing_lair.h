@@ -131,6 +131,7 @@ class instance_blackwing_lair : public ScriptedInstance
 
         void OnCreatureCreate(Creature* pCreature) override;
         void OnObjectCreate(GameObject* pGo) override;
+        void OnObjectSpawn(GameObject* go) override;
 
         void OnCreatureEnterCombat(Creature* pCreature) override;
         bool OnCreatureLethalDamage(Creature& creature) override;
@@ -190,6 +191,7 @@ class instance_blackwing_lair : public ScriptedInstance
         std::unordered_set<uint32> m_destroyedRazorgoreEggs;
         GuidSet m_razorgoreGuards;
         GuidSet m_razorgoreDefenders;
+        GuidSet m_suppressionDevices;
         GuidList m_lDrakonidBonesGuids;
         GuidList m_lDrakonidSpawnerGuids;
         GuidList m_drakonids;

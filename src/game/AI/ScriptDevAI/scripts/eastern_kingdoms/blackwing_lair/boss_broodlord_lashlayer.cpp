@@ -108,7 +108,7 @@ struct boss_broodlordAI : public CombatAI
             case BROODLORD_BLAST_WAVE:
             {
                 if (DoCastSpellIfCan(nullptr, SPELL_BLAST_WAVE) == CAST_OK)
-                    ResetCombatAction(action, urand(8000, 16000));
+                    ResetCombatAction(action, urand(20000, 35000));
                 break;
             }
             case BROODLORD_MORTAL_STRIKE:
