@@ -35,6 +35,8 @@ enum
     NPC_CHROMAGGUS              = 14020,
     NPC_NEFARIAN                = 11583,
     NPC_LORD_VICTOR_NEFARIUS    = 10162,
+    NPC_DEATH_TALON_WYRMGUARD   = 12460,
+    NPC_DEATH_TALON_OVERSEER    = 12461,
 
     // Razorgore event related
     NPC_GRETHOK_CONTROLLER      = 12557,
@@ -51,8 +53,9 @@ enum
     GO_DOOR_RAZORGORE_EXIT      = 176965,
     GO_DOOR_NEFARIAN            = 176966,
     // GO_DOOR_CHROMAGGUS_ENTER  = 179115,
-    // GO_DOOR_CHROMAGGUS_SIDE   = 179116,
+    GO_DOOR_CHROMAGGUS_SIDE     = 179116,
     GO_DOOR_CHROMAGGUS_EXIT     = 179117,
+    GO_LEVER_CHROMAGGUS         = 179148,
     GO_DOOR_VAELASTRASZ         = 179364,
     GO_DOOR_LASHLAYER           = 179365,
     GO_ORB_OF_DOMINATION        = 177808,                   // trigger 19832 on Razorgore
@@ -140,6 +143,7 @@ class instance_blackwing_lair : public ScriptedInstance
         void OnObjectSpawn(GameObject* go) override;
 
         void OnCreatureEnterCombat(Creature* pCreature) override;
+        void OnCreatureEvade(Creature* creature) override;
         bool OnCreatureLethalDamage(Creature& creature) override;
         void OnCreatureDeath(Creature* pCreature) override;
 
@@ -159,6 +163,7 @@ class instance_blackwing_lair : public ScriptedInstance
 
         void Update(const uint32 diff) override;
 
+        void ReleaseChromaggus(GameObject& lever);
         void SelectChromaggusBreaths();
         void SelectNefarianTunnels();
         bool CanStartNefarian() const;
@@ -190,6 +195,8 @@ class instance_blackwing_lair : public ScriptedInstance
         void RemoveRazorgoreDefender(Creature const& creature);
         void SetEncounterDoorState(GameObject& door) const;
         void UpdateEncounterDoor(uint32 entry);
+        void SetChromaggusLeverState(GameObject& lever) const;
+        void ApplyDeathTalonPowers(Creature& creature);
         void SaveEncounterData();
         void UpdateScepterQuest();
 
@@ -205,6 +212,16 @@ class instance_blackwing_lair : public ScriptedInstance
         uint8 m_uiBlackwingDefCount;
 
         bool m_razorgoreOrbUnlocked = false;
+        bool m_chromaggusReleased = false;
+
+        struct DeathTalonPowers
+        {
+            uint32 elementalShield = 0;
+            uint32 broodPower = 0;
+        };
+
+        // Keep the roll for the same living spawn across evades and grid reloads.
+        std::unordered_map<uint32, DeathTalonPowers> m_deathTalonPowers;
 
         // Key by DB spawn so the same egg keeps its identity across grid reloads.
         std::unordered_map<uint32, ObjectGuid> m_razorgoreEggs;

@@ -256,6 +256,7 @@ INSERT INTO scripted_event_id VALUES
 (8302,'event_razorgore_possess');
 UPDATE creature_template SET ScriptName='boss_vaelastrasz' WHERE entry=13020;
 UPDATE gameobject_template SET ScriptName='go_suppression' WHERE entry=179784;
+UPDATE gameobject_template SET ScriptName='go_chromaggus_lever' WHERE entry=179148;
 UPDATE creature_template SET ScriptName='boss_broodlord' WHERE entry=12017;
 UPDATE creature_template SET ScriptName='boss_firemaw' WHERE entry=11983;
 UPDATE creature_template SET ScriptName='boss_ebonroc' WHERE entry=14601;

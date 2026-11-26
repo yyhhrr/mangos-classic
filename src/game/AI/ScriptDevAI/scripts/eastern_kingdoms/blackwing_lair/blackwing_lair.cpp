@@ -37,6 +37,7 @@ constexpr time_t ScepterWarningOffsets[] = { ScepterQuestDuration - 2, 3 * HOUR,
 constexpr uint32 NefarianTransitionDelay = 5 * IN_MILLISECONDS;
 constexpr uint32 NefarianLandingTimeout = MINUTE * IN_MILLISECONDS;
 constexpr uint32 VictorOutroDelay = 2500;
+Position const ChromaggusReleasedPosition = { -7484.91f, -1072.98f, 476.55f, 2.18f };
 
 void DisableSuppressionDevice(GameObject& device)
 {
@@ -132,6 +133,7 @@ void instance_blackwing_lair::OnCreatureCreate(Creature* pCreature)
         case NPC_NEFARIANS_TROOPS:
         case NPC_BLACKWING_ORB_TRIGGER:
         case NPC_VAELASTRASZ:
+        case NPC_CHROMAGGUS:
             m_npcEntryGuidStore[pCreature->GetEntry()] = pCreature->GetObjectGuid();
             break;
     }
@@ -145,15 +147,16 @@ void instance_blackwing_lair::OnObjectCreate(GameObject* pGo)
         case GO_DOOR_RAZORGORE_EXIT:
         case GO_DOOR_VAELASTRASZ:
         case GO_DOOR_LASHLAYER:
+        case GO_DOOR_CHROMAGGUS_SIDE:
+        case GO_DOOR_CHROMAGGUS_EXIT:
         case GO_DOOR_NEFARIAN:
             SetEncounterDoorState(*pGo);
             break;
         case GO_ORB_OF_DOMINATION:
             pGo->ApplyModFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT, !IsRazorgoreOrbAvailable());
             break;
-        case GO_DOOR_CHROMAGGUS_EXIT:
-            if (m_auiEncounter[TYPE_CHROMAGGUS] == DONE)
-                pGo->SetGoState(GO_STATE_ACTIVE);
+        case GO_LEVER_CHROMAGGUS:
+            SetChromaggusLeverState(*pGo);
             break;
         case GO_BLACK_DRAGON_EGG:
             pGo->SetFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
@@ -198,12 +201,19 @@ void instance_blackwing_lair::SetEncounterDoorState(GameObject& door) const
         case GO_DOOR_LASHLAYER:
             open = GetData(TYPE_LASHLAYER) == DONE;
             break;
+        case GO_DOOR_CHROMAGGUS_SIDE:
+            open = m_chromaggusReleased;
+            break;
+        case GO_DOOR_CHROMAGGUS_EXIT:
+            open = GetData(TYPE_CHROMAGGUS) == DONE;
+            break;
         case GO_DOOR_NEFARIAN:
             open = m_nefarianPhase == NefarianPhase::Idle;
             break;
         default:
             return;
     }
+    door.SetFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT);
     door.SetGoState(open ? GO_STATE_ACTIVE : GO_STATE_READY);
 }
 
@@ -295,9 +305,11 @@ void instance_blackwing_lair::SetData(uint32 uiType, uint32 uiData)
             m_auiEncounter[uiType] = uiData;
             break;
         case TYPE_CHROMAGGUS:
+            if (GetData(uiType) == uiData || GetData(uiType) == DONE)
+                return;
+
             m_auiEncounter[uiType] = uiData;
-            if (uiData == DONE)
-                DoUseDoorOrButton(GO_DOOR_CHROMAGGUS_EXIT);
+            UpdateEncounterDoor(GO_DOOR_CHROMAGGUS_EXIT);
             break;
         case TYPE_NEFARIAN:
             if (GetData(uiType) == uiData || GetData(uiType) == DONE)
@@ -353,7 +365,7 @@ void instance_blackwing_lair::SaveEncounterData()
                << (vaelState == IN_PROGRESS ? FAIL : vaelState);
     for (uint32 i = TYPE_LASHLAYER; i < MAX_ENCOUNTER; ++i)
         saveStream << ' ' << m_auiEncounter[i];
-    saveStream << ' ' << m_scepterDeadline;
+    saveStream << ' ' << m_scepterDeadline << ' ' << m_chromaggusReleased;
     m_strInstData = saveStream.str();
 
     SaveToDB();
@@ -375,6 +387,14 @@ void instance_blackwing_lair::Load(const char* chrIn)
                >> m_auiEncounter[4] >> m_auiEncounter[5] >> m_auiEncounter[6] >> m_auiEncounter[7]
                >> m_auiEncounter[8] >> m_auiEncounter[9] >> m_auiEncounter[10]>> m_auiEncounter[11]
                >> m_auiEncounter[12];
+    loadStream >> m_scepterDeadline;
+
+    // Older saves only record whether a Chromaggus attempt had already taken place.
+    uint32 const chromaggusState = GetData(TYPE_CHROMAGGUS);
+    if (!(loadStream >> m_chromaggusReleased))
+        m_chromaggusReleased = chromaggusState == IN_PROGRESS || chromaggusState == FAIL;
+    if (chromaggusState == DONE)
+        m_chromaggusReleased = true;
 
     if (GetData(TYPE_VAELASTRASZ) == IN_PROGRESS)
         m_auiEncounter[TYPE_VAELASTRASZ] = FAIL;
@@ -395,7 +415,6 @@ void instance_blackwing_lair::Load(const char* chrIn)
 
     if (GetData(TYPE_QUEST_SCEPTER) == IN_PROGRESS)
     {
-        loadStream >> m_scepterDeadline;
         const time_t now = sWorld.GetGameTime();
         while (m_uiScepterQuestStep < std::size(ScepterWarningOffsets) - 1 && m_scepterDeadline &&
                now >= m_scepterDeadline - ScepterWarningOffsets[m_uiScepterQuestStep])
@@ -617,6 +636,34 @@ void instance_blackwing_lair::OnCreatureEnterCombat(Creature* pCreature)
 {
     if (pCreature->GetEntry() == NPC_GRETHOK_CONTROLLER && GetData(TYPE_RAZORGORE) == NOT_STARTED)
         SetData(TYPE_RAZORGORE, IN_PROGRESS);
+    else if (pCreature->GetEntry() == NPC_CHROMAGGUS && m_chromaggusReleased)
+        pCreature->SetCombatStartPosition(ChromaggusReleasedPosition);
+}
+
+void instance_blackwing_lair::OnCreatureEvade(Creature* creature)
+{
+    if (creature->GetEntry() == NPC_DEATH_TALON_WYRMGUARD || creature->GetEntry() == NPC_DEATH_TALON_OVERSEER)
+        ApplyDeathTalonPowers(*creature);
+}
+
+void instance_blackwing_lair::ApplyDeathTalonPowers(Creature& creature)
+{
+    if (!creature.IsAlive())
+        return;
+
+    auto [itr, inserted] = m_deathTalonPowers.try_emplace(creature.GetDbGuid());
+    auto& powers = itr->second;
+    if (inserted)
+    {
+        powers.elementalShield = PickRandomValue(22277u, 22278u, 22279u, 22280u, 22281u);
+        if (creature.GetEntry() == NPC_DEATH_TALON_WYRMGUARD)
+            powers.broodPower = PickRandomValue(22283u, 22285u, 22286u, 22287u, 22288u);
+    }
+
+    if (!creature.HasAura(powers.elementalShield))
+        creature.CastSpell(&creature, powers.elementalShield, TRIGGERED_OLD_TRIGGERED);
+    if (powers.broodPower && !creature.HasAura(powers.broodPower))
+        creature.CastSpell(&creature, powers.broodPower, TRIGGERED_OLD_TRIGGERED);
 }
 
 bool instance_blackwing_lair::OnCreatureLethalDamage(Creature& creature)
@@ -632,6 +679,10 @@ void instance_blackwing_lair::OnCreatureDeath(Creature* pCreature)
 {
     switch (pCreature->GetEntry())
     {
+        case NPC_DEATH_TALON_WYRMGUARD:
+        case NPC_DEATH_TALON_OVERSEER:
+            m_deathTalonPowers.erase(pCreature->GetDbGuid());
+            break;
         case NPC_GRETHOK_CONTROLLER:
             if (GetData(TYPE_RAZORGORE) == NOT_STARTED)
                 SetData(TYPE_RAZORGORE, IN_PROGRESS);
@@ -705,6 +756,32 @@ void instance_blackwing_lair::OnCreatureRespawn(Creature* creature)
 
     switch (creature->GetEntry())
     {
+        case NPC_CHROMAGGUS:
+            if (!creature->IsAlive())
+                break;
+            if (GetData(TYPE_CHROMAGGUS) == DONE)
+            {
+                creature->ForcedDespawn(1, true);
+                break;
+            }
+            creature->SetImmuneToPlayer(!m_chromaggusReleased);
+            creature->SetImmuneToNPC(!m_chromaggusReleased);
+            creature->AI()->SetReactState(m_chromaggusReleased ? REACT_AGGRESSIVE : REACT_PASSIVE);
+            if (m_chromaggusReleased)
+            {
+                auto const& position = ChromaggusReleasedPosition;
+                creature->SetRespawnCoord(position.x, position.y, position.z, position.o);
+                if (!creature->IsWithinDist3d(position.x, position.y, position.z, 1.0f))
+                {
+                    instance->LoadGrid(position.x, position.y);
+                    creature->NearTeleportTo(position.x, position.y, position.z, position.o);
+                }
+            }
+            break;
+        case NPC_DEATH_TALON_WYRMGUARD:
+        case NPC_DEATH_TALON_OVERSEER:
+            ApplyDeathTalonPowers(*creature);
+            break;
         case NPC_LORD_VICTOR_NEFARIUS:
             if (!creature->IsTemporarySummon() && GetData(TYPE_NEFARIAN) == DONE)
                 creature->ForcedDespawn(1, true);
@@ -777,11 +854,8 @@ void instance_blackwing_lair::UpdateScepterQuest()
     if (now >= m_scepterDeadline)
     {
         SetData(TYPE_QUEST_SCEPTER, FAIL);
-        if (GetData(TYPE_NEFARIAN) == NOT_STARTED)
-        {
-            DoOrSimulateScriptTextForThisInstance(EMOTE_REDSHARD_TAUNT_2, NPC_LORD_VICTOR_NEFARIUS);
-            DoOrSimulateScriptTextForThisInstance(YELL_REDSHARD_TAUNT_7, NPC_LORD_VICTOR_NEFARIUS);
-        }
+        DoOrSimulateScriptTextForThisInstance(EMOTE_REDSHARD_TAUNT_2, NPC_LORD_VICTOR_NEFARIUS);
+        DoOrSimulateScriptTextForThisInstance(YELL_REDSHARD_TAUNT_7, NPC_LORD_VICTOR_NEFARIUS);
         return;
     }
 
@@ -867,6 +941,39 @@ void instance_blackwing_lair::Update(uint32 uiDiff)
         m_uiDefenseTimer -= uiDiff;
 
     UpdateRazorgoreDefenderThreat();
+}
+
+void instance_blackwing_lair::SetChromaggusLeverState(GameObject& lever) const
+{
+    lever.SetGoState(m_chromaggusReleased ? GO_STATE_ACTIVE : GO_STATE_READY);
+    // The instance drives the animation and blocks the generic door toggle.
+    lever.SetLootState(GO_ACTIVATED);
+    lever.ApplyModFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT, m_chromaggusReleased);
+}
+
+void instance_blackwing_lair::ReleaseChromaggus(GameObject& lever)
+{
+    if (m_chromaggusReleased || GetData(TYPE_CHROMAGGUS) != NOT_STARTED)
+        return;
+
+    // The lever is across a grid boundary from the prison and its gate.
+    instance->LoadGrid(-7515.34f, -1029.62f);
+    Creature* chromaggus = GetSingleCreatureFromStorage(NPC_CHROMAGGUS, true);
+    GameObject* gate = GetSingleGameObjectFromStorage(GO_DOOR_CHROMAGGUS_SIDE, true);
+    if (!chromaggus || !chromaggus->IsAlive() || chromaggus->IsInCombat() || !gate)
+        return;
+
+    m_chromaggusReleased = true;
+    SetChromaggusLeverState(lever);
+    SetEncounterDoorState(*gate);
+
+    auto const& position = ChromaggusReleasedPosition;
+    chromaggus->SetRespawnCoord(position.x, position.y, position.z, position.o);
+    chromaggus->SetImmuneToPlayer(false);
+    chromaggus->SetImmuneToNPC(false);
+    chromaggus->AI()->SetReactState(REACT_AGGRESSIVE);
+    chromaggus->GetMotionMaster()->MovePoint(0, position, FORCED_MOVEMENT_RUN);
+    SaveEncounterData();
 }
 
 void instance_blackwing_lair::SelectChromaggusBreaths()
@@ -1172,6 +1279,14 @@ struct NefarianTunnelSelection : public SpellScript
     }
 };
 
+bool GOUse_go_chromaggus_lever(Player* player, GameObject* lever)
+{
+    if (player->IsAlive())
+        if (auto* instance = dynamic_cast<instance_blackwing_lair*>(lever->GetInstanceData()))
+            instance->ReleaseChromaggus(*lever);
+    return true;
+}
+
 void AddSC_instance_blackwing_lair()
 {
     Script* pNewScript = new Script;
@@ -1182,6 +1297,11 @@ void AddSC_instance_blackwing_lair()
     pNewScript = new Script;
     pNewScript->Name = "go_suppression";
     pNewScript->GetGameObjectAI = &GetAI_go_suppression;
+    pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "go_chromaggus_lever";
+    pNewScript->pGOUse = &GOUse_go_chromaggus_lever;
     pNewScript->RegisterSelf();
 
     RegisterSpellScript<SuppressionAura>("spell_bwl_suppression_aura");
