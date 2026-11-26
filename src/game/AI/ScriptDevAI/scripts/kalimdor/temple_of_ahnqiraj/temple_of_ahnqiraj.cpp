@@ -155,9 +155,10 @@ void instance_temple_of_ahnqiraj::OnCreatureCreate(Creature* creature)
             m_npcEntryGuidStore[creature->GetEntry()] = creature->GetObjectGuid();
             break;
         case NPC_SKERAM:
-            // Don't store the summoned images guid
-            if (GetData(TYPE_SKERAM) == IN_PROGRESS)
+            // Images share Skeram's entry and must never replace the boss GUID.
+            if (!creature->GetSpawnerGuid().IsEmpty())
                 break;
+            [[fallthrough]];
         case NPC_KRI:
         case NPC_YAUJ:
         case NPC_VEM:
