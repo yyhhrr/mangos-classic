@@ -26,6 +26,7 @@ EndScriptData
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "blackwing_lair.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
+#include "Spells/Scripts/SpellScript.h"
 
 enum
 {
@@ -33,13 +34,18 @@ enum
     EMOTE_GENERIC_FRENZY        = -1000002,
     EMOTE_SHIMMER               = -1469003,
 
-    SPELL_BREATH_SELECTION      = 23195,
-    SPELL_BROOD_AFFLICTION      = 23173, // TODO: Rework spell script
+    SPELL_BROOD_AFFLICTION      = 23173,
+    SPELL_CHROMATIC_MUTATION    = 23174,
+    SPELL_MUTATION_OFFENSE      = 23175,
+    SPELL_MUTATION_VITALITY     = 23177,
 
     SPELL_ELEMENTAL_SHIELD_BWL  = 22276,
     SPELL_FRENZY                = 23128,
     SPELL_ENRAGE                = 23537
 };
+
+constexpr uint32 BROOD_AFFLICTIONS[] = {23153, 23154, 23155, 23170, 23169}; // Blue, Black, Red, Bronze, Green
+constexpr uint32 BROOD_AFFLICTION_CASTS = 15;
 
 enum ChromaggusActions
 {
@@ -54,15 +60,8 @@ enum ChromaggusActions
 
 struct boss_chromaggusAI : public CombatAI
 {
-    boss_chromaggusAI(Creature* creature) : CombatAI(creature, CHROMAGGUS_ACTION_MAX), m_instance(static_cast<ScriptedInstance*>(creature->GetInstanceData()))
+    boss_chromaggusAI(Creature* creature) : CombatAI(creature, CHROMAGGUS_ACTION_MAX), m_instance(dynamic_cast<instance_blackwing_lair*>(creature->GetInstanceData()))
     {
-        // Select the 2 different breaths that we are going to use until despawned
-        DoCastSpellIfCan(nullptr, SPELL_BREATH_SELECTION);
-        if (m_instance)
-        {
-            m_breathLeftSpell = m_instance->GetData(TYPE_CHROMA_LBREATH);    // Spell for left breath, stored in instance data
-            m_breathRightSpell = m_instance->GetData(TYPE_CHROMA_RBREATH);   // Spell for right breath, stored in instance data
-        }
         AddTimerlessCombatAction(CHROMAGGUS_ENRAGE, true);
         AddCombatAction(CHROMAGGUS_ELEMENTAL_SHIELD, 0u);
         AddCombatAction(CHROMAGGUS_BREATH_LEFT, 30000u);
@@ -71,19 +70,26 @@ struct boss_chromaggusAI : public CombatAI
         AddCombatAction(CHROMAGGUS_FRENZY, 15000u);
     }
 
-    ScriptedInstance* m_instance;
-
-    uint32 m_breathLeftSpell;
-    uint32 m_breathRightSpell;
+    instance_blackwing_lair* m_instance;
 
     void Aggro(Unit* /*who*/) override
     {
         if (m_instance)
+        {
+            m_instance->SelectChromaggusBreaths();
             m_instance->SetData(TYPE_CHROMAGGUS, IN_PROGRESS);
+        }
+    }
+
+    void EnterEvadeMode() override
+    {
+        m_creature->BreakCharmOutgoing();
+        CombatAI::EnterEvadeMode();
     }
 
     void JustDied(Unit* /*killer*/) override
     {
+        m_creature->BreakCharmOutgoing();
         if (m_instance)
             m_instance->SetData(TYPE_CHROMAGGUS, DONE);
     }
@@ -100,9 +106,8 @@ struct boss_chromaggusAI : public CombatAI
         {
             case CHROMAGGUS_ENRAGE:
             {
-                if (m_creature->GetHealthPercent() < 20.0f)
+                if (m_creature->GetHealthPercent() < 20.0f && DoCastSpellIfCan(nullptr, SPELL_ENRAGE) == CAST_OK)
                 {
-                    DoCastSpellIfCan(nullptr, SPELL_ENRAGE);
                     DoScriptText(EMOTE_GENERIC_FRENZY, m_creature);
                     SetActionReadyStatus(action, false);
                 }
@@ -113,19 +118,19 @@ struct boss_chromaggusAI : public CombatAI
                 if (DoCastSpellIfCan(nullptr, SPELL_ELEMENTAL_SHIELD_BWL) == CAST_OK)
                 {
                     DoScriptText(EMOTE_SHIMMER, m_creature);
-                    ResetCombatAction(action, 45000);
+                    ResetCombatAction(action, 20 * IN_MILLISECONDS);
                 }
                 break;
             }
             case CHROMAGGUS_BREATH_LEFT:
-            {
-                if (DoCastSpellIfCan(nullptr, m_breathLeftSpell) == CAST_OK)
-                    ResetCombatAction(action, 60000);
-                break;
-            }
             case CHROMAGGUS_BREATH_RIGHT:
             {
-                if (DoCastSpellIfCan(nullptr, m_breathRightSpell) == CAST_OK)
+                if (!m_instance)
+                    break;
+
+                uint32 const slot = action == CHROMAGGUS_BREATH_LEFT ? TYPE_CHROMA_LBREATH : TYPE_CHROMA_RBREATH;
+                uint32 const breath = m_instance->GetData(slot);
+                if (breath && DoCastSpellIfCan(nullptr, breath) == CAST_OK)
                     ResetCombatAction(action, 60000);
                 break;
             }
@@ -148,10 +153,123 @@ struct boss_chromaggusAI : public CombatAI
     }
 };
 
+struct ChromaggusBreathSelection : public SpellScript
+{
+    void OnEffectExecute(Spell* spell, SpellEffectIndex /*effectIndex*/) const override
+    {
+        if (auto* caster = dynamic_cast<Creature*>(spell->GetCaster()))
+            if (auto* instance = dynamic_cast<instance_blackwing_lair*>(caster->GetInstanceData()))
+                instance->SelectChromaggusBreaths();
+    }
+};
+
+struct ChromaggusBroodAffliction : public SpellScript
+{
+    void OnEffectExecute(Spell* spell, SpellEffectIndex /*effectIndex*/) const override
+    {
+        auto* caster = dynamic_cast<Creature*>(spell->GetCaster());
+        if (!caster || spell->GetScriptValue())
+            return;
+        spell->SetScriptValue(1); // The dummy hit starts a single wave for the entire cast.
+
+        GuidVector guids;
+        caster->FillGuidsListFromThreatList(guids);
+        std::vector<Unit*> targets;
+        for (ObjectGuid guid : guids)
+            if (Unit* target = caster->GetMap()->GetUnit(guid); target && target->IsPlayer() && target->IsAlive() && !target->HasAura(SPELL_CHROMATIC_MUTATION))
+                targets.push_back(target);
+
+        if (targets.empty())
+            return;
+
+        std::shuffle(targets.begin(), targets.end(), *GetRandomGenerator());
+        uint32 const affliction = BROOD_AFFLICTIONS[urand(0, std::size(BROOD_AFFLICTIONS) - 1)];
+        for (uint32 i = 0; i < BROOD_AFFLICTION_CASTS; ++i)
+        {
+            Unit* target = targets[i % targets.size()];
+            if (!target->IsAlive() || target->HasAura(SPELL_CHROMATIC_MUTATION))
+                continue;
+
+            caster->CastSpell(target, affliction, TRIGGERED_OLD_TRIGGERED);
+            if (std::all_of(std::begin(BROOD_AFFLICTIONS), std::end(BROOD_AFFLICTIONS),
+                [target](uint32 id) { return target->HasAura(id); }))
+            {
+                caster->CastSpell(target, SPELL_CHROMATIC_MUTATION, TRIGGERED_OLD_TRIGGERED);
+                if (!target->HasCharmer(caster->GetObjectGuid()))
+                    target->RemoveAurasByCasterSpell(SPELL_CHROMATIC_MUTATION, caster->GetObjectGuid());
+            }
+        }
+    }
+};
+
+struct ChromaggusMutation : public AuraScript
+{
+    void OnAfterApply(Aura* aura, bool apply) const override
+    {
+        if (!apply || aura->GetEffIndex() != EFFECT_INDEX_1)
+            return;
+
+        Unit* target = aura->GetTarget();
+        if (!target->HasCharmer(aura->GetCasterGuid()))
+            return;
+
+        for (uint32 affliction : BROOD_AFFLICTIONS)
+            target->RemoveAurasDueToSpell(affliction);
+        target->CastSpell(target, SPELL_MUTATION_OFFENSE, TRIGGERED_OLD_TRIGGERED);
+        target->CastSpell(target, SPELL_MUTATION_VITALITY, TRIGGERED_OLD_TRIGGERED);
+    }
+
+    void OnApply(Aura* aura, bool apply) const override
+    {
+        if (apply || aura->GetEffIndex() != EFFECT_INDEX_1)
+            return;
+
+        Unit* target = aura->GetTarget();
+        target->RemoveAurasByCasterSpell(SPELL_MUTATION_OFFENSE, target->GetObjectGuid());
+        target->RemoveAurasByCasterSpell(SPELL_MUTATION_VITALITY, target->GetObjectGuid());
+    }
+};
+
+struct ChromaggusTimeLapse : public AuraScript
+{
+    void OnApply(Aura* aura, bool apply) const override
+    {
+        if (aura->GetEffIndex() != EFFECT_INDEX_0)
+            return;
+
+        Unit* caster = aura->GetCaster();
+        if (!caster || caster->GetEntry() != NPC_CHROMAGGUS)
+            return;
+
+        Unit* target = aura->GetTarget();
+        ThreatManager& threat = caster->getThreatManager();
+        for (HostileReference* ref = target->getHostileRefManager().getFirst(); ref; ref = ref->next())
+        {
+            if (ref->getSource() != &threat)
+                continue;
+
+            if (apply)
+                ref->SetHostileState(STATE_SUPPRESSED);
+            else if (ref->GetHostileState() == STATE_SUPPRESSED && !caster->IsSuppressedTarget(target))
+            {
+                ref->SetHostileState(STATE_NORMAL);
+                // Re-evaluate the original threat order after the temporary handoff.
+                threat.setCurrentVictim(nullptr);
+            }
+            break;
+        }
+    }
+};
+
 void AddSC_boss_chromaggus()
 {
     Script* pNewScript = new Script;
     pNewScript->Name = "boss_chromaggus";
     pNewScript->GetAI = &GetNewAIInstance<boss_chromaggusAI>;
     pNewScript->RegisterSelf();
+
+    RegisterSpellScript<ChromaggusBreathSelection>("spell_chromaggus_breath_selection");
+    RegisterSpellScript<ChromaggusBroodAffliction>("spell_chromaggus_brood_affliction");
+    RegisterSpellScript<ChromaggusMutation>("spell_chromaggus_mutation");
+    RegisterSpellScript<ChromaggusTimeLapse>("spell_chromaggus_time_lapse");
 }

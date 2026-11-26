@@ -9012,6 +9012,15 @@ bool Unit::IsSuppressedTarget(Unit* target) const
     if (GetEntry() == 15335 && target->GetSpellAuraHolder(25371, GetObjectGuid()))
         return true;
 
+    // Time Lapse only suppresses targets stunned by this Chromaggus.
+    if (GetEntry() == 14020)
+    {
+        for (uint32 spellId : {23310u, 23312u})
+            if (SpellAuraHolder const* holder = target->GetSpellAuraHolder(spellId, GetObjectGuid());
+                holder && holder->GetAuraByEffectIndex(EFFECT_INDEX_0))
+                return true;
+    }
+
     if (target->IsImmuneToDamage(GetMeleeDamageSchoolMask()))
         return true;
 

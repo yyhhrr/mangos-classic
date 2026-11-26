@@ -326,11 +326,9 @@ void instance_blackwing_lair::SetData(uint32 uiType, uint32 uiData)
             else
                 m_scepterDeadline = 0;
             break;
-        case TYPE_CHROMA_LBREATH:
-        case TYPE_CHROMA_RBREATH:
         case TYPE_NEFA_LTUNNEL:
         case TYPE_NEFA_RTUNNEL:
-            m_auiEncounter[uiType] = uiData;    // Store the spell IDs/NPC entries of the two breaths/drakonids used by Chromaggus/Nefarian for all the instance lifetime. Breaths/Drakonids are picked randomly in Chromaggus/Nefarian script
+            m_auiEncounter[uiType] = uiData;
             break;
     }
 
@@ -872,39 +870,28 @@ void instance_blackwing_lair::Update(uint32 uiDiff)
     UpdateRazorgoreDefenderThreat();
 }
 
-void instance_blackwing_lair::InitiateBreath(uint32 uiEventId)
+void instance_blackwing_lair::SelectChromaggusBreaths()
 {
-    uint32 leftBreath = 0;
-    uint32 rightBreath = 0;
-    switch (uiEventId)
-    {
-        // Left Chromaggus breath
-        case 8446: leftBreath = 23187; break;  // Frost Burn
-        case 8447: leftBreath = 23308; break;  // Incinerate
-        case 8448: leftBreath = 23310; break;  // Time Lapse
-        case 8449: leftBreath = 23313; break;  // Corrosive Acid
-        case 8450: leftBreath = 23315; break;  // Ignite Flesh
-        // Right Chromaggus breath
-        case 8451: rightBreath = 23189; break;  // Frost Burn
-        case 8452: rightBreath = 23309; break;  // Incinerate
-        case 8453: rightBreath = 23312; break;  // Time Lapse
-        case 8454: rightBreath = 23314; break;  // Corrosive Acid
-        case 8455: rightBreath = 23316; break;  // Ignite Flesh
-    }
-    if (leftBreath)
-    {
-        debug_log("SD2 Instance Blackwing Lair: initiating Chromaggus' left breath");
-        if (GetData(TYPE_CHROMA_LBREATH) == NOT_STARTED)
-            SetData(TYPE_CHROMA_LBREATH, leftBreath);
-        debug_log("SD2 Instance Blackwing Lair: Chromaggus' left breath set to spell %u", GetData(TYPE_CHROMA_LBREATH));
-    }
-    if (rightBreath)
-    {
-        debug_log("SD2 Instance Blackwing Lair: initiating Chromaggus' right breath");
-        if (GetData(TYPE_CHROMA_RBREATH) == NOT_STARTED)
-            SetData(TYPE_CHROMA_RBREATH, rightBreath);
-        debug_log("SD2 Instance Blackwing Lair: Chromaggus' right breath set to spell %u", GetData(TYPE_CHROMA_RBREATH));
-    }
+    // Frost Burn, Incinerate, Time Lapse, Corrosive Acid, Ignite Flesh.
+    constexpr std::array<uint32, 5> leftSpells = {23187, 23308, 23310, 23313, 23315};
+    constexpr std::array<uint32, 5> rightSpells = {23189, 23309, 23312, 23314, 23316};
+    constexpr uint32 breathCount = leftSpells.size();
+    uint32& leftSpell = m_auiEncounter[TYPE_CHROMA_LBREATH];
+    uint32& rightSpell = m_auiEncounter[TYPE_CHROMA_RBREATH];
+    uint32 left = std::find(leftSpells.begin(), leftSpells.end(), leftSpell) - leftSpells.begin();
+    uint32 right = std::find(rightSpells.begin(), rightSpells.end(), rightSpell) - rightSpells.begin();
+    if (left < breathCount && right < breathCount && left != right)
+        return;
+
+    // Keep a valid slot from an older partial save. For a duplicate, keep the left slot.
+    if (left == breathCount)
+        left = right == breathCount ? urand(0, breathCount - 1) : (right + urand(1, breathCount - 1)) % breathCount;
+    if (right == breathCount || right == left)
+        right = (left + urand(1, breathCount - 1)) % breathCount;
+
+    leftSpell = leftSpells[left];
+    rightSpell = rightSpells[right];
+    SaveEncounterData();
 }
 
 void instance_blackwing_lair::InitiateDrakonid(uint32 uiEventId)
@@ -1050,20 +1037,6 @@ bool ProcessEventId_event_weekly_chromatic_selection(uint32 uiEventId, Object* p
         {
             switch (uiEventId)
             {
-                // Left Chromaggus breath
-                case 8446:
-                case 8447:
-                case 8448:
-                case 8449:
-                case 8450:
-                // Right Chromaggus breath
-                case 8451:
-                case 8452:
-                case 8453:
-                case 8454:
-                case 8455:
-                    pInstance->InitiateBreath(uiEventId);
-                    break;
                 // Left tunnel in Nefarian's lair
                 case 8520:
                 case 8521:
