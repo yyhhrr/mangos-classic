@@ -92,6 +92,12 @@ enum
     NPC_RED_DRAKONID            = 14264,
     NPC_BLACK_DRAKONID          = 14265,
     NPC_CHROMATIC_DRAKONID      = 14302,
+    NPC_BONE_CONSTRUCT          = 14605,
+    NPC_CORRUPTED_FIRE_NOVA_TOTEM = 14662,
+    NPC_CORRUPTED_STONESKIN_TOTEM = 14663,
+    NPC_CORRUPTED_HEALING_TOTEM  = 14664,
+    NPC_CORRUPTED_WINDFURY_TOTEM = 14666,
+    NPC_CORRUPTED_INFERNAL      = 14668,
 
     MAX_DRAKONID_SUMMONS        = 42,
 
@@ -154,7 +160,14 @@ class instance_blackwing_lair : public ScriptedInstance
         void Update(const uint32 diff) override;
 
         void SelectChromaggusBreaths();
-        void InitiateDrakonid(uint32 uiEventId);
+        void SelectNefarianTunnels();
+        bool CanStartNefarian() const;
+        bool BeginNefarianIntro(Creature const& victor);
+        bool IsNefarianIntro() const { return m_nefarianPhase == NefarianPhase::Intro; }
+        bool StartNefarianDrakonids(Creature& victor);
+        Player* StartNefarianDragon(Creature& dragon);
+        void NefarianEvaded(Creature const& creature);
+        void NefarianDefeated(Creature const& dragon);
 
         bool CheckConditionCriteriaMeet(Player const* pPlayer, uint32 uiInstanceConditionId, WorldObject const* pConditionSource, uint32 conditionSourceType) const override;
 
@@ -162,7 +175,12 @@ class instance_blackwing_lair : public ScriptedInstance
         std::string m_strInstData;
         uint32 m_auiEncounter[MAX_ENCOUNTER];
 
-        void CleanupNefarianStage(bool fullCleanup);
+        enum class NefarianPhase { Idle, Intro, Drakonids, Transition, Landing, Dragon };
+
+        Player* FindNefarianParticipant() const;
+        void UpdateNefarianEncounter(uint32 diff);
+        void CleanupNefarianEncounter(bool retry);
+        void DespawnNefarianCreatures(GuidSet& guids);
         void ResetRazorgore();
         void ResetRazorgoreEggs(MapPersistentState& state);
         void FinishRazorgoreEggPhase(Creature& razorgore);
@@ -178,11 +196,13 @@ class instance_blackwing_lair : public ScriptedInstance
         uint32 m_uiResetTimer;
         uint32 m_uiDefenseTimer;
         time_t m_scepterDeadline = 0;
-        uint32 m_uiNefarianSpawnTimer;
+        NefarianPhase m_nefarianPhase = NefarianPhase::Idle;
+        uint32 m_nefarianPhaseTimer = 0;
+        uint32 m_victorOutroTimer = 0;
+        ObjectGuid m_nefarianGuid;
         uint8 m_uiScepterQuestStep;
         uint8 m_uiDragonspawnCount;
         uint8 m_uiBlackwingDefCount;
-        uint8 m_uiDeadDrakonidsCount;
 
         bool m_razorgoreOrbUnlocked = false;
 
@@ -192,9 +212,11 @@ class instance_blackwing_lair : public ScriptedInstance
         GuidSet m_razorgoreGuards;
         GuidSet m_razorgoreDefenders;
         GuidSet m_suppressionDevices;
-        GuidList m_lDrakonidBonesGuids;
-        GuidList m_lDrakonidSpawnerGuids;
-        GuidList m_drakonids;
+        GuidSet m_drakonidBones;
+        GuidSet m_drakonidSpawners;
+        GuidSet m_drakonids;
+        GuidSet m_deadDrakonids;
+        GuidSet m_nefarianAdds;
         GuidVector m_vGeneratorGuids;
 };
 

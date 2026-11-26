@@ -100,6 +100,8 @@ INSERT INTO spell_scripts(Id, ScriptName) VALUES
 (23253,'spell_terrordale_haunting_spirit3'),
 (23310,'spell_chromaggus_time_lapse'),
 (23312,'spell_chromaggus_time_lapse'),
+(23343,'spell_nefarian_tunnel_selection'),
+(23414,'spell_nefarian_paralyze'),
 (23441,'spell_gadgetzan_transporter'),
 (23442,'spell_everlook_transporter'),
 (24082,'spell_marli_hatch_eggs'),

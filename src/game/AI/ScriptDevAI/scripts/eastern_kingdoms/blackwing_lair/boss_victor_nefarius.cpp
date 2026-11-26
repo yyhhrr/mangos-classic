@@ -46,7 +46,6 @@ enum
     SPELL_SHADOW_COMMAND            = 22667,
     SPELL_SHADOWBOLT                = 22677,
     SPELL_FEAR                      = 22678,
-    SPELL_TUNNEL_SELECTION          = 23343,
     // wotlk + uses weird 65634 spell
 
     MAP_ID_BWL                      = 469,
@@ -75,13 +74,11 @@ enum VictorNefariusActions
 
 struct boss_victor_nefariusAI : public CombatAI, private DialogueHelper
 {
-    boss_victor_nefariusAI(Creature* creature) : CombatAI(creature, NEFARIUS_ACTION_MAX), m_instance(static_cast<ScriptedInstance*>(creature->GetInstanceData())),
+    boss_victor_nefariusAI(Creature* creature) : CombatAI(creature, NEFARIUS_ACTION_MAX), m_instance(dynamic_cast<instance_blackwing_lair*>(creature->GetInstanceData())),
         DialogueHelper(aIntroDialogue)
     {
         if (m_creature->GetMapId() != MAP_ID_BWL)
             return;
-        // Select the 2 different drakonids that we are going to use for all instance lifetime
-        m_creature->CastSpell(nullptr, SPELL_TUNNEL_SELECTION, TRIGGERED_NONE);
         InitializeDialogueHelper(m_instance);
         AddCombatAction(NEFARIUS_SHADOW_BOLT, uint32(3 * IN_MILLISECONDS));
         AddCombatAction(NEFARIUS_FEAR, uint32(8 * IN_MILLISECONDS));
@@ -91,7 +88,7 @@ struct boss_victor_nefariusAI : public CombatAI, private DialogueHelper
         AddCombatAction(NEFARIUS_SHADOW_BLINK, uint32(40 * IN_MILLISECONDS));
     }
 
-    ScriptedInstance* m_instance;
+    instance_blackwing_lair* m_instance;
 
     void Reset() override
     {
@@ -99,27 +96,26 @@ struct boss_victor_nefariusAI : public CombatAI, private DialogueHelper
             return;
         CombatAI::Reset();
         // set gossip flag to begin the event
-        m_creature->SetFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
+        m_creature->ApplyModFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP, CanStartIntro());
         m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE);
         SetCombatScriptStatus(false);
     }
 
-    void Aggro(Unit* /*who*/) override
+    bool CanStartIntro() const
     {
-        if (m_instance)
-            m_instance->SetData(TYPE_NEFARIAN, IN_PROGRESS);
+        return m_instance && m_instance->CanStartNefarian();
     }
 
     void JustReachedHome() override
     {
         if (m_instance)
-            m_instance->SetData(TYPE_NEFARIAN, FAIL);
+            m_instance->NefarianEvaded(*m_creature);
     }
 
     void JustDidDialogueStep(int32 entry) override
     {
         // Start combat after the dialogue is finished
-        if (entry == SPELL_SHADOWBLINK)
+        if (entry == SPELL_SHADOWBLINK && m_instance && m_instance->StartNefarianDrakonids(*m_creature))
         {
             m_creature->SetStandState(UNIT_STAND_STATE_STAND);
             m_creature->SetFactionTemporary(FACTION_BLACK_DRAGON, TEMPFACTION_RESTORE_REACH_HOME | TEMPFACTION_RESTORE_RESPAWN);
@@ -129,20 +125,15 @@ struct boss_victor_nefariusAI : public CombatAI, private DialogueHelper
             m_creature->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE);
             m_creature->SetInCombatWithZone();
             SetCombatMovement(false); // Nefarius teleports via Shadowblink, he does not move
-
-            // Spawn the two spawner NPCs that will handle the drakonids spawning (both brood and chromatic)
-            if (m_instance)
-            {
-                // Left
-                m_creature->SummonCreature(m_instance->GetData(TYPE_NEFA_LTUNNEL), aNefarianLocs[0].x, aNefarianLocs[0].y, aNefarianLocs[0].z, 5.000f, TEMPSPAWN_TIMED_OOC_OR_CORPSE_DESPAWN, HOUR * IN_MILLISECONDS);
-                // Right
-                m_creature->SummonCreature(m_instance->GetData(TYPE_NEFA_RTUNNEL), aNefarianLocs[1].x, aNefarianLocs[1].y, aNefarianLocs[1].z, 5.000f, TEMPSPAWN_TIMED_OOC_OR_CORPSE_DESPAWN, HOUR * IN_MILLISECONDS);
-            }
         }
     }
 
     void DoStartIntro()
     {
+        if (!m_instance || !m_instance->BeginNefarianIntro(*m_creature))
+            return;
+
+        m_creature->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
         StartNextDialogueText(SAY_GAMESBEGIN_1);
     }
 
@@ -198,14 +189,16 @@ struct boss_victor_nefariusAI : public CombatAI, private DialogueHelper
         if (m_creature->GetMapId() != MAP_ID_BWL)
             return;
 
-        DialogueUpdate(diff);
+        if (m_instance && m_instance->IsNefarianIntro())
+            DialogueUpdate(diff);
         CombatAI::UpdateAI(diff);
     }
 };
 
 bool GossipHello_boss_victor_nefarius(Player* player, Creature* creature)
 {
-    if (creature->GetMapId() != MAP_ID_BWL)
+    auto* bossAI = dynamic_cast<boss_victor_nefariusAI*>(creature->AI());
+    if (!bossAI || !bossAI->CanStartIntro())
         return true;
 
     player->ADD_GOSSIP_ITEM_ID(GOSSIP_ICON_CHAT, GOSSIP_ITEM_NEFARIUS_1, GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF + 1);
@@ -215,7 +208,8 @@ bool GossipHello_boss_victor_nefarius(Player* player, Creature* creature)
 
 bool GossipSelect_boss_victor_nefarius(Player* player, Creature* creature, uint32 /*uiSender*/, uint32 action)
 {
-    if (creature->GetMapId() != MAP_ID_BWL)
+    auto* bossAI = dynamic_cast<boss_victor_nefariusAI*>(creature->AI());
+    if (!bossAI || !bossAI->CanStartIntro())
         return true;
 
     switch (action)
@@ -231,11 +225,8 @@ bool GossipSelect_boss_victor_nefarius(Player* player, Creature* creature, uint3
             player->SEND_GOSSIP_MENU(GOSSIP_TEXT_NEFARIUS_3, creature->GetObjectGuid());
             break;
         case GOSSIP_ACTION_INFO_DEF+3:
-            creature->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
             player->CLOSE_GOSSIP_MENU();
-            // Start the intro event
-            if (boss_victor_nefariusAI* bossAI = dynamic_cast<boss_victor_nefariusAI*>(creature->AI()))
-                bossAI->DoStartIntro();
+            bossAI->DoStartIntro();
             break;
     }
     return true;

@@ -28,6 +28,7 @@ EndScriptData
 #include "Entities/TemporarySpawn.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
 #include "MotionGenerators/WaypointManager.h"
+#include "Spells/Scripts/SpellScript.h"
 #include <G3D/Vector3.h>
 
 enum
@@ -48,9 +49,7 @@ enum
     SAY_WARLOCK                 = -1469019,
     SAY_HUNTER                  = -1469020,
     SAY_ROGUE                   = -1469021,
-    SAY_DEATH_KNIGHT            = -1469031,             // spell unk for the moment
-
-    SPELL_SHADOW_FLAME_PASSIVE  = 22992,
+    SPELL_SHADOW_FLAME_INITIAL  = 22986,
     SPELL_SHADOWFLAME           = 22539,
     SPELL_BELLOWING_ROAR        = 22686,
     SPELL_VEIL_OF_SHADOW        = 22687,
@@ -70,7 +69,11 @@ enum
     SPELL_HUNTER                = 23436,                // bow broke
     SPELL_ROGUE                 = 23414,                // Paralise
 
-    NPC_BONE_CONSTRUCT          = 14605,
+    SPELL_FIRE_NOVA_TOTEM       = 11311,
+    SPELL_STONESKIN_TOTEM       = 10405,
+    SPELL_HEALING_STREAM_TOTEM  = 10461,
+    SPELL_WINDFURY_TOTEM_AURA   = 10612,
+    SPELL_WINDFURY_TOTEM_ATTACK = 10610,
 };
 
 enum NefarianActions
@@ -84,13 +87,12 @@ enum NefarianActions
     NEFARIAN_TAIL_LASH,
     NEFARIAN_CLASS_CALL,
     NEFARIAN_ACTION_MAX,
-    NEFARIAN_INITIAL_YELL,
     NEFARIAN_ATTACK_START,
 };
 
 struct boss_nefarianAI : public CombatAI
 {
-    boss_nefarianAI(Creature* creature) : CombatAI(creature, NEFARIAN_ACTION_MAX), m_instance(static_cast<ScriptedInstance*>(creature->GetInstanceData()))
+    boss_nefarianAI(Creature* creature) : CombatAI(creature, NEFARIAN_ACTION_MAX), m_instance(dynamic_cast<instance_blackwing_lair*>(creature->GetInstanceData()))
     {
         AddTimerlessCombatAction(NEFARIAN_PHASE_3, true);
         AddTimerlessCombatAction(NEFARIAN_LOW_HP_YELL, true);
@@ -100,7 +102,6 @@ struct boss_nefarianAI : public CombatAI
         AddCombatAction(NEFARIAN_CLEAVE, true);
         AddCombatAction(NEFARIAN_TAIL_LASH, true);
         AddCombatAction(NEFARIAN_CLASS_CALL, true);
-        AddCustomAction(NEFARIAN_INITIAL_YELL, true, [&]() { HandleInitialYell(); });
         AddCustomAction(NEFARIAN_ATTACK_START, true, [&]() { HandleAttackStart(); });
         SetReactState(REACT_PASSIVE);
         m_creature->SetHover(true);
@@ -108,15 +109,15 @@ struct boss_nefarianAI : public CombatAI
         SetCombatMovement(false);
     }
 
-    ScriptedInstance* m_instance;
+    instance_blackwing_lair* m_instance;
+    bool m_landed = false;
 
     void JustRespawned() override
     {
         CombatAI::JustRespawned();
+        m_landed = false;
         DoCastSpellIfCan(nullptr, SPELL_SPEED_BURST, CAST_TRIGGERED | CAST_AURA_NOT_PRESENT);
         DoCastSpellIfCan(nullptr, SPELL_DOUBLE_ATTACK, CAST_TRIGGERED | CAST_AURA_NOT_PRESENT);
-        DoCastSpellIfCan(nullptr, SPELL_SHADOW_FLAME_PASSIVE, CAST_TRIGGERED | CAST_AURA_NOT_PRESENT);
-        ResetTimer(NEFARIAN_INITIAL_YELL, 10 * IN_MILLISECONDS);
         m_creature->SetWalk(false);
         StartLanding();
     }
@@ -129,22 +130,27 @@ struct boss_nefarianAI : public CombatAI
         DoScriptText(SAY_SLAY, m_creature, victim);
     }
 
+    void DamageDeal(Unit* /*target*/, uint32& damage, DamageEffectType type, SpellEntry const* spell) override
+    {
+        if (damage && type == DIRECT_DAMAGE && !spell && m_creature->HasAura(SPELL_WINDFURY_TOTEM_AURA) &&
+            !m_creature->HasAura(SPELL_WINDFURY_TOTEM_ATTACK) && roll_chance_i(20))
+            m_creature->CastSpell(nullptr, SPELL_WINDFURY_TOTEM_ATTACK, TRIGGERED_OLD_TRIGGERED);
+    }
+
     void JustDied(Unit* /*killer*/) override
     {
         DoScriptText(SAY_DEATH, m_creature);
 
         if (m_instance)
-            m_instance->SetData(TYPE_NEFARIAN, DONE);
+            m_instance->NefarianDefeated(*m_creature);
     }
 
     void EnterEvadeMode() override
     {
-        CombatAI::EnterEvadeMode();
         if (m_instance)
-        {
-            m_instance->SetData(TYPE_NEFARIAN, FAIL);
-            m_creature->ForcedDespawn();
-        }
+            m_instance->NefarianEvaded(*m_creature);
+        else
+            CombatAI::EnterEvadeMode();
     }
 
     void JustSummoned(Creature* summoned) override
@@ -170,23 +176,27 @@ struct boss_nefarianAI : public CombatAI
                 DoScriptText(SAY_AGGRO, m_creature);
                 break;
             case 9:
+                if (m_landed)
+                    break;
+                m_landed = true;
                 // Stop flying and land
                 m_creature->HandleEmote(EMOTE_ONESHOT_LAND);
                 m_creature->SetLevitate(false);
                 m_creature->SetHover(false);
+                if (DoCastSpellIfCan(nullptr, SPELL_SHADOW_FLAME_INITIAL, CAST_TRIGGERED) == CAST_OK)
+                    DoScriptText(SAY_SHADOW_FLAME, m_creature);
                 ResetTimer(NEFARIAN_ATTACK_START, 4000);
                 m_creature->GetMotionMaster()->MoveIdle();
                 break;
         }
     }
 
-    void HandleInitialYell()
-    {
-        DoScriptText(SAY_SHADOW_FLAME, m_creature);
-    }
-
     void HandleAttackStart()
     {
+        Player* target = m_instance ? m_instance->StartNefarianDragon(*m_creature) : nullptr;
+        if (!target)
+            return;
+
         SetMeleeEnabled(true);
         SetReactState(REACT_AGGRESSIVE);
         m_creature->RemoveAurasDueToSpell(SPELL_SPEED_BURST);
@@ -194,14 +204,13 @@ struct boss_nefarianAI : public CombatAI
         m_creature->SetInCombatWithZone();
         // Make attackable and attack
         m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE);
-        if (Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0))
-            m_creature->AI()->AttackStart(target);
+        AttackStart(target);
         ResetCombatAction(NEFARIAN_SHADOW_FLAME, 12000u);
         ResetCombatAction(NEFARIAN_BELLOWING_ROAR, 30000u);
         ResetCombatAction(NEFARIAN_VEIL_OF_SHADOW, 15000u);
         ResetCombatAction(NEFARIAN_CLEAVE, 7000u);
         ResetCombatAction(NEFARIAN_TAIL_LASH, 10000u);
-        ResetCombatAction(NEFARIAN_CLASS_CALL, 35000u);
+        ResetCombatAction(NEFARIAN_CLASS_CALL, urand(30000, 35000));
     }
 
     void ExecuteAction(uint32 action) override
@@ -282,7 +291,7 @@ struct boss_nefarianAI : public CombatAI
                     if (DoCastSpellIfCan(nullptr, spellId) == CAST_OK)
                     {
                         DoScriptText(textId, m_creature);
-                        ResetCombatAction(action, urand(35000, 40000));
+                        ResetCombatAction(action, urand(30000, 35000));
                     }
                 }
                 break;
@@ -291,10 +300,158 @@ struct boss_nefarianAI : public CombatAI
     }
 };
 
+struct NefarianParalyze : public SpellScript
+{
+    void OnEffectExecute(Spell* spell, SpellEffectIndex effect) const override
+    {
+        Unit* caster = spell->GetCaster();
+        Unit* target = spell->GetUnitTarget();
+        if (effect != EFFECT_INDEX_0 || !caster || caster->GetEntry() != NPC_NEFARIAN ||
+            !target || !target->IsPlayer() || target->getClass() != CLASS_ROGUE)
+            return;
+
+        Position destination;
+        caster->GetFirstCollisionPosition(destination, 5.0f, caster->GetOrientation());
+        float const dx = destination.x - caster->GetPositionX();
+        float const dy = destination.y - caster->GetPositionY();
+        if (MaNGOS::IsValidMapCoord(destination.x, destination.y, destination.z) &&
+            dx * dx + dy * dy >= 1.0f &&
+            std::abs(destination.z - caster->GetPositionZ()) < 3.0f &&
+            caster->IsWithinLOS(destination.x, destination.y, destination.z + 1.0f))
+            target->NearTeleportTo(destination.x, destination.y, destination.z, target->GetOrientation());
+    }
+};
+
+// The corrupted NPCs need to buff their encounter allies across faction-template
+// boundaries. Use the native totem effect as a single aura from this totem.
+class CorruptedTotemBuff : public Aura
+{
+public:
+    CorruptedTotemBuff(SpellEntry const* spell, SpellAuraHolder* holder, Unit* target, Creature* totem)
+        : Aura(spell, EFFECT_INDEX_0, nullptr, nullptr, holder, target, totem) {}
+};
+
+struct npc_nefarian_corrupted_totemAI : public ScriptedAI
+{
+    explicit npc_nefarian_corrupted_totemAI(Creature* creature) : ScriptedAI(creature)
+    {
+        SetReactState(REACT_PASSIVE);
+        SetMeleeEnabled(false);
+        SetCombatMovement(false);
+        creature->SetImmobilizedState(true);
+        switch (creature->GetEntry())
+        {
+            case NPC_CORRUPTED_STONESKIN_TOTEM: m_buff = SPELL_STONESKIN_TOTEM; break;
+            case NPC_CORRUPTED_HEALING_TOTEM: m_buff = SPELL_HEALING_STREAM_TOTEM; break;
+            case NPC_CORRUPTED_WINDFURY_TOTEM: m_buff = SPELL_WINDFURY_TOTEM_AURA; break;
+        }
+    }
+
+    void JustDied(Unit* /*killer*/) override { ClearBuffs(); }
+    void CorpseRemoved(uint32& /*respawnDelay*/) override { ClearBuffs(); }
+    void SummonedCreatureDespawn(Creature* summon) override
+    {
+        if (summon == m_creature)
+            ClearBuffs();
+    }
+
+    void UpdateAI(uint32 diff) override
+    {
+        if (m_creature->GetEntry() == NPC_CORRUPTED_FIRE_NOVA_TOTEM)
+        {
+            // The five-second summon expires after the aura's first four-second pulse.
+            if (!m_novaArmed && DoCastSpellIfCan(nullptr, SPELL_FIRE_NOVA_TOTEM, CAST_TRIGGERED) == CAST_OK)
+                m_novaArmed = true;
+            return;
+        }
+
+        if (m_updateTimer > diff)
+        {
+            m_updateTimer -= diff;
+            return;
+        }
+        m_updateTimer = IN_MILLISECONDS;
+        UpdateBuffs();
+    }
+
+private:
+    void UpdateBuffs()
+    {
+        SpellEntry const* spell = sSpellTemplate.LookupEntry<SpellEntry>(m_buff);
+        if (!spell)
+            return;
+
+        constexpr float radius = 20.0f;
+        static std::vector<uint32> const allies = {NPC_NEFARIAN, NPC_BONE_CONSTRUCT, NPC_BLUE_DRAKONID,
+            NPC_GREEN_DRAKONID, NPC_BRONZE_DRAKONID, NPC_RED_DRAKONID, NPC_BLACK_DRAKONID, NPC_CHROMATIC_DRAKONID};
+        CreatureList targets;
+        if (m_buff == SPELL_WINDFURY_TOTEM_AURA)
+            GetCreatureListWithEntryInGrid(targets, m_creature, NPC_NEFARIAN, radius);
+        else
+            GetCreatureListWithEntryInGrid(targets, m_creature, allies, radius);
+
+        GuidSet inRange;
+        ObjectGuid const caster = m_creature->GetObjectGuid();
+        for (Creature* target : targets)
+        {
+            if (!target->IsAlive())
+                continue;
+            if (SpellAuraHolder* holder = target->GetSpellAuraHolder(m_buff, caster))
+                holder->SetAuraDuration(3 * IN_MILLISECONDS);
+            else
+            {
+                if (target->HasAura(m_buff))
+                    continue;
+                holder = CreateSpellAuraHolder(spell, target, m_creature);
+                holder->SetAuraMaxDuration(3 * IN_MILLISECONDS);
+                holder->SetAuraDuration(3 * IN_MILLISECONDS);
+                holder->AddAura(new CorruptedTotemBuff(spell, holder, target, m_creature), EFFECT_INDEX_0);
+                if (!target->AddSpellAuraHolder(holder))
+                {
+                    delete holder;
+                    continue;
+                }
+                holder->SetState(SPELLAURAHOLDER_STATE_READY);
+            }
+            inRange.insert(target->GetObjectGuid());
+        }
+
+        for (ObjectGuid guid : m_buffTargets)
+            if (!inRange.count(guid))
+                RemoveBuff(guid);
+        m_buffTargets.swap(inRange);
+    }
+
+    void ClearBuffs()
+    {
+        for (ObjectGuid guid : m_buffTargets)
+            RemoveBuff(guid);
+        m_buffTargets.clear();
+    }
+
+    void RemoveBuff(ObjectGuid guid)
+    {
+        if (Unit* target = m_creature->GetMap()->GetUnit(guid))
+            target->RemoveAurasByCasterSpell(m_buff, m_creature->GetObjectGuid());
+    }
+
+    GuidSet m_buffTargets;
+    uint32 m_buff = 0;
+    uint32 m_updateTimer = 0;
+    bool m_novaArmed = false;
+};
+
 void AddSC_boss_nefarian()
 {
     Script* pNewScript = new Script;
     pNewScript->Name = "boss_nefarian";
     pNewScript->GetAI = &GetNewAIInstance<boss_nefarianAI>;
     pNewScript->RegisterSelf();
+
+    pNewScript = new Script;
+    pNewScript->Name = "npc_nefarian_corrupted_totem";
+    pNewScript->GetAI = &GetNewAIInstance<npc_nefarian_corrupted_totemAI>;
+    pNewScript->RegisterSelf();
+
+    RegisterSpellScript<NefarianParalyze>("spell_nefarian_paralyze");
 }

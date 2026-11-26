@@ -263,17 +263,8 @@ UPDATE creature_template SET ScriptName='boss_flamegor' WHERE entry=11981;
 UPDATE creature_template SET ScriptName='boss_chromaggus' WHERE entry=14020;
 UPDATE creature_template SET ScriptName='boss_victor_nefarius' WHERE entry=10162;
 UPDATE creature_template SET ScriptName='boss_nefarian' WHERE entry=11583;
-INSERT INTO scripted_event_id VALUES
-(8520,'event_weekly_chromatic_selection'),
-(8521,'event_weekly_chromatic_selection'),
-(8522,'event_weekly_chromatic_selection'),
-(8523,'event_weekly_chromatic_selection'),
-(8524,'event_weekly_chromatic_selection'),
-(8525,'event_weekly_chromatic_selection'),
-(8526,'event_weekly_chromatic_selection'),
-(8527,'event_weekly_chromatic_selection'),
-(8528,'event_weekly_chromatic_selection'),
-(8529,'event_weekly_chromatic_selection');
+UPDATE creature_template SET AIName='', ScriptName='npc_nefarian_corrupted_totem' WHERE entry IN (14662,14663,14664,14666);
+UPDATE spell_template SET MaxAffectedTargets=1 WHERE Id=23603;
 
 
 /* BLASTED LANDS */

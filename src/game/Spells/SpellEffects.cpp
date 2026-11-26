@@ -896,25 +896,6 @@ void Spell::EffectDummy(SpellEffectIndex eff_idx)
 
                     return;
                 }
-                case 23343:                                 // Nefarian Tunnel Selection
-                {
-                    // This spell selects two kinds of drakonids amongst five and send them to BWL instance script through events
-
-                    // Drakonids selection
-                    // 5 possiblities for the first kind, 4 for the second: 20 total possiblites
-                    uint8 rightDrakonid = urand(0, 4);
-                    uint8 leftDrakonid = (rightDrakonid + urand(1, 4)) % 5;
-
-                    // Sending left tunnel selection to instance script
-                    uint32 leftDrakonids[] = { 23344, 23345, 23346, 23347, 23348 };
-                    m_caster->CastSpell(m_caster, leftDrakonids[leftDrakonid], TRIGGERED_OLD_TRIGGERED);
-
-                    // Sending right tunnel selection to instance script
-                    uint32 rightDrakonids[] = { 23349, 23350, 23351, 23352, 23353 };
-                    m_caster->CastSpell(m_caster, rightDrakonids[rightDrakonid], TRIGGERED_OLD_TRIGGERED);
-
-                    return;
-                }
                 case 23450:                                 // Transporter Arrival - (Gadgetzan + Everlook)
                 {
                     uint32 rand = urand(0, 5);              // Roll for minor malfunctions:
