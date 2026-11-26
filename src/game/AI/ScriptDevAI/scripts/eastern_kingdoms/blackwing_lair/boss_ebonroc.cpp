@@ -44,11 +44,13 @@ enum EbonrocActions
     EBONROC_ACTION_MAX,
 };
 
+constexpr uint32 SHADOW_OF_EBONROC_INTERVAL = 8 * IN_MILLISECONDS;
+
 struct boss_ebonrocAI : public CombatAI
 {
     boss_ebonrocAI(Creature* creature) : CombatAI(creature, EBONROC_ACTION_MAX), m_instance(static_cast<ScriptedInstance*>(creature->GetInstanceData()))
     {
-        AddCombatAction(EBONROC_SHADOW_OF_EBONROC, 45000u);
+        AddCombatAction(EBONROC_SHADOW_OF_EBONROC, SHADOW_OF_EBONROC_INTERVAL);
         AddCombatAction(EBONROC_SHADOW_FLAME, uint32(18 * IN_MILLISECONDS));
         AddCombatAction(EBONROC_WING_BUFFET, uint32(30 * IN_MILLISECONDS));
         AddCombatAction(EBONROC_THRASH, uint32(6 * IN_MILLISECONDS));
@@ -74,9 +76,9 @@ struct boss_ebonrocAI : public CombatAI
             m_instance->SetData(TYPE_EBONROC, FAIL);
     }
 
-    void SpellHitTarget(Unit* target, const SpellEntry* spellInfo, SpellMissInfo /*missInfo*/) override
+    void SpellHitTarget(Unit* target, const SpellEntry* spellInfo, SpellMissInfo missInfo) override
     {
-        if (spellInfo->Id == SPELL_WING_BUFFET) // reduces threat of everyone hit
+        if (spellInfo->Id == SPELL_WING_BUFFET && missInfo == SPELL_MISS_NONE)
             m_creature->getThreatManager().modifyThreatPercent(target, -50);
     }
 
@@ -86,8 +88,8 @@ struct boss_ebonrocAI : public CombatAI
         {
             case EBONROC_SHADOW_OF_EBONROC:
             {
-                if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_SHADOW_OF_EBONROC) == CAST_OK)
-                    ResetCombatAction(action, urand(25 * IN_MILLISECONDS, 35 * IN_MILLISECONDS));
+                if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_SHADOW_OF_EBONROC, CAST_AURA_NOT_PRESENT) == CAST_OK)
+                    ResetCombatAction(action, SHADOW_OF_EBONROC_INTERVAL);
                 break;
             }
             case EBONROC_SHADOW_FLAME:
