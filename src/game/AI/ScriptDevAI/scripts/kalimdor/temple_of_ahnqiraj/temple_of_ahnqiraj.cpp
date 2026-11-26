@@ -27,6 +27,30 @@ EndScriptData
 #include "temple_of_ahnqiraj.h"
 #include "Globals/ObjectMgr.h"
 #include "Maps/MapPersistentStateMgr.h"
+#include "Maps/SpawnManager.h"
+
+namespace
+{
+constexpr uint32 SARTURA_SPAWN_GROUP = 5310010;
+
+CreatureGroup* GetSarturaGroup(Map& map)
+{
+    SpawnGroup* group = map.GetSpawnManager().GetSpawnGroup(SARTURA_SPAWN_GROUP);
+    return group ? group->GetCreatureGroup() : nullptr;
+}
+
+bool IsSarturaGroupMember(Creature const& creature)
+{
+    CreatureGroup const* group = creature.GetCreatureGroup();
+    return group && group->GetGroupEntry().Id == SARTURA_SPAWN_GROUP;
+}
+}
+
+bool IsInSarturaRoom(float x, float y, float z)
+{
+    // Include the east approach through area trigger 4052, up to the next pack's corridor.
+    return x >= -8385.0f && x <= -8170.0f && y >= 1560.0f && y <= 1780.0f && z >= -55.0f && z <= 10.0f;
+}
 
 static const DialogueEntry aIntroDialogue[] =
 {
@@ -57,6 +81,9 @@ void instance_temple_of_ahnqiraj::Initialize()
 
 bool instance_temple_of_ahnqiraj::IsEncounterInProgress() const
 {
+    if (GetData(TYPE_SARTURA) == FAIL)
+        return true;
+
     for (uint32 i : m_encounter)
     {
         if (i == IN_PROGRESS)
@@ -66,9 +93,23 @@ bool instance_temple_of_ahnqiraj::IsEncounterInProgress() const
     return false;
 }
 
+bool instance_temple_of_ahnqiraj::CanSpawnCreatureGroup(uint32 groupId) const
+{
+    return groupId != SARTURA_SPAWN_GROUP || GetData(TYPE_SARTURA) == NOT_STARTED;
+}
+
 void instance_temple_of_ahnqiraj::OnPlayerEnter(Player* /*player*/)
 {
     RestoreBugTrioRespawns();
+
+    if (!m_sarturaRespawnsRestored)
+    {
+        m_sarturaRespawnsRestored = true;
+        // An interrupted attempt can leave guard timers even when the saved state is NOT_STARTED.
+        if (GetData(TYPE_SARTURA) == NOT_STARTED)
+            if (CreatureGroup* group = GetSarturaGroup(*instance))
+                group->ClearRespawnTimes();
+    }
 }
 
 void instance_temple_of_ahnqiraj::OnPlayerLeave(Player* player)
@@ -125,7 +166,7 @@ void instance_temple_of_ahnqiraj::DoHandleTempleAreaTrigger(uint32 triggerId, Pl
     }
     else if (triggerId == AREATRIGGER_SARTURA)
     {
-        if (GetData(TYPE_SARTURA) == NOT_STARTED || GetData(TYPE_SARTURA) == FAIL)
+        if (GetData(TYPE_SARTURA) == NOT_STARTED)
         {
             if (Creature* sartura = GetSingleCreatureFromStorage(NPC_SARTURA))
                 sartura->SetInCombatWithZone();
@@ -133,10 +174,26 @@ void instance_temple_of_ahnqiraj::DoHandleTempleAreaTrigger(uint32 triggerId, Pl
     }
 }
 
+void instance_temple_of_ahnqiraj::OnCreatureEnterCombat(Creature* creature)
+{
+    if (GetData(TYPE_SARTURA) == NOT_STARTED && IsSarturaGroupMember(*creature))
+        SetData(TYPE_SARTURA, IN_PROGRESS);
+}
+
+void instance_temple_of_ahnqiraj::OnCreatureEvade(Creature* creature)
+{
+    if (GetData(TYPE_SARTURA) == IN_PROGRESS && IsSarturaGroupMember(*creature))
+        SetData(TYPE_SARTURA, FAIL);
+}
+
 void instance_temple_of_ahnqiraj::OnCreatureDeath(Creature* creature)
 {
     switch (creature->GetEntry())
     {
+        case NPC_SARTURA:
+            if (IsSarturaGroupMember(*creature))
+                SetData(TYPE_SARTURA, DONE);
+            break;
         case NPC_KRI:
         case NPC_YAUJ:
         case NPC_VEM:
@@ -244,6 +301,12 @@ void instance_temple_of_ahnqiraj::OnObjectCreate(GameObject* go)
 
 void instance_temple_of_ahnqiraj::OnCreatureRespawn(Creature* creature)
 {
+    if (IsSarturaGroupMember(*creature))
+        creature->GetCombatManager().SetLeashingCheck([](Unit*, float x, float y, float z)
+        {
+            return !IsInSarturaRoom(x, y, z);
+        });
+
     switch (creature->GetEntry())
     {
         case NPC_QIRAJI_SCARAB:
@@ -310,6 +373,33 @@ void instance_temple_of_ahnqiraj::ResetBugTrio()
     }
 }
 
+void instance_temple_of_ahnqiraj::UpdateSarturaReset()
+{
+    if (GetData(TYPE_SARTURA) != FAIL)
+        return;
+
+    if (CreatureGroup* group = GetSarturaGroup(*instance))
+    {
+        for (auto const& member : group->GetGroupEntry().DbGuids)
+            if (Creature* creature = instance->GetCreature(member.DbGuid))
+                if (creature->IsAlive() && creature->IsInCombat() && !creature->GetCombatManager().IsEvadingHome())
+                    creature->AI()->EnterEvadeMode();
+
+        if (!group->IsOutOfCombat() || group->IsEvading())
+            return;
+
+        // Remove any corpses still occupying the group's slots before reopening the encounter.
+        for (auto const& member : group->GetGroupEntry().DbGuids)
+            if (Creature* creature = instance->GetCreature(member.DbGuid))
+                if (!creature->IsAlive())
+                    creature->RemoveCorpse();
+
+        group->ClearRespawnTimes();
+    }
+
+    SetData(TYPE_SARTURA, NOT_STARTED);
+}
+
 void instance_temple_of_ahnqiraj::SetData(uint32 type, uint32 data)
 {
     switch (type)
@@ -329,6 +419,10 @@ void instance_temple_of_ahnqiraj::SetData(uint32 type, uint32 data)
                 m_bugTrioSpawns.clear();
             break;
         case TYPE_SARTURA:
+            if (m_encounter[type] == DONE || m_encounter[type] == data)
+                return;
+            m_encounter[type] = data;
+            break;
         case TYPE_FANKRISS:
         case TYPE_VISCIDUS:
             m_encounter[type] = data;
@@ -429,6 +523,9 @@ void instance_temple_of_ahnqiraj::Load(const char* chrIn)
             i = NOT_STARTED;
     }
 
+    if (GetData(TYPE_SARTURA) == FAIL)
+        m_encounter[TYPE_SARTURA] = NOT_STARTED;
+
     OUT_LOAD_INST_DATA_COMPLETE;
 }
 
@@ -443,6 +540,7 @@ uint32 instance_temple_of_ahnqiraj::GetData(uint32 type) const
 void instance_temple_of_ahnqiraj::Update(uint32 diff)
 {
     DialogueUpdate(diff);
+    UpdateSarturaReset();
 
     if (GetData(TYPE_SKERAM) == NOT_STARTED)
     {

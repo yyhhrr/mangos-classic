@@ -25,6 +25,7 @@ enum
     NPC_VEM                     = 15544,
     NPC_YAUJ                    = 15543,
     NPC_SARTURA                 = 15516,
+    NPC_SARTURA_ROYAL_GUARD     = 15984,
     NPC_VEKLOR                  = 15276,
     NPC_VEKNILASH               = 15275,
     NPC_MASTERS_EYE             = 15963,
@@ -92,6 +93,8 @@ enum
 
 inline constexpr uint32 bugTrioEntries[] = { NPC_KRI, NPC_YAUJ, NPC_VEM };
 
+bool IsInSarturaRoom(float x, float y, float z);
+
 // Prophecies yelled by Propher Skeram before he is engaged
 static const uint32 sound_skeram_prophecy[] = { 8616, 8621, 8619, 8620, 8618 };
 
@@ -107,8 +110,11 @@ class instance_temple_of_ahnqiraj : public ScriptedInstance, private DialogueHel
         void Initialize() override;
 
         bool IsEncounterInProgress() const override;
+        bool CanSpawnCreatureGroup(uint32 groupId) const override;
 
         void OnCreatureCreate(Creature* creature) override;
+        void OnCreatureEnterCombat(Creature* creature) override;
+        void OnCreatureEvade(Creature* creature) override;
         void OnCreatureDeath(Creature* creature) override;
         void OnObjectCreate(GameObject* go) override;
         void OnCreatureRespawn(Creature* creature) override;
@@ -137,9 +143,11 @@ class instance_temple_of_ahnqiraj : public ScriptedInstance, private DialogueHel
         std::set<uint32> m_bugTrioDeaths;
         GuidVector m_bugTrioSpawns;
         bool m_bugTrioRespawnsRestored = false;
+        bool m_sarturaRespawnsRestored = false;
 
         void RestoreBugTrioRespawns();
         void ResetBugTrio();
+        void UpdateSarturaReset();
         void JustDidDialogueStep(int32 entry) override;
 };
 

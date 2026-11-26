@@ -41,7 +41,9 @@ enum
     SPELL_WHIRLWIND             = 26083,
     SPELL_BERSERK               = 27680,
 
-    SPELL_OTHER_WHIRLWIND_TRIGGER = 26686,
+    SPELL_WHIRLWIND_TRIGGER     = 26084,
+    SPELL_GUARD_WHIRLWIND       = 26038,
+    SPELL_GUARD_WHIRLWIND_TRIGGER = 26686,
 };
 
 enum SarturaActions
@@ -55,7 +57,7 @@ enum SarturaActions
 
 struct boss_sarturaAI : public CombatAI
 {
-    boss_sarturaAI(Creature* creature) : CombatAI(creature, SARTURA_ACTION_MAX), m_instance(static_cast<ScriptedInstance*>(creature->GetInstanceData()))
+    boss_sarturaAI(Creature* creature) : CombatAI(creature, SARTURA_ACTION_MAX)
     {
         AddTimerlessCombatAction(SARTURA_ENRAGE, true);
         AddCombatAction(SARTURA_WHIRLWIND, 10000, 20000);
@@ -65,28 +67,15 @@ struct boss_sarturaAI : public CombatAI
         Reset();
     }
 
-    ScriptedInstance* m_instance;
-
     void Aggro(Unit* /*who*/) override
     {
         DoScriptText(SAY_AGGRO, m_creature);
-
-        if (m_instance)
-            m_instance->SetData(TYPE_SARTURA, IN_PROGRESS);
     }
 
-    void JustDied(Unit* /*killer*/) override
+    void JustDied(Unit* killer) override
     {
+        CombatAI::JustDied(killer);
         DoScriptText(SAY_DEATH, m_creature);
-
-        if (m_instance)
-            m_instance->SetData(TYPE_SARTURA, DONE);
-    }
-
-    void JustReachedHome() override
-    {
-        if (m_instance)
-            m_instance->SetData(TYPE_SARTURA, FAIL);
     }
 
     void ExecuteAction(uint32 action) override
@@ -130,6 +119,39 @@ struct boss_sarturaAI : public CombatAI
     }
 };
 
+class SarturaWhirlwindEndEvent : public BasicEvent
+{
+    public:
+        SarturaWhirlwindEndEvent(Unit& caster, Aura& whirlwind)
+            : m_caster(caster), m_whirlwind(whirlwind.GetWeakPtr()), m_spellId(whirlwind.GetId()) {}
+
+        bool Execute(uint64 /*time*/, uint32 /*diff*/) override
+        {
+            if (!m_caster.IsAlive())
+                return true;
+
+            if (!m_whirlwind.expired())
+            {
+                m_caster.m_events.AddEvent(this, m_caster.m_events.CalculateTime(1), false);
+                return false;
+            }
+
+            if (!m_caster.IsInCombat() || !m_caster.CanHaveThreatList())
+                return true;
+
+            // A replacement aura may already have selected a new target.
+            Aura* replacement = m_caster.GetAura(m_spellId, EFFECT_INDEX_0);
+            if (!replacement || !replacement->GetScriptValue())
+                m_caster.getThreatManager().modifyAllThreatPercent(-100);
+            return true;
+        }
+
+    private:
+        Unit& m_caster;
+        MaNGOS::unique_weak_ptr<Aura> m_whirlwind;
+        uint32 m_spellId;
+};
+
 struct AQWhirlwind : public SpellScript
 {
     void OnEffectExecute(Spell* spell, SpellEffectIndex effIdx) const override
@@ -137,25 +159,47 @@ struct AQWhirlwind : public SpellScript
         if (effIdx != EFFECT_INDEX_1)
             return;
 
-        if (!spell->GetCaster()->CanHaveThreatList() || spell->GetCaster()->getThreatManager().isThreatListEmpty())
+        Unit* caster = spell->GetCaster();
+        SpellEntry const* auraSpell = spell->GetTriggeredByAuraSpellInfo();
+        if (!caster || !caster->IsAlive() || !caster->IsInCombat() || !caster->CanHaveThreatList() || !auraSpell)
             return;
 
-        if (!spell->GetTriggeredByAuraSpellInfo())
+        bool const bossWhirlwind = caster->GetEntry() == NPC_SARTURA && auraSpell->Id == SPELL_WHIRLWIND && spell->m_spellInfo->Id == SPELL_WHIRLWIND_TRIGGER;
+        bool const guardWhirlwind = caster->GetEntry() == NPC_SARTURA_ROYAL_GUARD && auraSpell->Id == SPELL_GUARD_WHIRLWIND && spell->m_spellInfo->Id == SPELL_GUARD_WHIRLWIND_TRIGGER;
+        if (!bossWhirlwind && !guardWhirlwind)
             return;
 
-        SpellAuraHolder* holder = spell->GetCaster()->GetSpellAuraHolder(spell->GetTriggeredByAuraSpellInfo()->Id);
-        if (holder->m_auras[EFFECT_INDEX_0]->GetAuraTicks() != holder->m_auras[EFFECT_INDEX_0]->GetAuraMaxTicks())
+        SpellAuraHolder* holder = caster->GetSpellAuraHolder(auraSpell->Id, caster->GetObjectGuid());
+        Aura* whirlwind = holder ? holder->GetAuraByEffectIndex(EFFECT_INDEX_0) : nullptr;
+        if (!whirlwind || whirlwind->GetAuraTicks() >= whirlwind->GetAuraMaxTicks())
+            return;
+
+        ThreatManager& threat = caster->getThreatManager();
+        if (threat.isThreatListEmpty() || (guardWhirlwind && urand(0, 2) != 0))
+            return;
+
+        std::vector<Player*> candidates;
+        for (HostileReference const* reference : threat.getThreatList())
         {
-            if (spell->m_spellInfo->Id == SPELL_OTHER_WHIRLWIND_TRIGGER)
-                if (urand(0, 2))
-                    return;
-
-            spell->GetCaster()->getThreatManager().modifyAllThreatPercent(-100);
-            if (Unit* target = static_cast<Creature*>(spell->GetCaster())->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, nullptr, SELECT_FLAG_PLAYER))
-                spell->GetCaster()->getThreatManager().addThreat(target, 100000.f);
+            Player* player = caster->GetMap()->GetPlayer(reference->getUnitGuid());
+            if (player && player->IsAlive() && !player->IsGameMaster() && !caster->IsOfflineTarget(player) &&
+                    IsInSarturaRoom(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ()) &&
+                    caster->CanAttack(player) && caster->IsWithinLOSInMap(player, true))
+                candidates.push_back(player);
         }
-        else
-            spell->GetCaster()->getThreatManager().modifyAllThreatPercent(-100);
+        if (candidates.empty())
+            return;
+
+        if (!whirlwind->GetScriptValue())
+        {
+            // The trigger is bound in the DB, but the parent aura is not. Its weak pointer expires on removal.
+            whirlwind->SetScriptValue(1);
+            caster->m_events.AddEvent(new SarturaWhirlwindEndEvent(*caster, *whirlwind), caster->m_events.CalculateTime(1));
+        }
+
+        Player* target = candidates[urand(0, uint32(candidates.size() - 1))];
+        threat.modifyAllThreatPercent(-100);
+        threat.addThreat(target, 100000.f);
     }
 };
 
