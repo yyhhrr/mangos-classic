@@ -46,11 +46,13 @@ enum FlamegorActions
     FLAMEGOR_ACTION_MAX,
 };
 
+constexpr uint32 FLAMEGOR_FRENZY_INTERVAL = 10 * IN_MILLISECONDS;
+
 struct boss_flamegorAI : public CombatAI
 {
     boss_flamegorAI(Creature* creature) : CombatAI(creature, FLAMEGOR_ACTION_MAX), m_instance(static_cast<ScriptedInstance*>(creature->GetInstanceData()))
     {
-        AddCombatAction(FLAMEGOR_FRENZY, 10000u);
+        AddCombatAction(FLAMEGOR_FRENZY, FLAMEGOR_FRENZY_INTERVAL);
         AddCombatAction(FLAMEGOR_SHADOW_FLAME, uint32(18 * IN_MILLISECONDS));
         AddCombatAction(FLAMEGOR_WING_BUFFET, uint32(30 * IN_MILLISECONDS));
         AddCombatAction(FLAMEGOR_THRASH, uint32(6 * IN_MILLISECONDS));
@@ -76,9 +78,9 @@ struct boss_flamegorAI : public CombatAI
             m_instance->SetData(TYPE_FLAMEGOR, FAIL);
     }
 
-    void SpellHitTarget(Unit* target, const SpellEntry* spellInfo, SpellMissInfo /*missInfo*/) override
+    void SpellHitTarget(Unit* target, const SpellEntry* spellInfo, SpellMissInfo missInfo) override
     {
-        if (spellInfo->Id == SPELL_WING_BUFFET) // reduces threat of everyone hit
+        if (spellInfo->Id == SPELL_WING_BUFFET && missInfo == SPELL_MISS_NONE)
             m_creature->getThreatManager().modifyThreatPercent(target, -50);
     }
 
@@ -91,7 +93,7 @@ struct boss_flamegorAI : public CombatAI
                 if (DoCastSpellIfCan(nullptr, SPELL_FRENZY) == CAST_OK)
                 {
                     DoScriptText(EMOTE_GENERIC_FRENZY, m_creature);
-                    ResetCombatAction(action, urand(10 * IN_MILLISECONDS, 15 * IN_MILLISECONDS));
+                    ResetCombatAction(action, FLAMEGOR_FRENZY_INTERVAL);
                 }
                 break;
             }
