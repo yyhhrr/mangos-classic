@@ -74,9 +74,9 @@ struct boss_firemawAI : public CombatAI
             m_instance->SetData(TYPE_FIREMAW, FAIL);
     }
 
-    void SpellHitTarget(Unit* target, const SpellEntry* spellInfo, SpellMissInfo /*missInfo*/) override
+    void SpellHitTarget(Unit* target, const SpellEntry* spellInfo, SpellMissInfo missInfo) override
     {
-        if (spellInfo->Id == SPELL_WING_BUFFET) // reduces threat of everyone hit
+        if (spellInfo->Id == SPELL_WING_BUFFET && missInfo == SPELL_MISS_NONE)
             m_creature->getThreatManager().modifyThreatPercent(target, -50);
     }
 
