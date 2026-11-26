@@ -727,7 +727,7 @@ CreatureList UnitAI::DoFindFriendlyEligibleDispel(SpellEntry const* spellInfo, b
     for (uint32 i = 0; i < MAX_EFFECT_INDEX; ++i)
     {
         if (spellInfo->Effect[i] == SPELL_EFFECT_DISPEL)
-            dispelMask |= GetDispellMask(DispelType(spellInfo->EffectMiscValue[i]));
+            dispelMask |= GetDispellMask(spellInfo->EffectMiscValue[i]);
         else if (spellInfo->Effect[i] == SPELL_EFFECT_DISPEL_MECHANIC)
             mechanicMask |= convertEnumToFlag(spellInfo->EffectMiscValue[i]);
     }            

@@ -5101,7 +5101,7 @@ SpellCastResult Spell::CheckCast(bool strict)
             {
                 bool dispelTarget = false;
                 // EffectMiscValue is a DispelType; DISPEL_ALL covers several types, so test the mask as Spell::EffectDispel does
-                uint32 checkMask = GetDispellMask(DispelType(m_spellInfo->EffectMiscValue[0]));
+                uint32 checkMask = GetDispellMask(m_spellInfo->EffectMiscValue[0]);
                 SpellEntry const* spell = nullptr;
 
                 Unit::SpellAuraHolderMap& Auras = target->GetSpellAuraHolderMap();

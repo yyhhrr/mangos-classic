@@ -1503,12 +1503,12 @@ inline bool IsSpellUseWeaponSkill(SpellEntry const* spellInfo)
     return spellInfo->EquippedItemClass == ITEM_CLASS_WEAPON || spellInfo->DmgClass == SPELL_DAMAGE_CLASS_MELEE || spellInfo->DmgClass == SPELL_DAMAGE_CLASS_RANGED && spellInfo->HasAttribute(SPELL_ATTR_USES_RANGED_SLOT);
 }
 
-inline uint32 GetDispellMask(DispelType dispel)
+inline uint32 GetDispellMask(int32 dispel)
 {
-    // If dispell all
-    if (dispel == DISPEL_ALL)
+    // Some spell effects use a negative misc value for all dispel types.
+    if (dispel < 0 || dispel == DISPEL_ALL)
         return DISPEL_ALL_MASK;
-    return (1 << dispel);
+    return dispel < 32 ? (1u << dispel) : 0;
 }
 
 inline bool IsAuraAddedBySpell(uint32 auraType, uint32 spellId)

@@ -26,6 +26,7 @@ EndScriptData
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "temple_of_ahnqiraj.h"
 #include "AI/ScriptDevAI/base/CombatAI.h"
+#include "Spells/SpellAuras.h"
 
 enum
 {
@@ -52,10 +53,6 @@ enum
     SPELL_RAVAGE            = 3242,
     SPELL_SUMMON_BROOD      = 25789,
     SPELL_DISPEL            = 25808,
-    SPELL_DESPAWN_BROOD     = 25792,
-
-    NPC_YAUJ_BROOD          = 15621,
-    // NPC_POISON_CLOUD        = 15933,
 
     POINT_CONSUME           = 0,
 };
@@ -69,10 +66,11 @@ enum RoyaltyActions
 
 struct boss_silithidRoyaltyAI : public CombatAI
 {
-    boss_silithidRoyaltyAI(Creature* creature, uint32 actionCount) :
+    boss_silithidRoyaltyAI(Creature* creature, uint32 actionCount, uint32 deathAbility) :
         CombatAI(creature, actionCount),
-        m_instance(static_cast<ScriptedInstance*>(creature->GetInstanceData())),
-        m_deathAbility(0)
+        m_instance(static_cast<instance_temple_of_ahnqiraj*>(creature->GetInstanceData())),
+        m_deathAbility(deathAbility),
+        m_corpseDelay(creature->GetCorpseDelay())
     {
         AddCustomAction(ROYALTY_DEVOUR_DELAY, true, [&]() { HandleDevourDelay(); });
         m_creature->GetCombatManager().SetLeashingCheck([&](Unit* unit, float x, float y, float z) -> bool
@@ -81,15 +79,29 @@ struct boss_silithidRoyaltyAI : public CombatAI
         });
     }
 
-    ScriptedInstance* m_instance;
-    GuidVector m_spawns;
-
-    uint32 m_deathAbility;
+    instance_temple_of_ahnqiraj* m_instance;
+    uint32 const m_deathAbility;
+    uint32 const m_corpseDelay;
+    bool m_movingToCorpse = false;
+    bool m_wasConsumed = false;
 
     void Reset() override
     {
         CombatAI::Reset();
-        SetDeathPrevention(true);
+        DisableTimer(ROYALTY_DEVOUR_DELAY);
+        if (m_movingToCorpse)
+            m_creature->SetBaseRunSpeed(15.f / 7.f);
+        m_movingToCorpse = false;
+        SetCombatScriptStatus(false);
+        SetMeleeEnabled(true);
+        SetCombatMovement(true);
+        m_creature->SetStandState(UNIT_STAND_STATE_STAND);
+        if (m_wasConsumed)
+        {
+            m_creature->SetNoLoot(false);
+            m_creature->SetCorpseDelay(m_corpseDelay);
+            m_wasConsumed = false;
+        }
     }
 
     void Aggro(Unit* /*who*/) override
@@ -98,89 +110,96 @@ struct boss_silithidRoyaltyAI : public CombatAI
             m_instance->SetData(TYPE_BUG_TRIO, IN_PROGRESS);
     }
 
-    void JustReachedHome() override
+    void EnterEvadeMode() override
     {
-        // Clean-up stage
-        DoCastSpellIfCan(m_creature, SPELL_DESPAWN_BROOD, CAST_TRIGGERED);
-
-        if (m_instance)
+        if (m_instance && m_instance->GetData(TYPE_BUG_TRIO) == IN_PROGRESS)
             m_instance->SetData(TYPE_BUG_TRIO, FAIL);
+        else
+            CombatAI::EnterEvadeMode();
     }
 
-    // Handle damage to trigger consume when the two bosses that are killed first
-    void JustPreventedDeath(Unit* attacker) override
+    bool HandleLethalDamage(Unit* /*dealer*/) override
     {
-        if (!m_instance)
-            return;
+        if (GetCombatScriptStatus())
+            return true;
 
-        // Inform the instance script that we are ready to be consumed
-        // The instance script keeps track of how many bosses are already defeated
-        m_instance->SetData(TYPE_BUG_TRIO, m_creature->GetEntry());
-
-        DoDummyConsume();
+        if (m_instance && m_instance->IsBugTrioDeathConsumed())
+            m_creature->CastSpell(nullptr, SPELL_BLOODY_DEATH, TRIGGERED_OLD_TRIGGERED);
+        return !m_creature->IsAlive();
     }
 
     void JustDied(Unit* killer) override
     {
-        if (killer == m_creature)
-            return;
-
-        if (m_instance)
-            m_instance->SetData(TYPE_BUG_TRIO, DONE);
-
-        DoSpecialAbility();
-    }
-
-    void DoDummyConsume()
-    {
-        m_creature->SetNoLoot(true);
-        DoScriptText(EMOTE_CONSUMED, m_creature);
-        m_creature->SetStandState(UNIT_STAND_STATE_DEAD);
-        DoSpecialAbility();
-        m_creature->CastSpell(nullptr, SPELL_BLOODY_DEATH, TRIGGERED_OLD_TRIGGERED);
-        m_creature->ForcedDespawn(3000);    // Despawn as we are "consumed"
-    }
-
-    void DoSpecialAbility()
-    {
-        DoCastSpellIfCan(nullptr, m_deathAbility);
+        CombatAI::JustDied(killer);
+        if (m_instance && m_instance->IsBugTrioDeathConsumed())
+        {
+            m_wasConsumed = true;
+            m_creature->SetNoLoot(true);
+            m_creature->SetCorpseDelay(3);
+            m_creature->SetStandState(UNIT_STAND_STATE_DEAD);
+            DoScriptText(EMOTE_CONSUMED, m_creature);
+        }
+        m_creature->CastSpell(nullptr, m_deathAbility, TRIGGERED_OLD_TRIGGERED);
     }
 
     void MovementInform(uint32 motionType, uint32 pointId) override
     {
-        if (motionType != POINT_MOTION_TYPE)
-            return;
+        if (motionType == POINT_MOTION_TYPE && pointId == POINT_CONSUME && m_movingToCorpse)
+            StartEating();
+    }
 
-        if (pointId == POINT_CONSUME)
-        {
-            m_creature->SetBaseRunSpeed(15.f/7.f); // sniffed
-            m_creature->CastSpell(nullptr, SPELL_FULL_HEAL, TRIGGERED_OLD_TRIGGERED);
-            ResetTimer(ROYALTY_DEVOUR_DELAY, 2000);
-        }
+    void StartEating()
+    {
+        m_movingToCorpse = false;
+        m_creature->SetBaseRunSpeed(15.f / 7.f); // sniffed
+        m_creature->CastSpell(nullptr, SPELL_FULL_HEAL, TRIGGERED_OLD_TRIGGERED);
+        if (!m_creature->getThreatManager().isThreatListEmpty())
+            DoResetThreat();
+        ResetTimer(ROYALTY_DEVOUR_DELAY, 2000);
     }
 
     void HandleDevourDelay()
     {
+        if (m_movingToCorpse)
+        {
+            // A blocked point movement may never report arrival.
+            StartEating();
+            if (m_creature->GetMotionMaster()->GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE)
+                m_creature->GetMotionMaster()->Clear();
+            return;
+        }
+
         SetCombatScriptStatus(false);
         SetMeleeEnabled(true);
         SetCombatMovement(true, true);
     }
 
-    void ReceiveAIEvent(AIEventType eventType, Unit* /*sender*/, Unit* invoker, uint32 miscValue) override
+    void UpdateAI(uint32 diff) override
     {
-        if (eventType == AI_EVENT_CUSTOM_A) // on first 2 killed
+        if (GetCombatScriptStatus() && m_creature->getThreatManager().isThreatListEmpty())
         {
-            if (miscValue == 2)
-                SetDeathPrevention(false);
-            SetCombatScriptStatus(true);
-            SetMeleeEnabled(false);
-            SetCombatMovement(false);
-            m_creature->SetTarget(nullptr);
-            m_creature->SetBaseRunSpeed(45.f/7.f); // sniffed
-            float x, y, z;
-            invoker->GetClosePoint(x, y, z, 0.f);
-            m_creature->GetMotionMaster()->MovePoint(POINT_CONSUME, x, y, z);
+            EnterEvadeMode();
+            return;
         }
+        CombatAI::UpdateAI(diff);
+    }
+
+    void ReceiveAIEvent(AIEventType eventType, Unit* /*sender*/, Unit* defeated, uint32 /*miscValue*/) override
+    {
+        if (eventType != AI_EVENT_CUSTOM_A)
+            return;
+
+        m_movingToCorpse = true;
+        m_creature->InterruptNonMeleeSpells(false);
+        SetCombatScriptStatus(true);
+        SetMeleeEnabled(false);
+        SetCombatMovement(false);
+        m_creature->SetTarget(nullptr);
+        m_creature->SetBaseRunSpeed(45.f / 7.f); // sniffed
+        float x, y, z;
+        defeated->GetClosePoint(x, y, z, 0.f);
+        m_creature->GetMotionMaster()->MovePoint(POINT_CONSUME, x, y, z);
+        ResetTimer(ROYALTY_DEVOUR_DELAY, 5000);
     }
 };
 
@@ -194,19 +213,11 @@ enum KriActions
 
 struct boss_kriAI : public boss_silithidRoyaltyAI
 {
-    boss_kriAI(Creature* creature) : boss_silithidRoyaltyAI(creature, KRI_ACTION_MAX)
+    boss_kriAI(Creature* creature) : boss_silithidRoyaltyAI(creature, KRI_ACTION_MAX, SPELL_SUMMON_CLOUD)
     {
         AddCombatAction(KRI_CLEAVE, 4000, 8000);
         AddCombatAction(KRI_TOXIC_VOLLEY, 6000, 30000);
         AddCombatAction(KRI_THRASH, 6u * IN_MILLISECONDS);
-    }
-
-    void Reset() override
-    {
-        boss_silithidRoyaltyAI::Reset();
-        m_deathAbility     = SPELL_SUMMON_CLOUD;
-
-        m_creature->SetStandState(UNIT_STAND_STATE_STAND);
     }
 
     void ExecuteAction(uint32 action) override
@@ -245,7 +256,7 @@ enum VemActions
 
 struct boss_vemAI : public boss_silithidRoyaltyAI
 {
-    boss_vemAI(Creature* creature) : boss_silithidRoyaltyAI(creature, VEM_ACTION_MAX)
+    boss_vemAI(Creature* creature) : boss_silithidRoyaltyAI(creature, VEM_ACTION_MAX, SPELL_VENGEANCE)
     {
         AddCombatAction(VEM_CHARGE, urand(15, 27) * IN_MILLISECONDS);
         AddCombatAction(VEM_KNOCK_AWAY, urand(10, 20) * IN_MILLISECONDS);
@@ -255,10 +266,6 @@ struct boss_vemAI : public boss_silithidRoyaltyAI
     void Reset() override
     {
         boss_silithidRoyaltyAI::Reset();
-        m_deathAbility     = SPELL_VENGEANCE;
-
-        m_creature->SetStandState(UNIT_STAND_STATE_STAND);
-
         m_creature->SetWalk(false);
     }
 
@@ -300,7 +307,7 @@ enum YaujActions
 
 struct boss_yaujAI : public boss_silithidRoyaltyAI
 {
-    boss_yaujAI(Creature* creature) : boss_silithidRoyaltyAI(creature, YAUJ_ACTION_MAX)
+    boss_yaujAI(Creature* creature) : boss_silithidRoyaltyAI(creature, YAUJ_ACTION_MAX, SPELL_SUMMON_BROOD)
     {
         AddCombatAction(YAUJ_HEAL, urand(20, 30) * IN_MILLISECONDS);
         AddCombatAction(YAUJ_DISPEL, urand(10, 30) * IN_MILLISECONDS);
@@ -308,25 +315,25 @@ struct boss_yaujAI : public boss_silithidRoyaltyAI
         AddCombatAction(YAUJ_RAVAGE, 12u * IN_MILLISECONDS);
     }
 
-    void Reset() override
-    {
-        boss_silithidRoyaltyAI::Reset();
-        m_deathAbility    = SPELL_SUMMON_BROOD;
-
-        m_creature->SetStandState(UNIT_STAND_STATE_STAND);
-    }
-
     void JustSummoned(Creature* summoned) override
     {
         if (summoned->GetEntry() == NPC_YAUJ_BROOD)
-        {
             summoned->SetInCombatWithZone();
-            if (Unit* target = m_creature->SelectAttackingTarget(ATTACKING_TARGET_RANDOM, 0, nullptr, SELECT_FLAG_PLAYER))
+    }
+
+    std::vector<Creature*> GetLivingRoyalty() const
+    {
+        std::vector<Creature*> targets{ m_creature };
+        if (m_instance)
+            for (uint32 entry : bugTrioEntries)
             {
-                m_creature->AddThreat(target, 1000000.f);
-                AttackStart(target);
+                if (entry == m_creature->GetEntry())
+                    continue;
+                if (Creature* ally = m_instance->GetSingleCreatureFromStorage(entry, true))
+                    if (ally->IsAlive())
+                        targets.push_back(ally);
             }
-        }
+        return targets;
     }
 
     void ExecuteAction(uint32 action) override
@@ -335,9 +342,19 @@ struct boss_yaujAI : public boss_silithidRoyaltyAI
         {
             case YAUJ_HEAL:
             {
-                if (m_creature->GetHealthPercent() < 100.0f)
-                    if (DoCastSpellIfCan(m_creature, SPELL_HEAL) == CAST_OK)
+                auto targets = GetLivingRoyalty();
+                std::sort(targets.begin(), targets.end(), [](Creature* lhs, Creature* rhs)
+                {
+                    return lhs->GetHealthPercent() < rhs->GetHealthPercent();
+                });
+                for (Creature* target : targets)
+                {
+                    if (target->GetHealth() < target->GetMaxHealth() && DoCastSpellIfCan(target, SPELL_HEAL) == CAST_OK)
+                    {
                         ResetCombatAction(action, urand(10, 30) * IN_MILLISECONDS);
+                        break;
+                    }
+                }
                 break;
             }
             case YAUJ_FEAR:
@@ -357,10 +374,26 @@ struct boss_yaujAI : public boss_silithidRoyaltyAI
             }
             case YAUJ_DISPEL:
             {
-                CreatureList targets = DoFindFriendlyEligibleDispel(50.0f);
-                if (Creature* target = targets.empty() ? nullptr : *(targets.begin()))
-                    if (DoCastSpellIfCan(target, SPELL_DISPEL) == CAST_OK)
+                SpellEntry const* dispel = sSpellTemplate.LookupEntry<SpellEntry>(SPELL_DISPEL);
+                if (!dispel)
+                    break;
+
+                uint32 mask = GetDispellMask(dispel->EffectMiscValue[EFFECT_INDEX_0]);
+                for (Creature* target : GetLivingRoyalty())
+                {
+                    auto const& auras = target->GetSpellAuraHolderMap();
+                    bool canDispel = std::any_of(auras.begin(), auras.end(), [&](auto const& aura)
+                    {
+                        SpellAuraHolder const* holder = aura.second;
+                        return !holder->IsPositive() && holder->GetId() != 29448 &&
+                            holder->IsDispellableByMask(mask, m_creature, dispel);
+                    });
+                    if (canDispel && DoCastSpellIfCan(target, SPELL_DISPEL) == CAST_OK)
+                    {
                         ResetCombatAction(action, urand(10000, 15000));
+                        break;
+                    }
+                }
                 break;
             }
         }

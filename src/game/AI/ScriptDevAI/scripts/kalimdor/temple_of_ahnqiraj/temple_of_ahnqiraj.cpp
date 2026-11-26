@@ -25,6 +25,8 @@ EndScriptData
 
 #include "AI/ScriptDevAI/include/sc_common.h"
 #include "temple_of_ahnqiraj.h"
+#include "Globals/ObjectMgr.h"
+#include "Maps/MapPersistentStateMgr.h"
 
 static const DialogueEntry aIntroDialogue[] =
 {
@@ -40,7 +42,6 @@ static const DialogueEntry aIntroDialogue[] =
 };
 
 instance_temple_of_ahnqiraj::instance_temple_of_ahnqiraj(Map* map) : ScriptedInstance(map), DialogueHelper(aIntroDialogue),
-    m_uiBugTrioDeathCount(0),
     m_uiCthunWhisperTimer(90000),
     m_uiSkeramProphecyTimer(5 * MINUTE * IN_MILLISECONDS)
 {
@@ -63,6 +64,11 @@ bool instance_temple_of_ahnqiraj::IsEncounterInProgress() const
     }
 
     return false;
+}
+
+void instance_temple_of_ahnqiraj::OnPlayerEnter(Player* /*player*/)
+{
+    RestoreBugTrioRespawns();
 }
 
 void instance_temple_of_ahnqiraj::OnPlayerLeave(Player* player)
@@ -131,6 +137,27 @@ void instance_temple_of_ahnqiraj::OnCreatureDeath(Creature* creature)
 {
     switch (creature->GetEntry())
     {
+        case NPC_KRI:
+        case NPC_YAUJ:
+        case NPC_VEM:
+            if (GetData(TYPE_BUG_TRIO) != IN_PROGRESS || !m_bugTrioDeaths.insert(creature->GetEntry()).second)
+                break;
+
+            if (m_bugTrioDeaths.size() == std::size(bugTrioEntries))
+            {
+                SetData(TYPE_BUG_TRIO, DONE);
+                break;
+            }
+
+            for (uint32 entry : bugTrioEntries)
+            {
+                if (m_bugTrioDeaths.count(entry))
+                    continue;
+                if (Creature* survivor = GetSingleCreatureFromStorage(entry, true))
+                    if (survivor->IsAlive() && survivor->AI())
+                        survivor->AI()->SendAIEvent(AI_EVENT_CUSTOM_A, creature, survivor);
+            }
+            break;
         case NPC_CLAW_TENTACLE:
         case NPC_EYE_TENTACLE:
             if (Creature* portal = GetClosestCreatureWithEntry(creature, NPC_TENTACLE_PORTAL, 5.0f))
@@ -156,12 +183,15 @@ void instance_temple_of_ahnqiraj::OnCreatureCreate(Creature* creature)
             break;
         case NPC_SKERAM:
             // Images share Skeram's entry and must never replace the boss GUID.
-            if (!creature->GetSpawnerGuid().IsEmpty())
-                break;
-            [[fallthrough]];
+            if (creature->GetSpawnerGuid().IsEmpty())
+                m_npcEntryGuidStore[NPC_SKERAM] = creature->GetObjectGuid();
+            break;
         case NPC_KRI:
         case NPC_YAUJ:
         case NPC_VEM:
+            if (creature->HasStaticDBSpawnData())
+                RestoreBugTrioRespawns();
+            [[fallthrough]];
         case NPC_SARTURA:
         case NPC_MASTERS_EYE:
         case NPC_OURO_SPAWNER:
@@ -170,7 +200,9 @@ void instance_temple_of_ahnqiraj::OnCreatureCreate(Creature* creature)
             m_npcEntryGuidStore[creature->GetEntry()] = creature->GetObjectGuid();
             break;
         case NPC_POISON_CLOUD:
-            m_bugTrioSpawns.push_back(creature->GetObjectGuid());
+        case NPC_YAUJ_BROOD:
+            if (GetData(TYPE_BUG_TRIO) == IN_PROGRESS)
+                m_bugTrioSpawns.push_back(creature->GetObjectGuid());
             break;
         case NPC_EYE_OF_CTHUN:
             // Safeguard for C'Thun encounter in case of fight abruptly ended during phase 2
@@ -226,6 +258,58 @@ void instance_temple_of_ahnqiraj::OnCreatureRespawn(Creature* creature)
     }   
 }
 
+bool instance_temple_of_ahnqiraj::IsBugTrioDeathConsumed() const
+{
+    return GetData(TYPE_BUG_TRIO) == IN_PROGRESS && m_bugTrioDeaths.size() < std::size(bugTrioEntries) - 1;
+}
+
+void instance_temple_of_ahnqiraj::RestoreBugTrioRespawns()
+{
+    if (m_bugTrioRespawnsRestored)
+        return;
+
+    m_bugTrioRespawnsRestored = true;
+    // Load all three as a group. The linked spawns can check Kri's timer before Kri is created.
+    bool const completed = GetData(TYPE_BUG_TRIO) == DONE;
+    MapPersistentState* state = instance->GetPersistentState();
+    time_t const now = time(nullptr);
+    auto restoreRespawn = [this, state, completed, now](CreatureDataPair const& spawn)
+    {
+        if (spawn.second.mapid != instance->GetId() ||
+            std::find(std::begin(bugTrioEntries), std::end(bugTrioEntries), spawn.second.id) == std::end(bugTrioEntries))
+            return false;
+
+        time_t const respawn = state->GetCreatureRespawnTime(spawn.first);
+        if (completed && respawn <= now)
+            // The completion save may have reached the database before the final death timer.
+            state->SaveCreatureRespawnTime(spawn.first, now + std::max(1u, spawn.second.GetRandomRespawnTime()));
+        else if (!completed && respawn)
+            state->SaveCreatureRespawnTime(spawn.first, 0);
+        return false;
+    };
+    sObjectMgr.DoCreatureData(restoreRespawn);
+}
+
+void instance_temple_of_ahnqiraj::ResetBugTrio()
+{
+    m_bugTrioDeaths.clear();
+    for (ObjectGuid guid : m_bugTrioSpawns)
+        if (Creature* spawn = instance->GetCreature(guid))
+            spawn->ForcedDespawn();
+    m_bugTrioSpawns.clear();
+
+    for (uint32 entry : bugTrioEntries)
+    {
+        if (Creature* boss = GetSingleCreatureFromStorage(entry, true))
+        {
+            if (!boss->IsAlive())
+                boss->Respawn();
+            else if (boss->AI())
+                boss->AI()->EnterEvadeMode();
+        }
+    }
+}
+
 void instance_temple_of_ahnqiraj::SetData(uint32 type, uint32 data)
 {
     switch (type)
@@ -236,51 +320,13 @@ void instance_temple_of_ahnqiraj::SetData(uint32 type, uint32 data)
                 DoUseDoorOrButton(GO_SKERAM_GATE);
             break;
         case TYPE_BUG_TRIO:
-            if (data > SPECIAL)
-            {
-                ++m_uiBugTrioDeathCount;
-                Creature* deadGuy = GetSingleCreatureFromStorage(data);
-                // notify bugs on death to heal / remove invul
-                if (Creature* vem = GetSingleCreatureFromStorage(NPC_VEM))
-                    if (vem->IsAlive())
-                        vem->AI()->SendAIEvent(AI_EVENT_CUSTOM_A, deadGuy, vem, m_uiBugTrioDeathCount);
-                if (Creature* yauj = GetSingleCreatureFromStorage(NPC_YAUJ))
-                    if (yauj->IsAlive())
-                        yauj->AI()->SendAIEvent(AI_EVENT_CUSTOM_A, deadGuy, yauj, m_uiBugTrioDeathCount);
-                if (Creature* kri = GetSingleCreatureFromStorage(NPC_KRI))
-                    if (kri->IsAlive())
-                        kri->AI()->SendAIEvent(AI_EVENT_CUSTOM_A, deadGuy, kri, m_uiBugTrioDeathCount);
-
-                // don't store any special data
-                break;
-            }
-            if (data == FAIL)
-            {
-                // Do not reset again the encounter if already set to failed
-                if (GetData(TYPE_BUG_TRIO) == FAIL)
-                    return;
-
-                // On encounter failure, despawn Vem and Princess Yauj and make Lord Kri evade
-                // the two other bosses will respawn when Lord Kri reaches home/respawns
-                if (Creature* vem = GetSingleCreatureFromStorage(NPC_VEM))
-                    vem->ForcedDespawn();
-                if (Creature* yauj = GetSingleCreatureFromStorage(NPC_YAUJ))
-                    yauj->ForcedDespawn();
-                if (Creature* kri = GetSingleCreatureFromStorage(NPC_KRI))
-                {
-                    if (kri->IsAlive())
-                        kri->AI()->EnterEvadeMode();
-                    else
-                        kri->Respawn();
-                }
-                for (auto guid : m_bugTrioSpawns)
-                    if (Creature* spawn = instance->GetCreature(guid))
-                        spawn->ForcedDespawn();
-                m_bugTrioSpawns.clear();
-            }
-            if (data == IN_PROGRESS)
-                m_uiBugTrioDeathCount = 0;
+            if (m_encounter[type] == DONE || m_encounter[type] == data)
+                return;
             m_encounter[type] = data;
+            if (data == FAIL)
+                ResetBugTrio();
+            else if (data == DONE)
+                m_bugTrioSpawns.clear();
             break;
         case TYPE_SARTURA:
         case TYPE_FANKRISS:

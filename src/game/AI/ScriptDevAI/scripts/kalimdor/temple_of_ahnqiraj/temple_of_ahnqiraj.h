@@ -84,10 +84,13 @@ enum
     SPELL_BIRTH_TENTACLE        = 26586,
 
     NPC_POISON_CLOUD            = 15933,
+    NPC_YAUJ_BROOD              = 15621,
 
     NPC_QIRAJI_SCARAB           = 15316,
     NPC_QIRAJI_SCORPION         = 15317,
 };
+
+inline constexpr uint32 bugTrioEntries[] = { NPC_KRI, NPC_YAUJ, NPC_VEM };
 
 // Prophecies yelled by Propher Skeram before he is engaged
 static const uint32 sound_skeram_prophecy[] = { 8616, 8621, 8619, 8620, 8618 };
@@ -110,12 +113,14 @@ class instance_temple_of_ahnqiraj : public ScriptedInstance, private DialogueHel
         void OnObjectCreate(GameObject* go) override;
         void OnCreatureRespawn(Creature* creature) override;
 
+        void OnPlayerEnter(Player* player) override;
         void OnPlayerLeave(Player* pPlayer) override;
 
         void SetData(uint32 type, uint32 data) override;
         uint32 GetData(uint32 type) const override;
 
         void DoHandleTempleAreaTrigger(uint32 triggerId, Player* player);
+        bool IsBugTrioDeathConsumed() const;
 
         const char* Save() const override { return m_strInstData.c_str(); }
         void Load(const char* chrIn) override;
@@ -126,12 +131,15 @@ class instance_temple_of_ahnqiraj : public ScriptedInstance, private DialogueHel
         uint32 m_encounter[MAX_ENCOUNTER];
         std::string m_strInstData;
 
-        uint8 m_uiBugTrioDeathCount;
         uint32 m_uiCthunWhisperTimer;
         uint32 m_uiSkeramProphecyTimer;
 
+        std::set<uint32> m_bugTrioDeaths;
         GuidVector m_bugTrioSpawns;
+        bool m_bugTrioRespawnsRestored = false;
 
+        void RestoreBugTrioRespawns();
+        void ResetBugTrio();
         void JustDidDialogueStep(int32 entry) override;
 };
 

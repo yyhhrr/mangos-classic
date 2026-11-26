@@ -630,6 +630,7 @@ class Creature : public Unit
         bool IsCorpse() const { return GetDeathState() == CORPSE; }
         bool IsDespawned() const { return GetDeathState() == DEAD; }
         void SetCorpseDelay(uint32 delay) { m_corpseDelay = delay; }
+        uint32 GetCorpseDelay() const { return m_corpseDelay; }
         void ReduceCorpseDecayTimer();
         TimePoint GetCorpseDecayTimer() const { return m_corpseExpirationTime; }
         bool CanRestockPickpocketLoot() const;
