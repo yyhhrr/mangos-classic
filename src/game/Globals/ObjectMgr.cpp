@@ -9278,7 +9278,7 @@ void ObjectMgr::LoadGossipMenu(std::set<uint32>& gossipScriptSet)
         gMenu.text_id           = fields[1].GetUInt32();
         gMenu.script_id         = fields[2].GetUInt32();
 
-        gMenu.conditionId       = fields[3].GetUInt16();
+        gMenu.conditionId       = fields[3].GetUInt32();
 
         if (!GetGossipText(gMenu.text_id))
         {
@@ -9412,7 +9412,7 @@ void ObjectMgr::LoadGossipMenuItems(std::set<uint32>& gossipScriptSet)
         gMenuItem.box_text              = fields[12].GetCppString();
         gMenuItem.box_broadcast_text    = fields[13].GetUInt32();
 
-        gMenuItem.conditionId           = fields[14].GetUInt16();
+        gMenuItem.conditionId           = fields[14].GetUInt32();
 
         if (gMenuItem.menu_id)                              // == 0 id is special and not have menu_id data
         {

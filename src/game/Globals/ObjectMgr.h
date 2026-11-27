@@ -287,7 +287,7 @@ struct GossipMenuItems
     bool            box_coded;
     std::string     box_text;
     uint32          box_broadcast_text;
-    uint16          conditionId;
+    uint32          conditionId;
 };
 
 struct GossipMenus
@@ -295,7 +295,7 @@ struct GossipMenus
     uint32          entry;
     uint32          text_id;
     uint32          script_id;
-    uint16          conditionId;
+    uint32          conditionId;
 };
 
 typedef std::multimap<uint32, GossipMenus> GossipMenusMap;
