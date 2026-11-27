@@ -297,8 +297,8 @@ void CreatureEventAIMgr::LoadCreatureEventAI_Scripts()
                     if (temp.percent_range.percentMax > 100)
                         sLog.outErrorEventAI("Creature %d are using percentage event(%u) with param2 (MinPercent) > 100. Event will never trigger! ", keyField, eventId);
 
-                    if (temp.percent_range.percentMax <= temp.percent_range.percentMin)
-                        sLog.outErrorEventAI("Creature %d are using percentage event(%u) with param1 <= param2 (MaxPercent <= MinPercent). Event will never trigger! ", keyField, eventId);
+                    if (temp.percent_range.percentMax < temp.percent_range.percentMin)
+                        sLog.outErrorEventAI("Creature %d are using percentage event(%u) with param1 < param2 (MaxPercent < MinPercent). Event will never trigger! ", keyField, eventId);
 
                     if (temp.event_flags & EFLAG_REPEATABLE && !temp.percent_range.repeatMin && !temp.percent_range.repeatMax)
                     {
