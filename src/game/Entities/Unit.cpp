@@ -419,6 +419,7 @@ Unit::Unit() :
 
     m_isCreatureLinkingTrigger = false;
     m_isSpawningLinked = false;
+    m_exitingCombat = false;
     m_dummyCombatState = false;
 
     m_canEnterCombat = true;
@@ -595,7 +596,9 @@ void Unit::TriggerEvadeEvents()
     if (IsCreature() && static_cast<Creature*>(this)->GetCreatureGroup())
         static_cast<Creature*>(this)->GetCreatureGroup()->TriggerLinkingEvent(CREATURE_GROUP_EVENT_EVADE, this);
 
-    CallForAllControlledUnits([](Unit* unit) { unit->HandleExitCombat(false); }, CONTROLLED_PET | CONTROLLED_GUARDIANS | CONTROLLED_CHARM | CONTROLLED_TOTEMS);
+    // HandleExitCombat tells the controlled units itself after the evade
+    if (!m_exitingCombat)
+        CallForAllControlledUnits([](Unit* unit) { unit->HandleExitCombat(false); }, CONTROLLED_PET | CONTROLLED_GUARDIANS | CONTROLLED_CHARM | CONTROLLED_TOTEMS);
 }
 
 void Unit::TriggerHomeEvents()
@@ -619,7 +622,7 @@ void Unit::TriggerHomeEvents()
         {
             auto* pet = static_cast<Pet*>(me);
             Unit* owner = pet->GetOwner();
-            if (pet->IsGuardian() && owner && !owner->IsAlive())
+            if (pet->IsGuardian() && (!owner || !owner->IsAlive()))
                 pet->Unsummon(PET_SAVE_REAGENTS, owner);
         }
     }
@@ -8115,6 +8118,9 @@ void Unit::HandleExitCombat(bool customLeash, bool pvpCombat)
     if (customLeash && AI())
         AI()->OnLeash();
 
+    const bool exitingCombat = m_exitingCombat;
+    m_exitingCombat = true;
+
     if (AI() && !GetClientControlling())
     {
         // guardians despawn on evade if their owner already despawned
@@ -8125,6 +8131,8 @@ void Unit::HandleExitCombat(bool customLeash, bool pvpCombat)
     }
     else
         CombatStop(false, !pvpCombat);
+
+    m_exitingCombat = exitingCombat;
 
     CallForAllControlledUnits([customLeash, pvpCombat](Unit* unit) { unit->HandleExitCombat(customLeash, pvpCombat); }, CONTROLLED_PET | CONTROLLED_GUARDIANS | CONTROLLED_CHARM | CONTROLLED_TOTEMS);
 }

@@ -19,11 +19,16 @@ enum
     POINT_COMBAT_START  = 0xFFFFFF
 };
 
-FollowerAI::FollowerAI(Creature* creature) : ScriptedAI(creature),
+FollowerAI::FollowerAI(Creature* creature) : FollowerAI(creature, 0)
+{
+}
+
+FollowerAI::FollowerAI(Creature* creature, uint32 combatActions) : ScriptedAI(creature, combatActions),
     m_updateFollowTimer(2500),
     m_followState(STATE_FOLLOW_NONE),
     m_questForFollow(nullptr)
-{}
+{
+}
 
 // This part provides assistance to a player that are attacked by pWho, even if out of normal aggro range
 // It will cause m_creature to attack pWho that are attacking _any_ player (which has been confirmed may happen also on offi)
@@ -192,12 +197,9 @@ void FollowerAI::UpdateAI(const uint32 diff)
     UpdateFollowerAI(diff);
 }
 
-void FollowerAI::UpdateFollowerAI(const uint32 /*diff*/)
+void FollowerAI::UpdateFollowerAI(const uint32 diff)
 {
-    if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
-        return;
-
-    DoMeleeAttackIfReady();
+    ScriptedAI::UpdateAI(diff);
 }
 
 void FollowerAI::MovementInform(uint32 motionType, uint32 pointId)

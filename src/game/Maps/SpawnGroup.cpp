@@ -506,7 +506,7 @@ std::string SpawnGroup::to_string() const
 }
 
 
-CreatureGroup::CreatureGroup(SpawnGroupEntry const& entry, Map& map) : SpawnGroup(entry, map, uint32(TYPEID_UNIT))
+CreatureGroup::CreatureGroup(SpawnGroupEntry const& entry, Map& map) : SpawnGroup(entry, map, uint32(TYPEID_UNIT)), m_evading(false)
 {
     if (entry.formationEntry)
         m_formationData = std::make_shared<FormationData>(this, entry.formationEntry);
@@ -567,13 +567,23 @@ void CreatureGroup::TriggerLinkingEvent(uint32 event, Unit* target)
         case CREATURE_GROUP_EVENT_EVADE:
             if ((m_entry.Flags & CREATURE_GROUP_EVADE_TOGETHER) != 0)
             {
-                for (auto& data : m_objects)
+                if (m_evading)
+                    return;
+
+                m_evading = true;
+
+                // target is the member whose evade raised this event
+                // a member that dies or despawns during an evade leaves m_objects, so iterate over a copy
+                auto objects = m_objects;
+                for (auto& data : objects)
                 {
                     uint32 dbGuid = data.first;
                     if (Creature* creature = m_map.GetCreature(dbGuid))
-                        if (!creature->GetCombatManager().IsEvadingHome())
+                        if (creature != target && HasGroupMember(creature) && !creature->GetCombatManager().IsEvadingHome())
                             creature->AI()->EnterEvadeMode();
                 }
+
+                m_evading = false;
             }
             break;
         case CREATURE_GROUP_EVENT_HOME:

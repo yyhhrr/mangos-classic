@@ -610,6 +610,12 @@ bool Creature::UpdateEntry(uint32 Entry, const CreatureData* data /*=nullptr*/, 
     if (IsCritter()) // meant to be also settable per creature immunity set
         SetChainImmune(true);
 
+    if ((CreatureImmunityFlags(GetCreatureInfo()->ImmunityFlags) & CreatureImmunityFlags::AREA_EFFECT_IMMUNE) != CreatureImmunityFlags(0))
+        SetAOEImmune(true);
+
+    if ((CreatureImmunityFlags(GetCreatureInfo()->ImmunityFlags) & CreatureImmunityFlags::CHAIN_EFFECT_IMMUNE) != CreatureImmunityFlags(0))
+        SetChainImmune(true);
+
     // if eventData set then event active and need apply spell_start
     if (eventData)
         ApplyGameEventSpells(eventData, true);
@@ -1456,7 +1462,7 @@ void Creature::SelectLevel(uint32 forcedLevel /*= USE_DEFAULT_DATABASE_LEVEL*/)
             case POWER_MANA:        maxValue = mana; break;
             case POWER_RAGE:        maxValue = 0; break;
             case POWER_FOCUS:       maxValue = POWER_FOCUS_DEFAULT; break;
-            case POWER_ENERGY:      maxValue = 0; break;
+            case POWER_ENERGY:      maxValue = POWER_ENERGY_DEFAULT; break;
             case POWER_HAPPINESS:   maxValue = POWER_HAPPINESS_DEFAULT; break;
         }
 
