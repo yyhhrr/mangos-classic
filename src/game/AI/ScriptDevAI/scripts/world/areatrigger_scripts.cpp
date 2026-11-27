@@ -432,7 +432,8 @@ void AddSC_areatrigger_scripts()
     pNewScript = new Script;
     pNewScript->Name = "at_hive_tower";
     pNewScript->pAreaTrigger = &AreaTrigger_at_hive_tower;
-    pNewScript->RegisterSelf();
+    // The Southwind Tower spawn group script replaces this trigger on migrated databases.
+    pNewScript->RegisterSelf(sScriptDevAIMgr.GetScriptId("at_southwind_tower") == 0);
 
     pNewScript = new Script;
     pNewScript->Name = "at_wondervolt";

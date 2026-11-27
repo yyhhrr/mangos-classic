@@ -1361,7 +1361,8 @@ void AddSC_npcs_special()
     pNewScript = new Script;
     pNewScript->Name = "npc_advanced_target_dummy";
     pNewScript->GetAI = &GetNewAIInstance<npc_engineering_target_dummyAI>;
-    pNewScript->RegisterSelf();
+    // The shared engineering dummy script replaces this binding on migrated databases.
+    pNewScript->RegisterSelf(sScriptDevAIMgr.GetScriptId("npc_engineering_target_dummy") == 0);
 
     pNewScript = new Script;
     pNewScript->Name = "npc_engineering_target_dummy";
