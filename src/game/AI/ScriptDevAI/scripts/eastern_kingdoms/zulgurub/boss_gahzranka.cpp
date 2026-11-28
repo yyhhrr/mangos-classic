@@ -7,6 +7,7 @@
 #include "AI/EventAI/CreatureEventAI.h"
 #include "Entities/Item.h"
 #include "Mails/Mail.h"
+#include "World/World.h"
 
 #ifdef ENABLE_PLAYERBOTS
 #include "playerbot/PlayerbotAI.h"
@@ -80,7 +81,7 @@ struct spell_gahzranka_lure : public SpellScript
         // Reserve as soon as this item cast commits. Its projectile may outlive the caster.
         auto* instance = dynamic_cast<instance_zulgurub*>(caster->GetInstanceData());
         if (!instance || !instance->StartGahzrankaSummon(*caster, static_cast<uint32>(spell->GetDelayMoment())))
-            RefundGahzrankaSummon(caster->GetObjectGuid(), caster->GetMap());
+            RefundGahzrankaSummon(caster->GetObjectGuid());
     }
 
 private:
@@ -141,23 +142,25 @@ private:
 };
 }
 
-void RefundGahzrankaSummon(ObjectGuid playerGuid, Map* map)
+void RefundGahzrankaSummon(ObjectGuid playerGuid)
 {
-    std::unique_ptr<Item> lure(Item::CreateItem(ITEM_MUDSKUNK_LURE, 1));
-    std::unique_ptr<Item> fish(Item::CreateItem(ITEM_ZULIAN_MUDSKUNK, MudskunkCount));
-    if (!lure || !fish)
+    sWorld.QueueMailDelivery([playerGuid](World*)
     {
-        sLog.outError("Could not create Gahz'ranka summon refund for %s", playerGuid.GetString().c_str());
-        return;
-    }
+        std::unique_ptr<Item> lure(Item::CreateItem(ITEM_MUDSKUNK_LURE, 1));
+        std::unique_ptr<Item> fish(Item::CreateItem(ITEM_ZULIAN_MUDSKUNK, MudskunkCount));
+        if (!lure || !fish)
+        {
+            sLog.outError("Could not create Gahz'ranka summon refund for %s", playerGuid.GetString().c_str());
+            return;
+        }
 
-    lure->SaveToDB();
-    fish->SaveToDB();
+        lure->SaveToDB();
+        fish->SaveToDB();
 
-    MailDraft draft("Gahz'ranka summoning materials", "The summoning failed. Your lure and Zulian Mudskunks are enclosed.");
-    draft.AddItem(lure.release()).AddItem(fish.release());
-    draft.SendMailTo(MailReceiver(map->GetPlayer(playerGuid), playerGuid),
-        MailSender(MAIL_CREATURE, static_cast<uint32>(NPC_GAHZRANKA)));
+        MailDraft("Gahz'ranka summoning materials", "The summoning failed. Your lure and Zulian Mudskunks are enclosed.")
+            .AddItem(lure.release()).AddItem(fish.release())
+            .SendMailTo(MailReceiver(playerGuid), MailSender(MAIL_CREATURE, static_cast<uint32>(NPC_GAHZRANKA)));
+    });
 }
 
 void AddSC_boss_gahzranka()

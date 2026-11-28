@@ -139,7 +139,7 @@ instance_zulgurub::instance_zulgurub(Map* map) : ScriptedInstance(map),
 instance_zulgurub::~instance_zulgurub()
 {
     if (!m_gahzrankaSummoner.IsEmpty())
-        RefundGahzrankaSummon(m_gahzrankaSummoner, instance);
+        RefundGahzrankaSummon(m_gahzrankaSummoner);
 }
 
 void instance_zulgurub::Initialize()
@@ -252,7 +252,7 @@ void instance_zulgurub::UpdateGahzranka(uint32 diff)
 
     if (!summoned)
     {
-        RefundGahzrankaSummon(summoner, instance);
+        RefundGahzrankaSummon(summoner);
         return;
     }
 
@@ -404,7 +404,7 @@ void instance_zulgurub::UpdateEdgeOfMadness(uint32 diff)
         if (GameObject* brazier = GetSingleGameObjectFromStorage(GO_BRAZIER_OF_MADNESS, true))
             RestoreEdgeOfMadnessBrazier(*brazier);
         SaveEncounterProgress();
-        RefundEdgeOfMadnessSummon(summoner, instance);
+        RefundEdgeOfMadnessSummon(summoner);
     }
 }
 

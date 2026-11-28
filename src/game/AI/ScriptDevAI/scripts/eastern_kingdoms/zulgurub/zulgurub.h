@@ -61,8 +61,8 @@ enum
 static const float aMandokirDownstairsPos[3] = { -12196.30f, -1948.37f, 130.31f};
 static const float aArlokkWallShieldPos[3] = { -11494.76f, -1627.56f, 41.30f};
 
-void RefundGahzrankaSummon(ObjectGuid playerGuid, Map* map);
-void RefundEdgeOfMadnessSummon(ObjectGuid playerGuid, Map* map);
+void RefundGahzrankaSummon(ObjectGuid playerGuid);
+void RefundEdgeOfMadnessSummon(ObjectGuid playerGuid);
 
 struct EdgeOfMadnessProgress
 {

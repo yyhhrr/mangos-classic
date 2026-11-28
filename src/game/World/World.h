@@ -599,6 +599,9 @@ class World
 
         Messager<World>& GetMessager() { return m_messager; }
 
+        // Mail deliveries may be queued by map threads, including during map unload.
+        void QueueMailDelivery(std::function<void(World*)> const& delivery) { m_mailDeliveryQueue.AddMessage(delivery); }
+
         void IncrementOpcodeCounter(uint32 opcodeId); // thread safe due to atomics
 
         void LoadWorldSafeLocs() const;
@@ -722,6 +725,7 @@ class World
 #endif
 
         Messager<World> m_messager;
+        Messager<World> m_mailDeliveryQueue;
 
         // Opcode logging
         std::vector<std::atomic<uint32>> m_opcodeCounters;

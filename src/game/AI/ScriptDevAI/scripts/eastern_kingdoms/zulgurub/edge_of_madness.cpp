@@ -6,6 +6,7 @@
 #include "zulgurub.h"
 #include "Entities/Item.h"
 #include "Mails/Mail.h"
+#include "World/World.h"
 
 namespace
 {
@@ -55,7 +56,7 @@ struct EdgeOfMadnessMojo : public SpellScript
             instance->RestoreEdgeOfMadnessBrazier(*brazier);
         }
         if (paid)
-            RefundEdgeOfMadnessSummon(player->GetObjectGuid(), player->GetMap());
+            RefundEdgeOfMadnessSummon(player->GetObjectGuid());
     }
 
 private:
@@ -72,19 +73,22 @@ private:
 };
 }
 
-void RefundEdgeOfMadnessSummon(ObjectGuid playerGuid, Map* map)
+void RefundEdgeOfMadnessSummon(ObjectGuid playerGuid)
 {
-    Item* mojo = Item::CreateItem(ITEM_GURUBASHI_MOJO_MADNESS, 1);
-    if (!mojo)
+    sWorld.QueueMailDelivery([playerGuid](World*)
     {
-        sLog.outError("Could not create Edge of Madness summon refund for %s", playerGuid.GetString().c_str());
-        return;
-    }
+        Item* mojo = Item::CreateItem(ITEM_GURUBASHI_MOJO_MADNESS, 1);
+        if (!mojo)
+        {
+            sLog.outError("Could not create Edge of Madness summon refund for %s", playerGuid.GetString().c_str());
+            return;
+        }
 
-    mojo->SaveToDB();
-    MailDraft("Edge of Madness summoning material", "The ritual failed. Your Gurubashi Mojo Madness is enclosed.")
-        .AddItem(mojo)
-        .SendMailTo(MailReceiver(map->GetPlayer(playerGuid), playerGuid), MailSender(MAIL_NORMAL, 0u, MAIL_STATIONERY_GM));
+        mojo->SaveToDB();
+        MailDraft("Edge of Madness summoning material", "The ritual failed. Your Gurubashi Mojo Madness is enclosed.")
+            .AddItem(mojo)
+            .SendMailTo(MailReceiver(playerGuid), MailSender(MAIL_NORMAL, 0u, MAIL_STATIONERY_GM));
+    });
 }
 
 void AddSC_edge_of_madness()

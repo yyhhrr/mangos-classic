@@ -179,6 +179,8 @@ void World::CleanupsBeforeStop()
     UpdateSessions(1);                               // real players unload required UpdateSessions call
     sBattleGroundMgr.DeleteAllBattleGrounds();       // unload battleground templates before different singletons destroyed
     sMapMgr.UnloadAll();                             // unload all grids (including locked in memory)
+    // Instance teardown can queue refund mails after the last world update.
+    m_mailDeliveryQueue.Execute(this);
 }
 
 /// Find a session by its id
@@ -1554,6 +1556,7 @@ void World::Update(uint32 diff)
     _UpdateGameTime();
 
     GetMessager().Execute(this);
+    m_mailDeliveryQueue.Execute(this);
 
     ///-Update mass mailer tasks if any
     sMassMailMgr.Update();
