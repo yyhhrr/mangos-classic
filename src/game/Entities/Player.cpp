@@ -530,6 +530,7 @@ Player::Player(WorldSession* session): Unit(), m_taxiTracker(*this), m_mover(thi
     // group is initialized in the reference constructor
     SetGroupInvite(nullptr);
     m_groupUpdateMask = 0;
+    m_groupListPending = false;
 
     ClearHonorInfo();
 
@@ -3149,7 +3150,9 @@ void Player::AddNewMailDeliverTime(time_t deliver_time)
     if (deliver_time <= time(nullptr))                         // ready now
     {
         ++unReadMails;
-        SendNewMail();
+        // a client on a loading screen asks for the next mail time once it enters the world
+        if (IsInWorld())
+            SendNewMail();
     }
     else                                                    // not ready and no have ready mails
     {
@@ -17349,6 +17352,7 @@ void Player::HandleStealthedUnitsDetection()
                 if (target->GetTypeId() == TYPEID_UNIT)
                     BeforeVisibilityDestroy(static_cast<Creature*>(target));
                 ScheduleOutOfRange(target);
+                AfterVisibilityDestroy(target);
             }
         }
     }
@@ -18430,12 +18434,49 @@ void Player::BeforeVisibilityDestroy(Creature* creature)
     {
         if (!creature->GetMap()->IsDungeon() && !creature->IsCombatOnlyStealth() && creature->getThreatManager().HasThreat(this, true))
             getHostileRefManager().deleteReference(creature);
-        if (Pet* pet = GetPet())
-            if (pet->GetVictim() == creature)
-                pet->AttackStop();
     }
     if (GetPetGuid() == creature->GetObjectGuid() && static_cast<Creature*>(creature)->IsPet())
         static_cast<Pet*>(creature)->Unsummon(PET_SAVE_REAGENTS);
+}
+
+void Player::AfterVisibilityDestroy(WorldObject* target)
+{
+    if (!target->IsUnit())
+        return;
+
+    Unit* unit = static_cast<Unit*>(target);
+
+    // the units an AI drives for this player stop attacking and casting at a unit this player cannot see; called once
+    // the client has lost the unit, as CanControllingPlayerSee reads the client for a unit in stealth
+    auto stopActingOn = [unit](Unit* controlled)
+    {
+        if (controlled->GetVictim() != unit && !controlled->IsNonMeleeSpellCasted(false))
+            return;
+
+        if (controlled->CanControllingPlayerSee(unit))
+            return;
+
+        if (controlled->GetVictim() == unit)
+            controlled->AttackStop(true);
+
+        for (uint32 i = CURRENT_FIRST_NON_MELEE_SPELL; i < CURRENT_MAX_SPELL; ++i)
+            if (Spell* spell = controlled->GetCurrentSpell(CurrentSpellTypes(i)))
+                if (spell->m_targets.getUnitTargetGuid() == unit->GetObjectGuid())
+                    controlled->InterruptSpell(CurrentSpellTypes(i), false);
+    };
+
+    // its pet, guardians and charmed units, and theirs
+    CallForAllControlledUnits([&stopActingOn](Unit* controlled)
+    {
+        stopActingOn(controlled);
+        controlled->CallForAllControlledUnits(stopActingOn, CONTROLLED_PET | CONTROLLED_GUARDIANS | CONTROLLED_CHARM);
+    }, CONTROLLED_PET | CONTROLLED_GUARDIANS | CONTROLLED_CHARM);
+
+    // the guardians of its totems, the totems themselves being left to their own AI
+    CallForAllControlledUnits([&stopActingOn](Unit* totem)
+    {
+        totem->CallForAllControlledUnits(stopActingOn, CONTROLLED_GUARDIANS);
+    }, CONTROLLED_TOTEMS);
 }
 
 void Player::UpdateVisibilityOf(WorldObject const* viewPoint, WorldObject* target)
@@ -18456,6 +18497,8 @@ void Player::UpdateVisibilityOf(WorldObject const* viewPoint, WorldObject* targe
                 BeforeVisibilityDestroy(static_cast<Creature*>(target));
 
             LoseAtClient(guid, target, FindClientObject(guid));
+
+            AfterVisibilityDestroy(target);
 
             DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "UpdateVisibilityOf: %s out of range for player %u. Distance = %f", guid.GetString().c_str(), GetGUIDLow(), GetDistance(target));
         }
@@ -19570,12 +19613,31 @@ void Player::RemoveFromBattleGroundRaid()
 {
     // remove existing reference
     m_group.unlink();
-    if (Group* group = GetOriginalGroup())
+
+    if (!GetOriginalGroup())
+        return;
+
+    // the other members walk the original group from their own map threads: the player rejoins it in the world thread
+    sWorld.GetMessager().AddMessage([playerGuid = GetObjectGuid()](World* /*world*/)
     {
-        m_group.link(group, this);
-        m_group.setSubGroup(GetOriginalSubGroup());
-    }
-    SetOriginalGroup(nullptr);
+        Player* player = sObjectMgr.GetPlayer(playerGuid, false); // can be between two maps
+        if (!player || player->GetGroup())
+            return;
+
+        Group* group = player->GetOriginalGroup();
+        if (!group)
+            return;
+
+        player->m_group.link(group, player);
+        player->m_group.setSubGroup(player->GetOriginalSubGroup());
+        player->SetOriginalGroup(nullptr);
+        player->UpdateGroupLeaderFlag();
+        // a player between two maps, the usual case, gets the list with the other members on arrival
+        if (player->IsInWorld())
+            group->SendUpdate();
+        else
+            player->SetGroupListPending(true);
+    });
 }
 
 void Player::SetOriginalGroup(Group* group, int8 subgroup)

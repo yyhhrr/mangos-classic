@@ -2113,6 +2113,7 @@ class Player : public Unit
         void GetObjectsNotMetByCameraVisit(GuidVector& guids) const;
 
         void BeforeVisibilityDestroy(Creature* creature);
+        void AfterVisibilityDestroy(WorldObject* target);
 
         void ResetMap() override;
 
@@ -2188,6 +2189,8 @@ class Player : public Unit
         GroupReference& GetOriginalGroupRef() { return m_originalGroup; }
         uint8 GetOriginalSubGroup() const { return m_originalGroup.getSubGroup(); }
         void SetOriginalGroup(Group* group, int8 subgroup = -1);
+        bool IsGroupListPending() const { return m_groupListPending; }
+        void SetGroupListPending(bool pending) { m_groupListPending = pending; }
 
         GridReference<Player>& GetGridRef() { return m_gridRef; }
         MapReference& GetMapRef() { return m_mapRef; }
@@ -2468,6 +2471,7 @@ class Player : public Unit
         GroupReference m_originalGroup;
         Group* m_groupInvite;
         uint32 m_groupUpdateMask;
+        bool m_groupListPending;                            // group rejoined between two maps, its list is sent on arrival
 
         // Player summoning
         time_t m_summon_expire;

@@ -4178,7 +4178,12 @@ void Spell::SendInterrupted(SpellCastResult result) const
     data << uint8(result);
     m_trueCaster->SendMessageToSet(data, true);
 
-    data.Initialize(SMSG_SPELL_FAILED_OTHER, (8 + 4));
+    SendSpellFailedOther(result);
+}
+
+void Spell::SendSpellFailedOther(SpellCastResult /*result*/) const
+{
+    WorldPacket data(SMSG_SPELL_FAILED_OTHER, (8 + 4));
     data << m_trueCaster->GetObjectGuid();
     data << m_spellInfo->Id;
     m_trueCaster->SendMessageToSet(data, true);
@@ -4946,8 +4951,9 @@ SpellCastResult Spell::CheckCast(bool strict)
                             if ((!targetCreature->GetLootRecipientGuid().IsEmpty()) && !targetCreature->IsTappedBy(static_cast<Player*>(m_trueCaster)))
                                 return SPELL_FAILED_CANT_CAST_ON_TAPPED;
                     
-                    // Do not allow spells to complete which are targeting players that are invisible to the caster since the time of cast start
-                    if (!m_trueCaster->IsGameObject() && target->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PLAYER_CONTROLLED) && !IsPositiveEffectMask(m_spellInfo, affectedMask, m_trueCaster, target) && !target->IsVisibleForOrDetect(m_caster, m_trueCaster, false))
+                    // Do not allow spells to complete which are targeting units that are invisible to the caster since the time of cast start:
+                    // any unit for a cast sent by the client, a player-controlled unit for any cast
+                    if (!m_trueCaster->IsGameObject() && (m_clientCast || target->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PLAYER_CONTROLLED)) && !IsPositiveEffectMask(m_spellInfo, affectedMask, m_trueCaster, target) && !target->IsVisibleForOrDetect(m_caster, m_trueCaster, false, false, false))
                         return SPELL_FAILED_BAD_TARGETS;
                 }
 
@@ -7963,7 +7969,8 @@ bool Spell::IsEffectWithImplementedMultiplier(uint32 effectId) const
 void Spell::StopCast(SpellCastResult castResult)
 {
     SendCastResult(castResult);
-    SendInterrupted(castResult);
+    // the others see a cast that fails at its end through SMSG_SPELL_FAILED_OTHER only
+    SendSpellFailedOther(castResult);
     finish(false);
     m_trueCaster->DecreaseCastCounter();
     SetExecutedCurrently(false);
